@@ -335,6 +335,71 @@ enum Diagnostics {
         print(okPreview && okIntro ? "\n✓ ผ่าน" : "\n✗ ไม่ผ่าน")
     }
 
+    /// Marker edits DURING playback — `Player.remode`, which had no coverage at all.
+    ///
+    /// The case that matters: pulling Intro End back behind the playhead used to flip the mode to
+    /// `.free`, which skipped the intro bound, left `want` at the file length and passed the
+    /// "moved outward" test against the OLD boundary — so the node was rescheduled to the end of
+    /// the file and the whole song played out. Shortening the intro made playback longer.
+    /// Read-only (local Player, local config).
+    static func remodeTest() {
+        let songs = Library.scan()
+        guard let s = songs.first else { print("no songs"); return }
+        let p = Player()
+        p.load(url: Library.url(s))
+        p.muteForTest()
+        guard p.duration > 40 else { print("✗ song too short to test (need > 40s)"); return }
+        print(String(format: "song: %@  dur=%.2f", Library.baseName(s), p.duration))
+        var ok = true
+
+        func run(_ title: String, introEnd0: Double, editTo: Double, at trigger: Double,
+                 mustStopBy: Double) {
+            var c = SongConfig(); c.introStart = 2; c.introEnd = introEnd0; c.ignoreEnd = false
+            p.configProvider = { c }
+            var stopped: Double?
+            var maxSeen = 0.0
+            var edited = false
+            p.onAutoStop = { stopped = p.position }
+            p.seek(to: c.introStart, config: c)
+            p.mode == .idle ? () : ()
+            p.toggleStart(config: c)
+            let deadline = Date().addingTimeInterval(mustStopBy + 8)
+            while Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+                if p.position > maxSeen { maxSeen = p.position }
+                if !edited, p.position >= trigger {
+                    edited = true
+                    c.introEnd = editTo              // the marker edit, mid-playback
+                    p.remode(config: c)
+                }
+                if stopped != nil { break }
+            }
+            let good = stopped != nil && maxSeen <= mustStopBy + 0.15
+            if !good { ok = false }
+            print(String(format: "  %@", title))
+            print(String(format: "     edited introEnd %.2f -> %.2f at ~%.2fs", introEnd0, editTo, trigger))
+            print(String(format: "     stoppedAt=%@ maxReached=%.3f  must be <= %.2f  %@",
+                         stopped.map { String(format: "%.3f", $0) } ?? "— NEVER STOPPED",
+                         maxSeen, mustStopBy, good ? "ok" : "✗ FAIL"))
+            print(String(format: "     mode=%@ playing=%@", "\(p.mode)", p.isPlaying ? "yes" : "no"))
+            p.pause()
+        }
+
+        // 1) the dangerous one: pull Intro End BEHIND the playhead.
+        //    Must stop at once. Before the fix this ran to the end of the file.
+        run("pull Intro End behind the playhead", introEnd0: 20, editTo: 3, at: 5, mustStopBy: 5.6)
+
+        // 2) the legitimate one: push Intro End OUT mid-intro. Must re-arm at the NEW boundary,
+        //    which is the whole reason remode exists — so fix 1 must not have broken it.
+        run("push Intro End outward", introEnd0: 6, editTo: 12, at: 3, mustStopBy: 12.0)
+
+        // 3) tighten but stay AHEAD of the playhead. Must stop at the new, earlier boundary.
+        run("tighten Intro End, still ahead", introEnd0: 20, editTo: 8, at: 4, mustStopBy: 8.0)
+
+        print(ok ? "\n✓ ผ่าน — แก้ marker ตอนเล่นอยู่ ไม่ทำให้เล่นเลย Intro End"
+                 : "\n✗ ไม่ผ่าน — มีกรณีที่เล่นเลย Intro End")
+    }
+
     /// The typed marker field's parser. Read-only, no audio.
     static func timeFmt() {
         print("round-trip  fmtClock -> parseClock")

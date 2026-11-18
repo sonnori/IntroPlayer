@@ -260,6 +260,7 @@ INTROPLAYER_DIAG=1 $BIN --preflight    # the handover checklist, per round (read
 INTROPLAYER_DIAG=1 $BIN --titles       # raw filename vs cleaned display title (read-only)
 INTROPLAYER_DIAG=1 $BIN --handoff      # export → on-site edit → plan → accept AND reject
 INTROPLAYER_DIAG=1 $BIN --previewtest  # bounded hook audition stops AT hook+6; intro still arms after
+INTROPLAYER_DIAG=1 $BIN --remodetest   # marker edits DURING playback must never outlive Intro End
 INTROPLAYER_DIAG=1 $BIN --timefmt      # typed-field parser: round-trip, accepts, rejects (read-only)
 INTROPLAYER_DIAG=1 $BIN --overview     # overview strip: same data as columnPeaks, caches independent
 ```
@@ -790,6 +791,17 @@ Keyed by **path relative to `songs/`** (a bare filename for loose files). Exampl
 - `idle` — stopped/ready.
 - `intro` — playing the intro; `checkIntroEnd` fades+stops at `introEnd` (unless `ignoreEnd`).
 - `reveal` — playing from the hook; **no** auto-stop. This is the on-camera verb.
+**`remode` may only ARM the guard, never disarm it.** It re-derives the mode after a marker edit,
+but assigns it **only when the result is `.intro`**. Assigning unconditionally was a
+core-requirement violation: pulling Intro End back *behind* the playhead — one typed value, one
+drag — gave `.free`, which skipped the intro bound, left `want` at the file length, and passed the
+"moved outward" test against the OLD boundary, so the node was rescheduled to the end of the file.
+**Shortening the intro made playback longer, and the whole song went out on camera.** Holding
+`.intro` lets `tick()` handle it: the playhead is already past the new Intro End, so `beginFade`'s
+"already late" branch cuts at once. A *seek* still re-derives freely — that is a transport command
+the operator can hear; a marker edit is not one. `--remodetest` covers all three directions, and
+reverting the single line makes it report `NEVER STOPPED  mode=free  playing=yes`.
+
 - `preview` — a *bounded* audition of the hook (`G`), stopping at `hook + previewSec`. Bounded in
   `play(from:)` the same structural way the intro is — the node has nothing to render past it —
   so it does not depend on the guard timer either. `remode` ignores it, so a hook nudge mid-preview
@@ -884,21 +896,46 @@ Three ways to set a marker, each for a precision the others cannot reach:
 always means "the one I am working on" and there is no mode to remember. `M` cycles it. It is
 carried in the UI by *width and an outline*, never a new hue (§6d: one meaning per hue).
 
-The nudge is deliberately **not** behind the two-press rule below: a 0.01 s step cannot put a song
-on camera, and a confirmation per 10 ms of travel would make the feature pointless.
+The nudge is deliberately **not** behind the two-press rule below, but be precise about why it is
+safe: it is not the step size. Key autorepeat is suppressed for the whole app (`isARepeat` is
+checked before the shortcut switch), and `remode` bails while a fade is running, so you cannot
+slew Intro End across the playhead faster than the playhead advances. The *typed field* has no such
+limit, which is why the `remode` rule in §10 is what actually protects this.
 
-**The typed field holds its text in local `@State`, committed on Return or on blur — never per
-keystroke.** Bound straight to the model it would push an undo snapshot per character and write
-half-typed numbers; and since `updateConfig` clamps `introEnd >= introStart + minIntro`, the lone
-`1` on the way to `1:20` would drag the other marker with it. `parseClock` **rejects** rather than
-clamps (`1:75`, `-5`, `12s` → nil, leaving the marker alone) — verify with `--timefmt`.
+It uses `updateConfig(commit: false)` plus a 350 ms debounce, exactly like the waveform drag:
+committing calls `player.remode`, which re-schedules the node once the accumulated move passes
+0.05 s — an audible dropout every sixth keypress, during the one task the key exists for. It also
+`cancelPending()`s, because a pending `I`/`O`/`H` holds the position of its **first** press and
+confirming it after a nudge would write that older value and discard the nudge.
+
+**The typed field commits on Return. Losing focus CANCELS.** Both halves are load-bearing:
+
+- Not per keystroke — that would push an undo snapshot per character, and since `updateConfig`
+  clamps `introEnd >= introStart + minIntro`, the lone `1` on the way to `1:20` would drag the
+  other marker with it.
+- Not on blur either, which looked friendlier and was **three** ways to destroy a signed-off
+  marker: `Esc` belongs to the focused text view, so it ends editing and the blur then *commits*
+  the typo it was meant to discard; a half-typed `1` plus a stray click wrote a 1-second intro;
+  and clicking a field merely to **read** the exact time wrote it straight back — which stamps
+  `configured`, dropping the song out of the `Return`/`Tab` sweep **and** out of the pre-flight
+  warnings, so an unreviewed guess could pass the handover check. Snapping back is visible; a
+  silent write is not.
+- `dirty` is **derived** (`text != synced`), never a stored flag, and `commit()` additionally
+  refuses when the song changed under it (`model.current != path`) or when the value is unchanged
+  (`SongConfig.same`). Selecting a song in the list does **not** move first responder, so without
+  that path check a field focused on song A committed A's number onto song B.
+
+`parseClock` **rejects** rather than clamps (`1:75`, `-5`, `12s` → nil) — verify with `--timefmt`.
+`setMarkerTime` refuses outright when `player.duration == 0` (an unreadable file): `Store.round2`
+multiplies by 100, so a large enough *finite* value becomes `+infinity`, after which **every**
+later save fails `isValidJSONObject` with nothing on screen naming the song at fault.
 
 > A focused text field makes `NSApp.keyWindow?.firstResponder` an `NSTextView`, which the key
 > monitor treats as "typing" and passes everything through. **Space is carved out of that** (as
 > pause only, outside sheets): the time fields are numeric so Space is never valid input there, and
 > a focus left in a field must never be the reason a buzz cannot be stopped.
 
-### The two-press rule (`I` / `O` / `H` / `E`)
+### The two-press rule (`I` / `O` / `H` / `E` / `G`)
 
 These four keys were instant, silent and irreversible, and they sit on the same keyboard as the
 four keys the operator hammers during a take. **`E` is the worst**: keyCode 14 is next to `R` (15),
@@ -911,6 +948,14 @@ and it disarms the intro-end stop outright — which plays the whole song on cam
 - **The committed value is the position captured at the FIRST press.** Using the second press's
   position would let 2.5 s of playback drift into the marker and silently set the wrong value —
   this is the detail that would make the whole feature quietly wrong.
+
+**`G` is in this set too**, and it is the only member whose slip is *audible* rather than a wrong
+number: keyCode 5 sits next to `H` (4) — a key the setter presses *during* playback by design —
+and `G` jumps to the chorus and plays it. Its guard is narrower: confirm only while
+`isPlaying && mode == .intro`, i.e. while a question is actually on air. Every other state is
+immediate, which is the whole of the hook-hunting workflow (you audition from a parked playhead).
+`R` is not guarded and should not be: §10 calls Reveal the on-camera verb, something the GM means
+to press.
 
 Why keyed on `isPlaying` rather than a mode toggle: a mode has to be remembered, and the day
 somebody forgets to switch it is the day it does not help.
@@ -1059,6 +1104,33 @@ somebody forgets to switch it is the day it does not help.
 - `Analysis.overviewPeaks` had to be a second cache, and had to index the envelope the same way
   `columnPeaks` does. Both reasons are measured in §8b — getting either wrong is invisible in a
   screenshot and obvious in a dropped frame or a mis-placed marker.
+- **`remode` disarmed the intro-end guard when a marker edit crossed the playhead** — the worst
+  defect this app has had, and it predated the typed field that made it one keystroke away. See
+  §10 and `--remodetest`.
+- `seek` assigned `mode` **after** calling `play(from:)`, which reads `mode` to pick the segment
+  bound. A seek during a hook audition was therefore still bounded by `previewEnd`: past it,
+  `frames == 0` took the `pause()` path *after* `node.stop()`, re-creating the §12 defect where
+  the playhead jumped back to the previous pause. Every caller must set `mode` first.
+- **`1` and `2` were dead while a marker time field held focus.** This commit created that state —
+  before it, every `TextField` lived inside a sheet. A buzz that cannot be *scored* loses the log
+  event the edit room works from (§8d), which is the same class of failure as a buzz that cannot
+  be paused. Space, `1` and `2` are all carved out of the "typing" branch while playback runs.
+- `G` put six seconds of the chorus on air from a single unconfirmed press, on the key next to
+  `H`. Two reviewers found this independently. See the two-press section in §11.
+- The nudge used `updateConfig(commit: true)`, so `remode` re-scheduled the node every sixth
+  keypress — an audible dropout during the one task the key exists for.
+- `confirmDestructive` made the **destructive** button the default, and two of its callers now sit
+  behind a `⋯` menu where Space activates the highlighted item. One Space could open the alert and
+  confirm it. Return/Space are bound to Cancel.
+- The log pane **unmounts** the song list, so closing it discarded the scroll offset and left a
+  60-song round showing track 1 with the selection off-screen — the exact problem the
+  `ScrollViewReader` was added for. Both layouts scroll to `current` on appear.
+- `OverviewStrip` takes 40 pt of fixed height from a `VStack` whose only flexible child is the
+  waveform, which had no floor — it could reach 0, where the Canvas draws nothing and the marker
+  drag targets vanish. `minHeight: 160`.
+- `copyConfig(from:)` overwrote five signed-off fields in one click with **no undo entry**.
+- The focus-hint line was conditional, so focusing a card moved the two below it ~14 pt under the
+  cursor. Reserved height. (Same family as the transport buttons that used to slide.)
 
 **Web version:**
 - `loadWaveform` opened with `if(decoding) return;`, which dropped the **newer** request: clicking
@@ -1139,6 +1211,7 @@ cp config.json log.json /tmp/
 INTROPLAYER_DIAG=1 $BIN --analyse     # detection + loudness per song
 INTROPLAYER_DIAG=1 $BIN --playtest    # overshoot must be 0.000, ignoreEnd must still bypass
 INTROPLAYER_DIAG=1 $BIN --previewtest # hook audition stops at hook+6; intro still arms afterwards
+INTROPLAYER_DIAG=1 $BIN --remodetest  # marker edits mid-playback: 3 cases, none may outlive Intro End
 INTROPLAYER_DIAG=1 $BIN --timefmt     # typed-field parser
 INTROPLAYER_DIAG=1 $BIN --overview    # strip data matches columnPeaks; caches stay independent
 INTROPLAYER_DIAG=1 $BIN --preflight   # the handover checklist

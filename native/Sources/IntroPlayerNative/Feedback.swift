@@ -69,5 +69,10 @@ func confirmDestructive(title: String, body: String, ok: String) -> Bool {
     a.addButton(withTitle: ok)
     a.addButton(withTitle: "ยกเลิก")
     a.buttons.first?.hasDestructiveAction = true
+    // Return and Space must land on CANCEL, not on the destructive button. NSAlert makes the
+    // first-added button the default, and two of these alerts are now reached through a `⋯` menu
+    // — where Space activates the highlighted item, so one Space could open the alert AND confirm.
+    a.buttons.first?.keyEquivalent = ""
+    a.buttons.last?.keyEquivalent = "\r"
     return a.runModal() == .alertFirstButtonReturn
 }

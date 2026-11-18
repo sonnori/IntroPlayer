@@ -31,7 +31,12 @@ struct CenterView: View {
                 // rendered 3-4px tall, so "where does the music start" was unreadable — and the
                 // marker drag target was a sliver.
                 WaveformView()
-                    .frame(maxHeight: .infinity)
+                    // The strip below takes 40pt of fixed height out of this VStack, and the
+                    // waveform is its only flexible child — with no floor it absorbs the whole
+                    // shortfall and can reach 0, where the Canvas draws nothing and the marker
+                    // drag targets vanish. Worst case is the minimum window with the save-failure
+                    // bar and the receive banner both showing and the transport wrapped to 3 rows.
+                    .frame(maxHeight: .infinity).frame(minHeight: 160)
                     .background(Palette.panel2)
                     // A stroke overlay is hit-testable, so this 1pt ring was eating seek clicks
                     // along the very edge of the waveform.
@@ -96,7 +101,13 @@ struct CenterView: View {
         let c = model.config()
         let pending = model.pending
         return HStack(spacing: 14) {
-            if let pm = pending {
+            if model.pendingPreview {
+                Text("กด G อีกครั้ง").font(Typo.font(17, .bold)).foregroundStyle(Palette.purple)
+                Text("→ ฟัง Hook ที่ \(String(format: "%.2f", c.hook))s")
+                    .font(Typo.font(13, mono: true)).foregroundStyle(Palette.text)
+                Text("· Intro กำลังออกอยู่ — เสียงจะกระโดดไปท่อนเฉลย")
+                    .font(Typo.font(11)).foregroundStyle(Palette.muted)
+            } else if let pm = pending {
                 // A proposal, not a change. Nothing has been written yet.
                 Text("กด \(keyHint(pm.field)) อีกครั้ง")
                     .font(Typo.font(17, .bold)).foregroundStyle(Palette.cyan)
@@ -106,8 +117,10 @@ struct CenterView: View {
                     .font(Typo.font(11)).foregroundStyle(Palette.muted)
             } else if model.previewArmed {
                 Text("♪ ฟัง Hook").font(Typo.font(17, .bold)).foregroundStyle(Palette.purple)
-                Text(String(format: "หยุดเองที่ %.2fs", min(model.player.duration,
-                                                            c.hook + Player.previewSec)))
+                // From the player, not recomputed from `c.hook` — moving the hook mid-audition
+                // changes the config but not the audio, and this label sits next to a countdown
+                // that reads the real value.
+                Text(String(format: "หยุดเองที่ %.2fs", model.previewStopAt ?? 0))
                     .font(Typo.font(13, mono: true)).foregroundStyle(Palette.text)
                 Text("· R = เล่นเฉลยจริง (ไม่หยุด)")
                     .font(Typo.font(11)).foregroundStyle(Palette.muted)
@@ -127,13 +140,13 @@ struct CenterView: View {
             Spacer()
             // Armed has to be PROVEN by a moving number, not asserted by a label. `secondsToStop`
             // covers both bounds, so a hook audition counts down too rather than reading as "—".
-            if let left = model.secondsToStop, pending == nil {
+            if let left = model.secondsToStop, pending == nil, !model.pendingPreview {
                 Text(String(format: "%.1f", left))
                     .font(Typo.font(28, .semibold, mono: true))
                     .foregroundStyle(model.previewArmed ? Palette.purple
                                      : (left < 3 ? Palette.amber : Palette.text))
                 Text("วิ").font(Typo.font(13)).foregroundStyle(Palette.muted)
-            } else if pending == nil {
+            } else if pending == nil, !model.pendingPreview {
                 Text("—").font(Typo.font(28, .semibold))
                     .foregroundStyle(Palette.muted.opacity(0.5))
             }
@@ -141,14 +154,16 @@ struct CenterView: View {
         .padding(.horizontal, 14)
         .frame(height: 44)
         .frame(maxWidth: .infinity)
-        .background(pending != nil ? Palette.cyan.opacity(0.14)
+        .background(model.pendingPreview ? Palette.purple.opacity(0.16)
+                    : pending != nil ? Palette.cyan.opacity(0.14)
                     : disarmed ? Palette.amber.opacity(0.14)
                     : model.previewArmed ? Palette.purple.opacity(0.12) : Palette.panel2)
         .overlay(RoundedRectangle(cornerRadius: 8)
-            .stroke(pending != nil ? Palette.cyan
+            .stroke(model.pendingPreview ? Palette.purple
+                    : pending != nil ? Palette.cyan
                     : disarmed ? Palette.amber
                     : model.previewArmed ? Palette.purple : Palette.line,
-                    lineWidth: pending != nil || disarmed ? 2 : 1)
+                    lineWidth: model.pendingPreview || pending != nil || disarmed ? 2 : 1)
             .allowsHitTesting(false))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
@@ -213,7 +228,7 @@ struct CenterView: View {
             // Distinct from Reveal on purpose: same destination, but this one stops itself, so it
             // is the one to use while hunting for the hook. Reveal is the on-camera verb.
             actionButton("♪ ฟัง Hook", "G", Palette.panel3, Palette.text, width: 170) {
-                model.previewHook()
+                model.requestPreview()
             }
             .pulseTarget(PulseID.preview)
             actionButton("⟲ Reset", "S", Palette.panel2, Palette.text, width: 150) {

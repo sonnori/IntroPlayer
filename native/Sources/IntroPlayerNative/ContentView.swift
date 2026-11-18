@@ -217,18 +217,31 @@ struct ContentView: View {
             let sheetUp = model.showHandover || model.importPlan != nil
 
             if NSApp.keyWindow?.firstResponder is NSTextView {
-                // Typing. The marker time fields are numeric, so Space is never valid input
-                // there — and a focus left in a field must never be the reason a buzz cannot be
-                // stopped. Inside a sheet the setter-name field takes real text, so Space is left
-                // alone there.
-                if !sheetUp, e.keyCode == 49, model.player.isPlaying {
-                    model.player.toggleStart(config: model.config())
-                    return nil
+                // Typing. But "a text field holds focus in the MAIN window" is a state the typed
+                // marker fields introduced, and in it the take must still be driveable: nobody
+                // types a time while a question is on air, so while playback is running the
+                // numeric fields do not get to own these keys.
+                //
+                // Space, because a focus left in a field must never be why a buzz cannot be
+                // stopped. `1`/`2`, because a buzz that cannot be SCORED is the same failure —
+                // no sting, and no log event, which is the one file the edit room works from
+                // (§8d). Inside a sheet the setter-name field takes real text, so it keeps them.
+                if !sheetUp, model.player.isPlaying {
+                    switch e.keyCode {
+                    case 49:
+                        model.player.toggleStart(config: model.config())
+                        return nil
+                    case 18, 83:
+                        model.score("correct"); model.pulse(PulseID.correct); return nil
+                    case 19, 84:
+                        model.score("wrong"); model.pulse(PulseID.wrong); return nil
+                    default: break
+                    }
                 }
                 return e
             }
             if e.keyCode == 53 {                                                 // Esc
-                if model.pending != nil { model.cancelPending(); return nil }
+                if model.pending != nil || model.pendingPreview { model.cancelPending(); return nil }
                 if model.importPlan != nil { model.importPlan = nil; return nil }
                 if model.showHandover { model.showHandover = false; return nil }
                 if model.showLog { model.showLog = false; return nil }   // pane, not a sheet
@@ -271,7 +284,7 @@ struct ContentView: View {
             case 36: model.confirmCurrent()                                      // Return
             case 48: model.nextNeedingReview()                                   // Tab
             // Audition the hook and stop. `R` stays unbounded — that one is on camera.
-            case 5:  model.previewHook(); model.pulse(PulseID.preview)                     // G
+            case 5:  model.requestPreview(); model.pulse(PulseID.preview)                  // G
             case 46: model.cycleFocusMarker()                                              // M
             case 6:  model.zoomIntro(); model.pulse(PulseID.zoomIntro)                     // Z
             case 27, 78: model.zoomBy(1.6); model.pulse(PulseID.zoomOut)                   // -
@@ -333,12 +346,15 @@ struct SongListView: View {
                         }
                         .disabled(model.orphanCount == 0)
                     } label: {
+                        // Sized INSIDE the label: an outer `.frame` leaves the Menu's own control
+                        // at its intrinsic ~14pt glyph width, centred in a dead 38pt pill (§6c).
                         Text("⋯").font(Typo.font(13, .semibold))
+                            .frame(width: 38, height: 26)
+                            .contentShape(Rectangle())
                     }
                     .menuStyle(.borderlessButton)
                     .menuIndicator(.hidden)
-                    .frame(width: 38)
-                    .padding(.vertical, 2)
+                    .fixedSize()
                     .background(Palette.panel2)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.line)
                         .allowsHitTesting(false))
@@ -375,6 +391,10 @@ struct SongListView: View {
                         guard let cur else { return }
                         withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(cur, anchor: .center) }
                     }
+                    // The log PANE unmounts this list, so its scroll offset is gone when it comes
+                    // back while `current` has not changed — closing the log left a 60-song round
+                    // showing track 1 with the selection off-screen. A sheet unmounted nothing.
+                    .onAppear { if let c = model.current { proxy.scrollTo(c, anchor: .center) } }
                 }
             }
         }
@@ -469,6 +489,10 @@ struct ColumnView: View {
                 .onChange(of: model.current) { cur in
                     guard let cur, list.contains(cur) else { return }
                     withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(cur, anchor: .center) }
+                }
+                // See the narrow layout's note: the log pane unmounts the list.
+                .onAppear {
+                    if let c = model.current, list.contains(c) { proxy.scrollTo(c, anchor: .center) }
                 }
             }
         }

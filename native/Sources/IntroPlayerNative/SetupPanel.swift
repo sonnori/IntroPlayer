@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct SetupPanel: View {
@@ -86,8 +87,10 @@ struct SetupPanel: View {
                 RoundedRectangle(cornerRadius: 3).fill(m.color).frame(width: 12, height: 12)
                 Text(m.label).font(Typo.font(13, .semibold))
                 Spacer()
-                if let f = m.field {
-                    MarkerTimeField(field: f, value: c[keyPath: m.key])
+                if let f = m.field, let p = model.current {
+                    // `.id(p)` so the field's @State and focus reset with the song rather than
+                    // carrying one song's half-typed text into the next.
+                    MarkerTimeField(field: f, value: c[keyPath: m.key], path: p).id(p)
                 } else {
                     Text(fmtSec(c[keyPath: m.key])).font(Typo.font(15, mono: true))
                 }
@@ -130,7 +133,8 @@ struct SetupPanel: View {
                     } label: { Text("🎯").frame(width: 38, height: 38).contentShape(Rectangle()) }
                     .buttonStyle(PressStyle())
                     .background(Color(red: 0.071, green: 0.188, blue: 0.251))
-                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color(red: 0.165, green: 0.42, blue: 0.502)))
+                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color(red: 0.165, green: 0.42, blue: 0.502))
+                        .allowsHitTesting(false))
                     .clipShape(RoundedRectangle(cornerRadius: 7))
                     .help("หาจุดที่เพลงเริ่มดังให้อัตโนมัติ แล้วเลื่อนทั้งช่วง Intro ตามไป")
                 }
@@ -141,7 +145,8 @@ struct SetupPanel: View {
                     .buttonStyle(PressStyle())
                     .foregroundStyle(Palette.purple)
                     .background(Palette.panel)
-                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(Palette.purple.opacity(0.55)))
+                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(Palette.purple.opacity(0.55))
+                        .allowsHitTesting(false))
                     .clipShape(RoundedRectangle(cornerRadius: 7))
                     .pulseTarget(PulseID.preview, corner: 7)
                     .help("ฟัง Hook \(Int(Player.previewSec)) วิแล้วหยุดเอง (G) — ไม่เหมือน Reveal ที่เล่นต่อ")
@@ -165,10 +170,12 @@ struct SetupPanel: View {
                 Text("🎯 ตั้งให้อัตโนมัติ — ปรับเองได้ตามใจ")
                     .font(Typo.font(10)).foregroundStyle(Palette.cyan)
             }
-            if m.field == model.focusMarker {
-                Text("Shift+←/→ ขยับทีละ 0.01s · M สลับไปตัวอื่น")
-                    .font(Typo.font(10)).foregroundStyle(Palette.muted)
-            }
+            // Reserved height, always present. Showing it only on the focused card moved the two
+            // cards below it by ~14pt under the cursor every time focus changed — the same family
+            // as the transport buttons that used to slide when playback started (§12).
+            Text(m.field == model.focusMarker ? "Shift+←/→ ขยับทีละ 0.01s · M สลับไปตัวอื่น" : " ")
+                .font(Typo.font(10)).foregroundStyle(Palette.muted)
+                .frame(height: 14, alignment: .leading)
         }
         .padding(12)
         .background(Palette.panel2)
@@ -180,7 +187,14 @@ struct SetupPanel: View {
             .allowsHitTesting(false))
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .contentShape(Rectangle())
-        .onTapGesture { if let f = m.field { model.focus(f) } }
+        .onTapGesture {
+            guard let f = m.field else { return }
+            model.focus(f)
+            // Also drop the caret. Without this, clicking card B's background while card A's text
+            // field held focus drew the focus ring on B, left A's cyan caret border lit, and sent
+            // Shift+→ to A as a text selection — three disagreeing claims about where focus was.
+            NSApp.keyWindow?.makeFirstResponder(nil)
+        }
     }
 
     private func loudnessBlock(_ c: SongConfig) -> some View {
@@ -334,9 +348,21 @@ struct MarkerTimeField: View {
     @EnvironmentObject var model: AppModel
     let field: MarkerField
     let value: Double
+    /// The song this field was built for. Checked again at commit time — see `commit()`.
+    let path: String
 
     @State private var text = ""
+    /// The last text written here programmatically. `dirty` is the difference between the two, so
+    /// "has the operator typed something" is **derived, never stored** — the same reasoning as
+    /// `onsiteEdits` deriving from `base` instead of a flag (§8e): a flag can go out of sync and
+    /// this one going out of sync writes a wrong marker.
+    @State private var synced = ""
     @FocusState private var focused: Bool
+
+    /// Unsaved keystrokes are in this field.
+    private var dirty: Bool { text != synced }
+
+    private func sync(_ v: Double) { let s = fmtClock(v); text = s; synced = s }
 
     var body: some View {
         TextField("", text: $text)
@@ -346,27 +372,50 @@ struct MarkerTimeField: View {
             .frame(width: 88)
             .padding(.horizontal, 7).padding(.vertical, 4)
             .background(focused ? Palette.panel : Palette.panel3)
+            // Amber while there are uncommitted keystrokes — the field is showing something the
+            // song does not have. Only Return commits it, so this state has to be visible.
             .overlay(RoundedRectangle(cornerRadius: 6)
-                .stroke(focused ? Palette.cyan : Palette.line)
+                .stroke(dirty ? Palette.amber : (focused ? Palette.cyan : Palette.line),
+                        lineWidth: dirty ? 2 : 1)
                 .allowsHitTesting(false))
             .clipShape(RoundedRectangle(cornerRadius: 6))
             .focused($focused)
             .onSubmit { commit(); focused = false }
-            .onAppear { text = fmtClock(value) }
-            // While it is not being edited the field has to track the waveform drag, the ±
-            // buttons, an undo and an import — anything that moves the marker from elsewhere.
-            .onChange(of: value) { v in if !focused { text = fmtClock(v) } }
-            .onChange(of: focused) { f in
-                if f { model.focus(field); text = fmtClock(value) } else { commit() }
-            }
-            .help("พิมพ์ 1:23.45 หรือ 83.45 แล้วกด Enter · พิมพ์ผิดจะคืนค่าเดิมให้")
+            .onAppear { sync(value) }
+            // An UNTYPED field must keep tracking the waveform drag, the ± buttons, an undo and
+            // an import — whether or not it happens to hold focus. This used to be gated on
+            // `!focused`, which meant merely clicking into a field froze its display and the
+            // blur then wrote the frozen value back, silently reverting the drag.
+            .onChange(of: value) { v in if !dirty { sync(v) } }
+            // **Return commits; losing focus CANCELS.** Committing on blur looked friendlier and
+            // was three separate ways to destroy a signed-off marker: `Esc` belongs to the text
+            // view, so it ended editing and the blur then committed the typo it was meant to
+            // discard; a `1` on the way to `1:20` followed by a stray click wrote a 1-second
+            // intro; and clicking a field merely to READ the exact time wrote it straight back,
+            // which stamps `configured` and drops the song out of the review sweep (§11) and out
+            // of the pre-flight warnings. Snapping back is visible; a silent write is not.
+            .onChange(of: focused) { f in if f { model.focus(field) } else { sync(value) } }
+            .help("พิมพ์ 1:23.45 หรือ 83.45 แล้ว **กด Enter** · คลิกออกหรือกด Esc = ยกเลิก")
     }
 
     private func commit() {
+        // Nothing typed, nothing to write. Without this, clicking into a field and clicking away
+        // re-wrote the marker — and `updateConfig` sets `configured`, which drops the song out of
+        // the `Tab`/`Return` review sweep and out of the pre-flight warnings. A wrong value could
+        // get through the handover check having never been looked at.
+        guard dirty else { sync(value); return }
+        // The selection can move while this field holds focus: clicking a song row is a SwiftUI
+        // tap gesture and does not take first responder away. Writing then would put THIS song's
+        // text onto whatever song is now current. `.id(path)` at the call site already rebuilds
+        // the field per song; this is the guard that does not depend on remembering to keep it.
+        guard model.current == path else { sync(value); return }
         // Reject rather than clamp: a typo leaves the marker exactly where it was, which is the
         // behaviour you want from a field sitting next to a question that is already signed off.
-        guard let t = parseClock(text) else { text = fmtClock(value); return }
+        guard let t = parseClock(text) else { sync(value); return }
+        // An unchanged value is not an edit. `updateConfig` stamps `configured`/`auto`, so
+        // committing a no-op would still silently mark the song as reviewed.
+        guard !SongConfig.same(t, value) else { sync(value); return }
         model.setMarkerTime(field, t)
-        if let k = field.timeKey { text = fmtClock(model.config()[keyPath: k]) }
+        if let k = field.timeKey { sync(model.config()[keyPath: k]) }
     }
 }

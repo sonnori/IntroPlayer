@@ -56,9 +56,22 @@ final class AppModel: ObservableObject {
     /// `I`/`O`/`H`, a typed value or a ± press — so the nudge always means "the one I am working
     /// on" without a mode anybody has to remember. `M` cycles it explicitly.
     @Published var focusMarker: MarkerField = .introStart
+    /// `G` pressed once while the intro is on air. Same reasoning as `pending` below: the key
+    /// puts the chorus through the stage PA, and keyCode 5 sits next to `H` (4), which the setter
+    /// does press mid-playback.
+    @Published var pendingPreview = false
+    private var pendingPreviewTask: Task<Void, Never>?
     /// One hundredth of a second: the precision markers are actually stored at. The ± buttons
     /// deliberately stay at 0.1 s — this is the step you cannot get from them or from a drag.
     static let nudgeStep: Double = 0.01
+    /// Hard ceiling on any stored time, matching `Analysis`'s own implausible-duration limit.
+    ///
+    /// This is not cosmetic. `Store.round2` computes `(v * 100).rounded() / 100`, which overflows
+    /// to **+infinity** for any finite `v` above ~1.8e306 — and `saveNow` then fails
+    /// `isValidJSONObject` on EVERY later save, so the whole session's markers stop reaching disk
+    /// with nothing naming the song at fault. `isFinite` on the input is not enough, because the
+    /// input is finite; the multiply is what overflows.
+    static let maxTime: Double = 4 * 3600
     /// 2 s is tight for someone watching the stage rather than the screen; the only cost of a
     /// longer window is a longer-lived ghost marker.
     static let pendingWindow: Double = 2.5
@@ -286,9 +299,18 @@ final class AppModel: ObservableObject {
         pushUndo(p)
         var c = store.config(for: p)
         mutate(&c)
-        c.introStart = max(0, c.introStart)
+        // Upper bounds first, so the minIntro nudge below cannot push introEnd back over them.
+        // `introEnd` had no upper bound at all before: setting introStart to the end of the song
+        // sent introEnd to `duration + 0.5`, i.e. past the file.
+        c.introStart = min(max(0, c.introStart), AppModel.maxTime)
+        c.introEnd = min(max(0, c.introEnd), AppModel.maxTime)
+        c.hook = min(max(0, c.hook), AppModel.maxTime)
+        if player.duration > 0 {
+            c.introStart = min(c.introStart, player.duration)
+            c.introEnd = min(c.introEnd, player.duration)
+            c.hook = min(c.hook, player.duration)
+        }
         c.introEnd = max(c.introEnd, c.introStart + AppModel.minIntro)
-        if player.duration > 0 { c.hook = min(max(0, c.hook), player.duration) }
         c.configured = true
         c.auto = false
         store.set(c, for: p)
@@ -328,25 +350,51 @@ final class AppModel: ObservableObject {
     /// not quietly move Intro Start because that was the last *time* field touched.
     func focus(_ f: MarkerField) {
         guard focusMarker != f else { return }
-        focusMarker = f
-        objectWillChange.send()
+        focusMarker = f      // @Published; an explicit objectWillChange here fires AFTER the write
     }
 
     /// `M` — step the nudge target through the three markers.
     func cycleFocusMarker() {
         let all = MarkerField.times
-        let i = all.firstIndex(of: focusMarker) ?? 0
-        focusMarker = all[(i + 1) % all.count]
+        // When focus sits on a non-time field (after `E`), start at the first marker rather than
+        // stepping off a `?? 0` and silently skipping it.
+        if let i = all.firstIndex(of: focusMarker) {
+            focusMarker = all[(i + 1) % all.count]
+        } else {
+            focusMarker = all[0]
+        }
         flash("ปรับละเอียด: \(focusMarker.label)  (Shift+←/→)")
-        objectWillChange.send()
     }
 
     /// `Shift+←/→`. Deliberately not guarded by the two-press rule: a 0.01 s step cannot put a
     /// song on camera, and a confirmation per 10 ms of movement would make the feature useless.
     func nudgeFocused(by d: Double) {
-        guard current != nil, let k = focusMarker.timeKey else { return }
-        updateConfig { $0[keyPath: k] = max(0, (($0[keyPath: k] + d) * 100).rounded() / 100) }
+        guard current != nil else { return }
+        guard let k = focusMarker.timeKey else {
+            flash("ยังไม่ได้เลือก marker ที่จะขยับ — กด M เพื่อเลือก")
+            return
+        }
+        // A pending `I`/`O`/`H` proposal holds the position of its FIRST press for 2.5 s, so
+        // confirming it after a nudge would write that old value and silently discard the nudge.
+        cancelPending()
+        // `commit: false`, like the waveform drag: committing calls `player.remode`, which
+        // re-schedules the node once the accumulated move passes 0.05 s — i.e. an audible dropout
+        // every sixth keypress, during the one task this key exists for (listening to the cut).
+        // The drag defers to `commitConfig()` on mouse-up; a key has no mouse-up, so it debounces.
+        updateConfig(commit: false) { $0[keyPath: k] = max(0, (($0[keyPath: k] + d) * 100).rounded() / 100) }
         flash(String(format: "%@ %.2fs", focusMarker.label, config()[keyPath: k]))
+        scheduleNudgeCommit()
+    }
+
+    private var nudgeCommitTask: Task<Void, Never>?
+    /// Settle the level and the scheduled segment once the operator stops nudging.
+    private func scheduleNudgeCommit() {
+        nudgeCommitTask?.cancel()
+        nudgeCommitTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self?.commitConfig() }
+        }
     }
 
     /// A typed `mm:ss.hh` (or plain seconds) value. Rejecting rather than clamping is deliberate:
@@ -354,15 +402,48 @@ final class AppModel: ObservableObject {
     func setMarkerTime(_ f: MarkerField, _ t: Double) {
         guard current != nil, let k = f.timeKey else { return }
         guard t.isFinite, t >= 0 else { return }
+        // No duration means `AVAudioFile` could not open the file (Player.load) — reachable right
+        // after a handover if audio was left behind. Refuse rather than write a time we cannot
+        // check against anything; `round2` turns a big enough finite value into +infinity, after
+        // which EVERY later save fails `isValidJSONObject` with nothing naming the song at fault.
+        guard player.duration > 0 else {
+            flash("ยังอ่านไฟล์เพลงนี้ไม่ได้ — ตั้งเวลาไม่ได้")
+            return
+        }
         focus(f)
-        let v = player.duration > 0 ? min(t, player.duration) : t
-        updateConfig { $0[keyPath: k] = (max(0, v) * 100).rounded() / 100 }
+        cancelPending()
+        let ceiling = min(player.duration, AppModel.maxTime)
+        updateConfig { $0[keyPath: k] = (min(max(0, t), ceiling) * 100).rounded() / 100 }
     }
 
     /// `G` — audition the hook for a few seconds and stop. See `Player.previewHook`.
+    ///
+    /// Confirm-on-second-press **while the intro is on air**, for the same reason as `I`/`O`/`H`
+    /// (§11): keyCode 5 sits next to `H` (4), the setter does press `H` during playback, and a
+    /// slip here does not write a number — it plays six seconds of the chorus out of the stage PA
+    /// while the question is live. Immediate in every other state, which is the whole of the
+    /// setter's hook-hunting workflow: you audition from a parked playhead.
+    func requestPreview() {
+        guard current != nil else { return }
+        let onAir = player.isPlaying && player.mode == .intro
+        guard onAir else { cancelPending(); previewHook(); return }
+        if pendingPreview {
+            pendingPreviewTask?.cancel()
+            pendingPreview = false
+            previewHook()
+            return
+        }
+        cancelPending()
+        pendingPreview = true
+        pendingPreviewTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(AppModel.pendingWindow * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self?.pendingPreview = false }
+        }
+    }
+
     func previewHook() {
         guard current != nil else { return }
-        cancelPending()
         focus(.hook)
         player.previewHook(config: config())
     }
@@ -378,7 +459,9 @@ final class AppModel: ObservableObject {
     /// the playhead is parked where they chose. While PLAYING the first press only proposes.
     func requestMark(_ f: MarkerField) {
         guard current != nil else { return }
-        focus(f)
+        // Only a POSITION can be the nudge target. `E` used to set it to `ignoreEnd`, after which
+        // `Shift+←/→` was a dead key and no card showed the hint saying why.
+        if f.timeKey != nil { focus(f) }
         guard player.isPlaying else { pending = nil; applyMark(f, at: player.position); return }
         if let pm = pending, pm.field == f {
             pendingTask?.cancel()
@@ -402,6 +485,10 @@ final class AppModel: ObservableObject {
     }
 
     func cancelPending() {
+        if pendingPreview {
+            pendingPreviewTask?.cancel()
+            pendingPreview = false
+        }
         guard pending != nil else { return }
         pendingTask?.cancel()
         pending = nil
@@ -503,6 +590,8 @@ final class AppModel: ObservableObject {
     /// Seconds until playback stops by itself, whichever bound is in force. nil means nothing
     /// will stop it — which is exactly what the amber strip is for.
     var secondsToStop: Double? { player.previewRemaining ?? secondsToIntroEnd }
+    /// Absolute time a running preview stops at — read from the player, never recomputed.
+    var previewStopAt: Double? { player.previewStopAt }
 
     @discardableResult
     func applyAutoStart(_ path: String, analysis a: Analysis, manual: Bool) -> Bool {
@@ -687,6 +776,8 @@ final class AppModel: ObservableObject {
     }
     func copyConfig(from src: String) {
         guard let p = current else { return }
+        // Overwrites five signed-off fields in one click and had no undo entry at all.
+        pushUndo(p, coalesce: false)
         let s = store.config(for: src)
         var d = store.config(for: p)
         d.introStart = s.introStart; d.introEnd = s.introEnd; d.hook = s.hook

@@ -183,7 +183,7 @@ final class Player: ObservableObject {
     /// song further away every time. This is the setter's version of the same jump.
     func previewHook(config c: SongConfig) {
         cancelFade()
-        let h = min(max(0, c.hook), max(0, duration - 0.3))
+        let h = min(max(0, c.hook), max(0, duration - 0.5))   // same clamp as reveal
         previewEnd = min(duration, h + Player.previewSec)
         mode = .preview
         play(from: h)
@@ -194,6 +194,14 @@ final class Player: ObservableObject {
     var previewRemaining: Double? {
         guard mode == .preview, isPlaying || fading else { return nil }
         return max(0, previewEnd - position)
+    }
+    /// Where a running preview will actually stop. The strip must read THIS rather than recompute
+    /// `hook + previewSec` from the config: `remode` deliberately ignores `.preview`, so moving
+    /// the hook mid-audition changes the config but neither the audio nor the countdown — and the
+    /// label beside that countdown would then be the only wrong number on screen.
+    var previewStopAt: Double? {
+        guard mode == .preview, isPlaying || fading else { return nil }
+        return previewEnd
     }
 
     func reset(config c: SongConfig) {
@@ -209,8 +217,13 @@ final class Player: ObservableObject {
         cancelFade()          // a click during the intro-end fade means "keep going", not "stop"
         let clamped = max(0, min(duration, t))
         if isPlaying {
-            play(from: clamped)
+            // Mode FIRST. `play(from:)` reads `mode` to decide where to bound the segment, so
+            // assigning after it meant a seek during a hook audition was still scheduled against
+            // `previewEnd`: seeking past it gives `frames == 0`, and the `pause()` on that path
+            // runs after `node.stop()` — verbatim the §12 defect where the playhead jumped back
+            // to the previous pause. Every other caller already sets mode first.
             mode = Player.modeForPosition(clamped, c)
+            play(from: clamped)
         } else {
             pausedAt = clamped
             seekOffset = clamped
@@ -259,7 +272,21 @@ final class Player: ObservableObject {
         // Reveal must stay Reveal — a hook nudge mustn't silently re-arm the intro guard.
         guard mode == .intro || mode == .free else { return }
         let p = livePosition()
-        mode = Player.modeForPosition(p, c)
+        // A marker edit may only ARM the intro-end guard, never disarm it.
+        //
+        // Assigning `modeForPosition` unconditionally here was a core-requirement violation.
+        // Pulling Intro End back BEHIND the playhead — one typed value, or one drag — made the
+        // new mode `.free`, which skipped the `mode == .intro` bound below, left `want` at
+        // `f.length`, and then passed the "moved outward" test against the OLD boundary. The node
+        // was rescheduled to the end of the file and **the whole song played out on camera**:
+        // shortening the intro made playback longer.
+        //
+        // A seek is a transport command and keeps re-deriving freely (§10). A marker edit is not
+        // one — the operator typed in a setup field, they did not ask to hear past the intro.
+        // Holding `.intro` lets `tick()` do the right thing instead: it sees the playhead already
+        // past the new Intro End, and `beginFade`'s "already late" branch cuts immediately.
+        let next = Player.modeForPosition(p, c)
+        if next == .intro { mode = next }
         let sr = f.processingFormat.sampleRate
         var want = f.length
         if mode == .intro, !c.ignoreEnd, c.introEnd > c.introStart {
