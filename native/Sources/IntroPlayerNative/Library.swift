@@ -335,6 +335,112 @@ enum Diagnostics {
         print(okPreview && okIntro ? "\n✓ ผ่าน" : "\n✗ ไม่ผ่าน")
     }
 
+    /// The running order built from the REAL log. Read-only — opens a LogStore and a Store but
+    /// writes neither. This is the one check that the take grouping matches what actually
+    /// happened on set, including a song that was revisited later.
+    static func takesReport() {
+        takesSelfCheck()
+        let log = LogStore()
+        print("log events: \(log.events.count)")
+        guard !log.events.isEmpty else { print("— log ว่าง, ไม่มีอะไรจัดลำดับ"); return }
+
+        let store = Store()
+        var rounds: [String] = []
+        for e in log.events where !rounds.contains(e.playlist) { rounds.append(e.playlist) }
+
+        for r in rounds {
+            let evs = log.events.filter { $0.playlist == r }
+            let since = store.resetAt[r].flatMap { LogStore.isoParse($0) }
+            let current = evs.filter { e in
+                guard let s = since else { return true }
+                guard let d = e.date else { return false }
+                return d > s
+            }
+            let past = evs.count - current.count
+            let tk = Takes.build(current)
+            print("\n=== รอบ \(Library.label(r)) — \(evs.count) events, "
+                  + "\(tk.count) ข้อในรอบถ่ายนี้" + (past > 0 ? ", \(past) events ของรอบก่อน" : "") + " ===")
+            if let sp = Takes.span(tk) {
+                print(String(format: "    %@  %@ -> %@  (%@)", LogStore.dayText(sp.first),
+                             LogStore.hmText(sp.first), LogStore.hmText(sp.last),
+                             fmtSpanThai(sp.last.timeIntervalSince(sp.first))))
+            }
+            let groups = Takes.sittings(tk)
+            if groups.count > 1 {
+                print("    แยกเป็น \(groups.count) ช่วงถ่าย (ห่างกันเกิน "
+                      + "\(Int(Takes.sittingGap / 3600)) ชม)")
+            }
+            for (gi, g) in groups.enumerated() {
+                if groups.count > 1, let d = g.first?.start {
+                    print("  [ ช่วง \(gi + 1): \(LogStore.dayText(d)) \(LogStore.hmText(d)) "
+                          + "— \(g.count) ข้อ ]")
+                }
+                let first = g.first?.start
+                for x in g {
+                    let el = (x.start != nil && first != nil)
+                        ? fmtElapsed(x.start!.timeIntervalSince(first!)) : "—"
+                    print(String(format: "  %3d. %@ %-9@ %-3@ %@  %@%@",
+                                 x.order, LogStore.clockText(x.startISO), el as NSString,
+                                 Library.trackNumber(x.path) as NSString,
+                                 x.correct ? "✓" : "✗",
+                                 Library.displayTitle(x.path),
+                                 x.wrongs > 0 ? "  (ผิด \(x.wrongs))" : ""))
+                }
+            }
+            // The thing path-grouping used to hide.
+            var seen: [String: Int] = [:]
+            for x in tk { seen[x.path, default: 0] += 1 }
+            let repeats = seen.filter { $0.value > 1 }
+            if repeats.isEmpty {
+                print("    ไม่มีเพลงที่เปิดซ้ำหลายข้อ")
+            } else {
+                for (p, n) in repeats {
+                    let where_ = tk.filter { $0.path == p }.map { "\($0.order)" }.joined(separator: ", ")
+                    print("    ⚠ เปิดซ้ำ \(n) ครั้ง (ข้อ \(where_)): \(Library.displayTitle(p))")
+                }
+            }
+        }
+    }
+
+    /// Synthetic check of the take model, because the real log happens not to contain the case
+    /// that matters most: a song revisited later in the taping. Path-grouping folded that back
+    /// into the song's first appearance, which is exactly the ordering the log exists to record.
+    static func takesSelfCheck() {
+        func ev(_ path: String, _ kind: String, _ min: Int) -> LogEvent {
+            let base = Date(timeIntervalSince1970: 1_800_000_000)
+            let d = base.addingTimeInterval(Double(min) * 60)
+            return LogEvent(t: LogStore.isoFmtForTest(d), playlist: "T", path: path,
+                            event: kind, dup: 0, date: d)
+        }
+        // A: wrong, wrong, correct   B: wrong only (burned)   A again much later (retake)
+        // C: correct                 — and a 6-hour gap before the retake, i.e. a new sitting.
+        let evs = [
+            ev("A.mp3", "wrong", 0), ev("A.mp3", "wrong", 1), ev("A.mp3", "correct", 2),
+            ev("B.mp3", "wrong", 5),
+            ev("C.mp3", "correct", 9),
+            ev("A.mp3", "correct", 9 + 6 * 60),
+        ]
+        let tk = Takes.build(evs)
+        var ok = true
+        func check(_ label: String, _ got: String, _ want: String) {
+            let good = got == want
+            if !good { ok = false }
+            print("    \(good ? "ok " : "✗  ")\(label): got \(got)  want \(want)")
+        }
+        print("self-check — take model")
+        check("จำนวนข้อ", "\(tk.count)", "4")
+        check("ลำดับ", tk.map { "\(Library.baseName($0.path))" }.joined(separator: ","),
+              "A.mp3,B.mp3,C.mp3,A.mp3")
+        check("A ข้อแรก: ผิดก่อน", "\(tk.first?.wrongs ?? -1)", "2")
+        check("A ข้อแรก: ตอบถูก", "\(tk.first?.correct ?? false)", "true")
+        check("B: เผาแล้ว (ไม่มีคนตอบ)", "\(tk.count > 1 ? !tk[1].correct : false)", "true")
+        check("A เปิดซ้ำเป็นข้อที่", "\(tk.last?.order ?? -1)", "4")
+        let groups = Takes.sittings(tk)
+        check("จำนวนช่วงถ่าย (เว้น 6 ชม)", "\(groups.count)", "2")
+        check("ช่วงที่ 2 มีกี่ข้อ", "\(groups.last?.count ?? -1)", "1")
+        print(ok ? "    ✓ ผ่าน\n" : "    ✗ ไม่ผ่าน\n")
+    }
+
     /// Marker edits DURING playback — `Player.remode`, which had no coverage at all.
     ///
     /// The case that matters: pulling Intro End back behind the playhead used to flip the mode to

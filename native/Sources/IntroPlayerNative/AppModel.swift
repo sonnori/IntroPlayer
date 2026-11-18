@@ -20,6 +20,11 @@ final class AppModel: ObservableObject {
     @Published var scopeNote = ""
     @Published var showLog = false
     @Published var logAllRounds = false
+    /// Which way the log reads. Running order is the default because that is the question people
+    /// actually bring to it afterwards ("what did we open first?"); the raw event stream is for
+    /// working out what happened when a row looks wrong.
+    enum LogView { case running, events }
+    @Published var logView: LogView = .running
     @Published var toast: String?
     /// Three columns need ~780pt of list; below that the layout falls back to one column, exactly
     /// like the web version's max-width:1500px media query.
@@ -690,7 +695,47 @@ final class AppModel: ObservableObject {
     /// redraws at the tick rate while playing. Scanning the whole event list per row per frame
     /// was the app's hottest loop.
     private var statusCache: [String: SongStatus]?
-    func invalidateStatus() { statusCache = nil }
+    private var takeCache: [Take]?
+    private var orderCache: [String: [Int]]?
+    func invalidateStatus() { statusCache = nil; takeCache = nil; orderCache = nil }
+
+    /// The current taping's running order, scoped like the rest of the log panel.
+    /// Cached for the same reason `status(of:)` is: the song list asks per row per frame.
+    func takes() -> [Take] {
+        if takeCache == nil {
+            let evs = logStore.events.filter {
+                (logAllRounds || $0.playlist == currentPlaylist) && isCurrentSession($0)
+            }
+            takeCache = Takes.build(evs)
+        }
+        return takeCache ?? []
+    }
+
+    /// Which positions in the running order this song occupied. More than one means it was
+    /// revisited — a retake, which the old path-grouped summary silently hid.
+    func takeOrders(of path: String) -> [Int] {
+        if orderCache == nil {
+            var m: [String: [Int]] = [:]
+            for t in takes() { m[t.path, default: []].append(t.order) }
+            orderCache = m
+        }
+        return orderCache?[path] ?? []
+    }
+
+    /// Jump to a song from a log row. Refuses while playing: the log is a pane now and can be
+    /// open during a take, and `select()` loads a new file, which would cut the audio on air.
+    func selectFromLog(_ path: String) {
+        guard songs.contains(path) else {
+            flash("ไม่พบไฟล์เพลงนี้ใน songs/ แล้ว")
+            return
+        }
+        guard !player.isPlaying else {
+            flash("กำลังเล่นอยู่ — กด Space หยุดก่อนถ้าจะเปิดเพลงนี้")
+            return
+        }
+        if Library.playlist(of: path) != currentPlaylist { setPlaylist(Library.playlist(of: path)) }
+        select(path)
+    }
 
     func status(of path: String) -> SongStatus? {
         if statusCache == nil {
@@ -738,6 +783,12 @@ final class AppModel: ObservableObject {
     /// clear. The button checks this first so it never opens a confirmation for a no-op.
     var usedInRound: Int {
         songsIn(currentPlaylist).filter { store.config(for: $0).played || status(of: $0) != nil }.count
+    }
+
+    func setLogAllRounds(_ v: Bool) {
+        guard logAllRounds != v else { return }
+        logAllRounds = v
+        invalidateStatus()      // the take numbering is scoped to this filter
     }
 
     func resetPlayed() -> String {

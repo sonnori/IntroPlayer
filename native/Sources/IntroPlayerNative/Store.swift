@@ -151,6 +151,82 @@ struct LogEvent: Identifiable {
     var id: String { "\(t)\u{1}\(path)\u{1}\(event)\u{1}\(dup)" }
 }
 
+/// One question as it was actually run on set.
+///
+/// The running order IS the record: questions are never played in list order, so "what was opened
+/// first, then what" is the only index the edit room can use against the tape. A take is a
+/// **consecutive run** of log events on one song — grouping by path across the whole session (what
+/// the log summary used to do) folds a song that was revisited later back into its first
+/// appearance, and the order is precisely what that destroys. Going back to a song is a new take.
+struct Take: Identifiable {
+    /// 1-based position in the running order. This is the number people will say out loud.
+    var order: Int
+    var path: String
+    var playlist: String
+    var events: [LogEvent]
+    /// Somebody answered it. A take with no correct is burned: it aired and cannot be reused.
+    var correct: Bool
+    var wrongs: Int
+    var startISO: String
+    var endISO: String
+    var start: Date?
+    var id: String { "\(order)\u{1}\(path)\u{1}\(startISO)" }
+}
+
+enum Takes {
+    /// Events must arrive in the order they were logged. Deliberately NOT sorted by timestamp:
+    /// file order is the running order even if a clock jumped, and a clock jump must not be able
+    /// to reorder the tape index.
+    static func build(_ evs: [LogEvent]) -> [Take] {
+        var out: [Take] = []
+        for e in evs {
+            if let last = out.last, last.path == e.path {
+                var t = last
+                t.events.append(e)
+                if e.isCorrect { t.correct = true } else { t.wrongs += 1 }
+                t.endISO = e.t
+                out[out.count - 1] = t
+            } else {
+                out.append(Take(order: out.count + 1, path: e.path, playlist: e.playlist,
+                                events: [e], correct: e.isCorrect, wrongs: e.isCorrect ? 0 : 1,
+                                startISO: e.t, endISO: e.t, start: e.date))
+            }
+        }
+        return out
+    }
+
+    /// Wall-clock span of a run of takes, for matching against a camera's timecode.
+    static func span(_ takes: [Take]) -> (first: Date, last: Date)? {
+        let ds = takes.compactMap(\.start)
+        guard let a = ds.min(), let b = ds.max() else { return nil }
+        return (a, b)
+    }
+
+    /// A gap longer than this is not a pause between questions — it is a different day.
+    static let sittingGap: TimeInterval = 4 * 3600
+
+    /// Split a running order into sittings.
+    ///
+    /// Needed because `resetAt` is pressed by a human, so one "session" in the log really can span
+    /// months — the real `log.json` does. Without this the "from the start" column read
+    /// **`+2230:24:30`** and two takes 93 days apart sat next to each other as though they were
+    /// consecutive. Each sitting gets its own elapsed baseline and its own date heading.
+    static func sittings(_ takes: [Take]) -> [[Take]] {
+        var out: [[Take]] = []
+        for t in takes {
+            let continues: Bool
+            if let prev = out.last?.last, let a = prev.start, let b = t.start {
+                let d = b.timeIntervalSince(a)
+                continues = d >= 0 && d < sittingGap      // a clock that ran backwards also splits
+            } else {
+                continues = !out.isEmpty                  // undatable rows stay where they sit
+            }
+            if continues { out[out.count - 1].append(t) } else { out.append([t]) }
+        }
+        return out
+    }
+}
+
 enum LoudnessScope: String { case intro, song }
 
 /// Reads and writes the same two files the web app uses, preserving any keys it doesn't know
@@ -395,6 +471,17 @@ final class LogStore {
         guard let d = isoParse(iso) else { return "--:--:--" }
         return hms.string(from: d)
     }
+    private static let hmFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "HH:mm"; return f
+    }()
+    private static let dayFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "d MMM yyyy"
+        f.locale = Locale(identifier: "th_TH"); return f
+    }()
+    static func hmText(_ d: Date) -> String { hmFmt.string(from: d) }
+    static func dayText(_ d: Date) -> String { dayFmt.string(from: d) }
     static func isoNow() -> String { iso.string(from: Date()) }
+    /// Only for the headless self-check, which needs events at chosen times.
+    static func isoFmtForTest(_ d: Date) -> String { iso.string(from: d) }
     static func isoParse(_ s: String) -> Date? { iso.date(from: s) ?? isoFrac.date(from: s) }
 }

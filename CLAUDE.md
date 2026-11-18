@@ -261,6 +261,7 @@ INTROPLAYER_DIAG=1 $BIN --titles       # raw filename vs cleaned display title (
 INTROPLAYER_DIAG=1 $BIN --handoff      # export → on-site edit → plan → accept AND reject
 INTROPLAYER_DIAG=1 $BIN --previewtest  # bounded hook audition stops AT hook+6; intro still arms after
 INTROPLAYER_DIAG=1 $BIN --remodetest   # marker edits DURING playback must never outlive Intro End
+INTROPLAYER_DIAG=1 $BIN --takes        # take model self-check, then the real log's running order
 INTROPLAYER_DIAG=1 $BIN --timefmt      # typed-field parser: round-trip, accepts, rejects (read-only)
 INTROPLAYER_DIAG=1 $BIN --overview     # overview strip: same data as columnPeaks, caches independent
 ```
@@ -642,6 +643,37 @@ team find each take on the tape.
 Reveal while hunting for the hook during setup, which would bury the real takes — so it is
 deliberately excluded. The server rejects any other `event` value.
 
+### The running order is the record (`Take`, `Takes`)
+
+**Questions are never run in list order**, so "what did we open first, then what" is the only index
+that works against the tape — and it is the question people actually bring to this file afterwards.
+The log panel therefore opens on **ลำดับการถ่าย**, numbered from 1, with the raw event stream behind
+a **ทุกเหตุการณ์** toggle for working out what happened when a row looks wrong.
+
+A **take is a consecutive run of events on one song** (`Takes.build`). The summary this replaced
+grouped by path across the whole session, which folded a song **revisited later** back into its
+first appearance — destroying precisely the ordering the log exists to record. Going back to a song
+is a new take, and the song list shows `#2,9` for one that was used twice.
+
+- Events are taken in **file order, never sorted by timestamp**. File order is the running order
+  even if a clock jumped, and a clock jump must not be able to reorder the tape index.
+- `Takes.sittings` splits the order wherever there is a gap over `sittingGap` (4 h), and each
+  sitting gets its own date heading and its own elapsed baseline. This is not hypothetical:
+  `resetAt` is pressed by a human, so one "session" really can span months — the live `log.json`
+  has takes **92 days apart**, and measuring elapsed from the session's first take printed
+  `+2230:24:30`.
+- Elapsed (`+M:SS`) is per sitting, for a camera whose timecode was reset when the camera was.
+- A log row **click selects that song**, and refuses while playing — the log is a pane now and can
+  be open during a take, where `select()` would load a new file and cut the audio on air.
+- `AppModel.takes()` / `takeOrders(of:)` are cached behind `invalidateStatus()` for the same reason
+  `status(of:)` is: the song list asks per row, and the pane re-renders at the player's tick rate.
+
+Both exports lead with the running order; the grouped-by-outcome summary comes second and cites
+take numbers, so the two halves point at each other. The CSV is **one row per take** (ลำดับที่,
+วันที่, เวลา, จากเริ่มช่วงนี้, ช่วงถ่าย, ผล, ตอบผิดกี่ครั้ง) — `log.json` keeps the per-event
+detail. Verify with `--takes`, which runs a synthetic self-check (retake, burned question, sitting
+split) before printing the real library's order.
+
 **Derived status** (`statusOf(path)`, scanning the events):
 | result | meaning | badge |
 |--------|---------|-------|
@@ -660,9 +692,10 @@ Only `score()` (Correct/Wrong) sets `played=true`. **Reveal deliberately does no
 hammers it while hunting for the hook during setup, so it is the same bad signal that keeps it
 out of the log. `P` remains the manual override.
 
-**UI**: header button (or `L`), Esc/backdrop closes. Scoped to the current playlist with a "ดูทุกรอบ"
-toggle. Exports as text (grouped summary + true running order) or CSV with a UTF-8 BOM so Excel
-reads Thai correctly. `↩ ยกเลิกรายการล่าสุด` exists because mis-presses happen live.
+**UI**: header button (or `L`), `Esc` closes. A left-pane swap, not a sheet. Scoped to the current
+playlist with a "ดูทุกรอบ" toggle — which must go through `setLogAllRounds`, since the take
+numbering is scoped to that filter and has to be invalidated with it. CSV carries a UTF-8 BOM so
+Excel reads Thai. `↩ ยกเลิกรายการล่าสุด` exists because mis-presses happen live.
 
 ### Sessions: how `resetPlayed` interacts with the log
 **`resetPlayed` does not delete log events** — the log is the tape's history and must survive
@@ -1122,6 +1155,13 @@ somebody forgets to switch it is the day it does not help.
 - `confirmDestructive` made the **destructive** button the default, and two of its callers now sit
   behind a `⋯` menu where Space activates the highlighted item. One Space could open the alert and
   confirm it. Return/Space are bound to Cancel.
+- The log summary grouped by path across the whole session, so a song **revisited later** folded
+  into its first appearance and the retake vanished from the running order. It also led with the
+  outcome grouping, which answers a question nobody asks of this file — the edit room is holding a
+  tape and needs to know what was shot when. See the running-order section in §8d.
+- Elapsed time was measured from the session's first take, which printed **`+2230:24:30`** on the
+  real `log.json`: `resetAt` is pressed by a human, so "one session" spans months. Found by running
+  `--takes` against the live library instead of a fixture.
 - The log pane **unmounts** the song list, so closing it discarded the scroll offset and left a
   60-song round showing track 1 with the selection off-screen — the exact problem the
   `ScrollViewReader` was added for. Both layouts scroll to `current` on appear.
@@ -1212,6 +1252,7 @@ INTROPLAYER_DIAG=1 $BIN --analyse     # detection + loudness per song
 INTROPLAYER_DIAG=1 $BIN --playtest    # overshoot must be 0.000, ignoreEnd must still bypass
 INTROPLAYER_DIAG=1 $BIN --previewtest # hook audition stops at hook+6; intro still arms afterwards
 INTROPLAYER_DIAG=1 $BIN --remodetest  # marker edits mid-playback: 3 cases, none may outlive Intro End
+INTROPLAYER_DIAG=1 $BIN --takes       # running order: synthetic self-check + the real log
 INTROPLAYER_DIAG=1 $BIN --timefmt     # typed-field parser
 INTROPLAYER_DIAG=1 $BIN --overview    # strip data matches columnPeaks; caches stay independent
 INTROPLAYER_DIAG=1 $BIN --preflight   # the handover checklist

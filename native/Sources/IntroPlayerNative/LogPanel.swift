@@ -10,17 +10,23 @@ struct LogPanel: View {
     private var currentSession: [LogEvent] { shown.filter(model.isCurrentSession) }
     private var olderCount: Int { shown.count - currentSession.count }
 
-    /// One row per song, decided by its outcome — what the edit team actually needs.
-    private struct Summary { var path: String; var correct: Bool; var wrongs: Int; var last: String }
-    private func summarise(_ evs: [LogEvent]) -> [Summary] {
-        var order: [String] = []
-        var map: [String: Summary] = [:]
-        for e in evs {
-            if map[e.path] == nil { order.append(e.path); map[e.path] = Summary(path: e.path, correct: false, wrongs: 0, last: e.t) }
-            if e.isCorrect { map[e.path]!.correct = true } else { map[e.path]!.wrongs += 1 }
-            map[e.path]!.last = e.t
-        }
-        return order.compactMap { map[$0] }
+    /// The current taping's running order, numbered from 1. Past takes get their own numbering
+    /// so the current round always starts at 1 — that is the number people say out loud.
+    /// From the model's cache, not rebuilt here: this pane re-renders at the player's tick rate
+    /// while audio is running, and `body` reaches for the running order several times per pass.
+    /// `AppModel.invalidateStatus()` drops it on every log write, reset and round switch.
+    private var takes: [Take] { model.takes() }
+    /// Not cached — only a count and the CSV need it, and both are user-initiated.
+    private var pastTakes: [Take] { Takes.build(shown.filter { !model.isCurrentSession($0) }) }
+
+    private var sittings: [[Take]] { Takes.sittings(takes) }
+
+    /// Seconds from the first take of ITS OWN sitting, for lining up against a camera timecode
+    /// that was reset when the camera was. Measured from the whole session's first take, this
+    /// read `+2230:24:30` on the real log, where "one session" spans months.
+    private func elapsed(_ t: Take, in sitting: [Take]) -> Double? {
+        guard let s = t.start, let first = sitting.first?.start else { return nil }
+        return s.timeIntervalSince(first)
     }
 
     var body: some View {
@@ -50,8 +56,11 @@ struct LogPanel: View {
                     Text(scopeLabel).font(Typo.font(12)).foregroundStyle(Palette.muted)
                         .lineLimit(2).fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
-                    Toggle(isOn: $model.logAllRounds) { Text("ดูทุกรอบ").font(Typo.font(12)) }
-                        .toggleStyle(.checkbox).foregroundStyle(Palette.muted).fixedSize()
+                    Toggle(isOn: Binding(get: { model.logAllRounds },
+                                         set: { model.setLogAllRounds($0) })) {
+                        Text("ดูทุกรอบ").font(Typo.font(12))
+                    }
+                    .toggleStyle(.checkbox).foregroundStyle(Palette.muted).fixedSize()
                 }
             }
             .padding(12)
@@ -60,14 +69,29 @@ struct LogPanel: View {
                 Rectangle().fill(Palette.line).frame(height: 1).allowsHitTesting(false)
             }
 
-            let s = summarise(currentSession)
-            // Three tiles side by side need the wide pane; at 300pt they stack rather than
-            // squeeze, because the number is the part that has to stay legible across the room.
-            Group {
-                if model.isWide {
-                    HStack(spacing: 10) { statTiles(s) }
-                } else {
-                    VStack(spacing: 8) { statTiles(s) }
+            let tk = takes
+            VStack(alignment: .leading, spacing: 8) {
+                // Three tiles side by side need the wide pane; at 300pt they stack rather than
+                // squeeze, because the number has to stay legible across the room.
+                Group {
+                    if model.isWide {
+                        HStack(spacing: 10) { statTiles(tk) }
+                    } else {
+                        VStack(spacing: 8) { statTiles(tk) }
+                    }
+                }
+                if let sp = Takes.span(tk) {
+                    let n = sittings.count
+                    Text(n > 1
+                         ? "\(n) ช่วงถ่าย · \(LogStore.dayText(sp.first)) – \(LogStore.dayText(sp.last))"
+                         : "\(LogStore.dayText(sp.first)) · \(hm(sp.first)) – \(hm(sp.last)) · รวม "
+                           + fmtSpanThai(sp.last.timeIntervalSince(sp.first)))
+                        .font(Typo.font(11)).foregroundStyle(Palette.muted)
+                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(spacing: 6) {
+                    viewButton("ลำดับการถ่าย", .running)
+                    viewButton("ทุกเหตุการณ์", .events)
                 }
             }
             .padding(12)
@@ -78,14 +102,15 @@ struct LogPanel: View {
                     if shown.isEmpty {
                         VStack(spacing: 6) {
                             Text("ยังไม่มีบันทึก").font(Typo.font(14))
-                            Text("กด Correct หรือ Wrong ระหว่างถ่าย แล้วจะขึ้นตรงนี้")
+                            Text("กด ✓ Correct หรือ ✗ Wrong ระหว่างถ่าย แล้วจะขึ้นตรงนี้ตามลำดับที่เปิด")
                                 .font(Typo.font(11)).foregroundStyle(Palette.muted)
+                                .multilineTextAlignment(.center)
                         }
                         .frame(maxWidth: .infinity).padding(.vertical, 40)
                     }
-                    rows
+                    if model.logView == .running { runningRows(tk) } else { rows }
                 }
-                .padding(.horizontal, 16).padding(.bottom, 14)
+                .padding(.horizontal, 14).padding(.bottom, 14)
             }
 
             Divider().overlay(Palette.line)
@@ -132,11 +157,117 @@ struct LogPanel: View {
         }
     }
 
-    @ViewBuilder private func statTiles(_ s: [Summary]) -> some View {
-        stat("\(s.filter(\.correct).count)", "มีคนตอบถูก — ใช้ตัดต่อได้", Palette.green)
-        stat("\(s.filter { !$0.correct }.count)", "ใช้ในกองแล้ว แต่ไม่มีคนตอบ", Palette.amber)
-        stat("\(s.count)", "โจทย์ที่ใช้ไปทั้งหมด", Palette.text)
+    @ViewBuilder private func statTiles(_ tk: [Take]) -> some View {
+        stat("\(tk.count)", "ข้อที่ใช้ไป (ตามลำดับถ่าย)", Palette.text)
+        stat("\(tk.filter(\.correct).count)", "มีคนตอบถูก — ใช้ตัดต่อได้", Palette.green)
+        stat("\(tk.filter { !$0.correct }.count)", "ใช้ในกองแล้ว แต่ไม่มีคนตอบ", Palette.red)
     }
+
+    private func viewButton(_ t: String, _ v: AppModel.LogView) -> some View {
+        let on = model.logView == v
+        return Button { model.logView = v } label: {
+            Text(t).font(Typo.font(12, on ? .semibold : .regular))
+                .frame(maxWidth: .infinity).padding(.vertical, 6)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle(corner: 6))
+        .foregroundStyle(on ? Palette.text : Palette.muted)
+        .background(on ? Palette.panel3 : Palette.panel)
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(on ? Palette.lineStrong : Palette.line)
+            .allowsHitTesting(false))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    /// The running order — one row per question, in the order it was opened. This is the view the
+    /// log exists for: nothing is ever played in list order, so the number on the left is the only
+    /// handle the edit room has on the tape.
+    @ViewBuilder private func runningRows(_ tk: [Take]) -> some View {
+        if !pastTakes.isEmpty {
+            Text("รอบก่อนหน้า \(pastTakes.count) ข้อ — ดูรายละเอียดที่ \"ทุกเหตุการณ์\"")
+                .font(Typo.font(10)).foregroundStyle(Palette.dim)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 8)
+            Divider().overlay(Palette.line)
+        }
+        if tk.isEmpty && !shown.isEmpty {
+            Text("รอบถ่ายนี้ยังไม่มีข้อที่ใช้ — กด ↺ รีเซ็ตเล่นแล้ว ไปแล้วหรือเปล่า")
+                .font(Typo.font(11)).foregroundStyle(Palette.muted)
+                .frame(maxWidth: .infinity).padding(.vertical, 24)
+        }
+        let groups = sittings
+        ForEach(Array(groups.enumerated()), id: \.offset) { gi, g in
+            // Only label the sitting when there is more than one — a single day's taping should
+            // not carry a heading explaining that it is one day.
+            if groups.count > 1, let d = g.first?.start {
+                HStack(spacing: 8) {
+                    Text("\(LogStore.dayText(d))  \(hm(d))")
+                        .font(Typo.font(11, .semibold))
+                    if let sp = Takes.span(g) {
+                        Text("· \(g.count) ข้อ · \(fmtSpanThai(sp.last.timeIntervalSince(sp.first)))")
+                            .font(Typo.font(10)).foregroundStyle(Palette.muted)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(Color(hex: 0xCFE0FF))
+                .padding(.horizontal, 8).padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(hex: 0x24304A))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .padding(.top, gi == 0 ? 6 : 12).padding(.bottom, 2)
+            }
+            ForEach(g) { t in takeRow(t, in: g) }
+        }
+    }
+
+    private func takeRow(_ t: Take, in sitting: [Take]) -> some View {
+        let isCurrent = model.current == t.path
+        return VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 10) {
+                // The order number, large and tabular: the primary key of this whole view.
+                Text("\(t.order)")
+                    .font(Typo.font(17, .bold, mono: true, latinOnly: true))
+                    .foregroundStyle(t.correct ? Palette.greenText : Palette.red)
+                    .frame(width: 26, alignment: .trailing)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(Library.displayTitle(t.path))
+                        .font(isCurrent ? Typo.bodyEm : Typo.body)
+                        .lineLimit(2)
+                        .foregroundStyle(isCurrent ? .white : Palette.text)
+                    HStack(spacing: 8) {
+                        Text(hhmmss(t.startISO))
+                            .font(Typo.font(11, mono: true)).foregroundStyle(Palette.muted)
+                        if let el = elapsed(t, in: sitting) {
+                            Text(fmtElapsed(el))
+                                .font(Typo.font(11, mono: true)).foregroundStyle(Palette.dim)
+                        }
+                        Text(Library.trackNumber(t.path))
+                            .font(Typo.font(11, mono: true)).foregroundStyle(Palette.dim)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text(t.correct ? "✓ ตอบถูก" : "✗ ไม่มีคนตอบ")
+                        .font(Typo.font(11, .semibold))
+                        .foregroundStyle(t.correct ? Palette.greenText : Palette.red)
+                    if t.wrongs > 0 {
+                        Text(t.correct ? "ผิดก่อน \(t.wrongs)" : "ผิด \(t.wrongs) ครั้ง")
+                            .font(Typo.font(10)).foregroundStyle(Palette.muted)
+                    }
+                }
+                .fixedSize()
+            }
+            .padding(.vertical, 9).padding(.horizontal, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(isCurrent ? Color(hex: 0x24304A) : .clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .contentShape(Rectangle())
+            .onTapGesture { model.selectFromLog(t.path) }
+            .help("คลิกเพื่อเปิดเพลงนี้ (ต้องหยุดเล่นก่อน)")
+            Divider().overlay(Palette.hair)
+        }
+    }
+
+    private func hm(_ d: Date) -> String { LogStore.hmText(d) }
 
     @ViewBuilder private var rows: some View {
         let evs = shown
@@ -206,45 +337,86 @@ struct LogPanel: View {
 
     private func hhmmss(_ iso: String) -> String { LogStore.clockText(iso) }
 
+    /// Running order FIRST. The grouped-by-outcome summary used to lead, which answered a
+    /// question nobody asks of this file: the edit room is holding a tape and needs to know what
+    /// was shot when. The summary is still here, second, and now cites take numbers so the two
+    /// halves point at each other.
     private func exportText() -> String {
-        let evs = currentSession
-        let s = summarise(evs)
-        let ok = s.filter(\.correct), no = s.filter { !$0.correct }
+        let tk = takes
         let head = "บันทึกการถ่ายทำ — " + (model.logAllRounds ? "ทุกรอบ"
             : (model.currentPlaylist.isEmpty ? "รอบที่ยังไม่ได้จัด" : model.currentPlaylist))
-        var t = head + "\n" + String(repeating: "=", count: head.count) + "\n\n"
-        if olderCount > 0 {
-            t += "(เฉพาะรอบถ่ายปัจจุบัน — มีบันทึกของรอบก่อนหน้าอีก \(olderCount) รายการในไฟล์ log)\n\n"
+        var t = head + "\n" + String(repeating: "=", count: max(24, head.count)) + "\n"
+        if let sp = Takes.span(tk) {
+            t += "วันที่ \(LogStore.dayText(sp.first))  ·  เริ่ม \(hm(sp.first))"
+            t += "  ·  ล่าสุด \(hm(sp.last))"
+            t += "  ·  รวม \(fmtSpanThai(sp.last.timeIntervalSince(sp.first)))\n"
         }
-        t += "ใช้ตัดต่อได้ (มีคนตอบถูก) — \(ok.count) เพลง\n"
-        for (i, x) in ok.enumerated() {
-            t += "  \(i + 1). [\(hhmmss(x.last))] \(Library.title(x.path))"
-            if x.wrongs > 0 { t += "  (ตอบผิดก่อน \(x.wrongs) ครั้ง)" }
-            t += "\n"
+        t += "ใช้ไป \(tk.count) ข้อ  ·  มีคนตอบถูก \(tk.filter(\.correct).count)"
+        t += "  ·  ไม่มีคนตอบ \(tk.filter { !$0.correct }.count)\n"
+        if !pastTakes.isEmpty {
+            t += "(เฉพาะรอบถ่ายปัจจุบัน — ในไฟล์ log ยังมีของรอบก่อนหน้าอีก \(pastTakes.count) ข้อ)\n"
         }
-        t += "\nใช้ในกองแล้วแต่ไม่มีคนตอบ — \(no.count) เพลง\n"
-        for (i, x) in no.enumerated() {
-            t += "  \(i + 1). [\(hhmmss(x.last))] \(Library.title(x.path))  (ตอบผิด \(x.wrongs) ครั้ง)\n"
+
+        t += "\n\nลำดับการถ่าย — เรียงตามที่เปิดจริง ไม่ใช่ตามเลขเพลง\n"
+        t += String(repeating: "-", count: 46) + "\n"
+        let groups = sittings
+        for g in groups {
+            if groups.count > 1, let d = g.first?.start {
+                t += "\n[ \(LogStore.dayText(d))  \(hm(d))  —  \(g.count) ข้อ ]\n"
+            }
+            t += "  #   เวลา      จากเริ่ม   เพลง\n"
+            for x in g {
+                let el = elapsed(x, in: g).map(fmtElapsed) ?? "—"
+                t += String(format: "%3d.  %@  %-8@  ", x.order, hhmmss(x.startISO) as NSString,
+                            el as NSString)
+                t += Library.title(x.path)
+                t += x.correct ? "   ✓ ตอบถูก" : "   ✗ ไม่มีคนตอบ"
+                if x.wrongs > 0 { t += x.correct ? " (ผิดก่อน \(x.wrongs))" : " (ผิด \(x.wrongs) ครั้ง)" }
+                t += "\n"
+            }
         }
-        t += "\n--- ลำดับจริงตามเวลา ---\n"
-        for e in evs { t += "\(hhmmss(e.t))  \(e.isCorrect ? "ถูก" : "ผิด")  \(Library.title(e.path))\n" }
+
+        let ok = tk.filter(\.correct), no = tk.filter { !$0.correct }
+        t += "\n\nสรุปตามผล\n" + String(repeating: "-", count: 46) + "\n"
+        t += "\nใช้ตัดต่อได้ (มีคนตอบถูก) — \(ok.count) ข้อ\n"
+        for x in ok { t += "   ข้อ \(x.order)  [\(hhmmss(x.startISO))]  \(Library.title(x.path))\n" }
+        t += "\nใช้ในกองแล้วแต่ไม่มีคนตอบ — \(no.count) ข้อ  ← เผาไปแล้ว ใช้ซ้ำไม่ได้\n"
+        for x in no {
+            t += "   ข้อ \(x.order)  [\(hhmmss(x.startISO))]  \(Library.title(x.path))"
+            t += "  (ผิด \(x.wrongs) ครั้ง)\n"
+        }
         return t
     }
 
+    /// One row per TAKE, not per event — the running order is what gets opened in Excel. The raw
+    /// per-event stream stays in `log.json` for working out what happened when a row looks odd.
     private func saveCSV() {
-        // every event, with which taping each belongs to; BOM so Excel reads Thai correctly
-        var rows = [["เวลา", "รอบ", "เพลง", "ผล", "รอบถ่าย"]]
-        for e in shown {
-            rows.append([e.t, e.playlist, Library.title(e.path),
-                         e.isCorrect ? "ตอบถูก" : "ตอบผิด",
-                         model.isCurrentSession(e) ? "ปัจจุบัน" : "ก่อนหน้า"])
+        var rows = [["ลำดับที่", "วันที่", "เวลา", "จากเริ่มช่วงนี้", "ช่วงถ่าย",
+                     "รอบ", "เลขเพลง", "เพลง", "ผล", "ตอบผิดกี่ครั้ง", "รอบถ่าย"]]
+        func add(_ groups: [[Take]], current: Bool) {
+            for (gi, g) in groups.enumerated() {
+                for x in g {
+                    rows.append(["\(x.order)",
+                                 x.start.map(LogStore.dayText) ?? "",
+                                 hhmmss(x.startISO),
+                                 elapsed(x, in: g).map(fmtElapsed) ?? "",
+                                 "\(gi + 1)",
+                                 x.playlist, Library.trackNumber(x.path), Library.title(x.path),
+                                 x.correct ? "ตอบถูก" : "ไม่มีคนตอบ", "\(x.wrongs)",
+                                 current ? "ปัจจุบัน" : "ก่อนหน้า"])
+                }
+            }
         }
+        add(Takes.sittings(pastTakes), current: false)
+        add(sittings, current: true)
+
+        // BOM so Excel reads Thai; CRLF for the same reason.
         let csv = "\u{FEFF}" + rows.map { r in
             r.map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }.joined(separator: ",")
         }.joined(separator: "\r\n")
 
         let p = NSSavePanel()
-        p.nameFieldStringValue = "introplayer-log-\(model.currentPlaylist.isEmpty ? "all" : model.currentPlaylist).csv"
+        p.nameFieldStringValue = "introplayer-ลำดับถ่าย-\(model.currentPlaylist.isEmpty ? "all" : model.currentPlaylist).csv"
         p.allowedContentTypes = [.commaSeparatedText]
         if p.runModal() == .OK, let url = p.url {
             try? csv.data(using: .utf8)?.write(to: url)

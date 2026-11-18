@@ -11,6 +11,25 @@ func fmtSec(_ t: Double) -> String { String(format: "%.2fs", t) }
 /// `1:23.45` — the format the typed marker fields use. The hundredths are not decoration: that is
 /// the precision markers are stored at, and the precision the waveform can no longer show once the
 /// view is zoomed out.
+/// `+M:SS`, or `+H:MM:SS` past an hour. Time since the taping's first take — the number that
+/// lines up with a camera whose timecode starts at zero.
+func fmtElapsed(_ sec: Double) -> String {
+    let v = Int(max(0, sec).rounded())
+    let h = v / 3600, m = (v % 3600) / 60, s = v % 60
+    return h > 0 ? String(format: "+%d:%02d:%02d", h, m, s) : String(format: "+%d:%02d", m, s)
+}
+
+/// "1 ชม 26 นาที" / "48 นาที" / "40 วิ" — a span in words, for the session header.
+/// Days matter: the real log spans them, and "2230 ชม" is not a readable number.
+func fmtSpanThai(_ sec: Double) -> String {
+    let v = Int(max(0, sec).rounded())
+    if v < 60 { return "\(v) วิ" }
+    let d = v / 86400, h = (v % 86400) / 3600, m = (v % 3600) / 60
+    if d > 0 { return h > 0 ? "\(d) วัน \(h) ชม" : "\(d) วัน" }
+    if h > 0 { return m > 0 ? "\(h) ชม \(m) นาที" : "\(h) ชม" }
+    return "\(m) นาที"
+}
+
 func fmtClock(_ t: Double) -> String {
     let v = max(0, t.isFinite ? t : 0)
     let cs = Int((v * 100).rounded())
@@ -507,6 +526,7 @@ struct SongRow: View {
     var body: some View {
         let c = model.store.config(for: path)
         let st = model.status(of: path)
+        let orders = model.takeOrders(of: path)
         let used = st != nil || c.played
         let active = model.current == path
         HStack(alignment: .top, spacing: 8) {
@@ -523,6 +543,15 @@ struct SongRow: View {
                 .strikethrough(used)
                 .foregroundStyle(active ? .white : Palette.text)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            // Where it sat in the running order. Songs are never played in list order, so without
+            // this the list cannot answer "what did we open first" at all — you had to open the
+            // log. A comma-separated pair means the song was revisited (a retake).
+            if !orders.isEmpty {
+                Text("#" + orders.map(String.init).joined(separator: ","))
+                    .font(Typo.font(10, .semibold, mono: true, latinOnly: true))
+                    .foregroundStyle(Palette.dim)
+                    .fixedSize()
+            }
             Text(badge(st, used, c))
                 .font(Typo.font(10))
                 .foregroundStyle(badgeColor(st, used, c))
