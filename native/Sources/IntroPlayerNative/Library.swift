@@ -281,6 +281,126 @@ enum Diagnostics {
         p.pause()
     }
 
+    /// The bounded hook audition (`G`). Must stop ON `hook + previewSec` with zero overshoot, the
+    /// same structural guarantee `--playtest` proves for the intro — and must leave the player in a
+    /// state where the ordinary intro stop still arms. Read-only.
+    static func previewTest() {
+        let songs = Library.scan()
+        guard let s = songs.first else { print("no songs"); return }
+        let p = Player()
+        p.load(url: Library.url(s))
+        p.muteForTest()
+        var c = SongConfig(); c.introStart = 2; c.introEnd = 8; c.hook = 20
+        p.configProvider = { c }
+        let want = min(p.duration, c.hook + Player.previewSec)
+        print(String(format: "song: %@  dur=%.2f  hook=%.2f  previewSec=%.1f  expect stop at %.2f",
+                     Library.baseName(s), p.duration, c.hook, Player.previewSec, want))
+        guard p.duration > want + 1 else { print("  — song too short to test"); return }
+
+        var maxSeen = 0.0
+        var stopped: Double?
+        p.onAutoStop = { stopped = p.position }
+        p.previewHook(config: c)
+        print("  mode after previewHook: \(p.mode)  (must be preview)")
+        let deadline = Date().addingTimeInterval(Player.previewSec + 6)
+        while Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            if p.position > maxSeen { maxSeen = p.position }
+            if stopped != nil { break }
+        }
+        let overshoot = max(0, maxSeen - want)
+        print(String(format: "  stoppedAt=%@ maxReached=%.3f overshoot=%.3f  playing=%@ mode=%@",
+                     stopped.map { String(format: "%.3f", $0) } ?? "— NEVER STOPPED",
+                     maxSeen, overshoot, p.isPlaying ? "yes" : "no", "\(p.mode)"))
+        let okPreview = stopped != nil && overshoot < 0.02 && !p.isPlaying
+
+        // The intro stop must still work right after a preview — the preview bound is set on the
+        // same scheduling path, so a leaked previewEnd would cut the next intro short.
+        stopped = nil; maxSeen = 0
+        p.seek(to: c.introStart, config: c)
+        p.toggleStart(config: c)
+        print("  mode after Space from introStart: \(p.mode)  (must be intro)")
+        let d2 = Date().addingTimeInterval(10)
+        while Date() < d2 {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            if p.position > maxSeen { maxSeen = p.position }
+            if stopped != nil { break }
+        }
+        let introOvershoot = max(0, maxSeen - c.introEnd)
+        print(String(format: "  intro afterwards: stoppedAt=%@ overshoot=%.3f",
+                     stopped.map { String(format: "%.3f", $0) } ?? "— NEVER STOPPED",
+                     introOvershoot))
+        let okIntro = stopped != nil && introOvershoot < 0.02
+        p.pause()
+        print(okPreview && okIntro ? "\n✓ ผ่าน" : "\n✗ ไม่ผ่าน")
+    }
+
+    /// The typed marker field's parser. Read-only, no audio.
+    static func timeFmt() {
+        print("round-trip  fmtClock -> parseClock")
+        var ok = true
+        for v in [0.0, 0.01, 0.99, 1.0, 14.2, 59.99, 60.0, 83.45, 123.07, 599.99, 3599.99, 3600.0] {
+            let txt = fmtClock(v)
+            let back = parseClock(txt)
+            let good = back.map { abs($0 - v) < 0.005 } ?? false
+            if !good { ok = false }
+            print(String(format: "  %8.2f -> %-12@ -> %@  %@", v, txt as NSString,
+                         back.map { String(format: "%.2f", $0) } ?? "nil",
+                         good ? "ok" : "✗ MISMATCH"))
+        }
+        print("\naccept")
+        for t in ["83.45", "1:23.45", "1:23", "0:00", "12", "0.5", " 14.2 "] {
+            let r = parseClock(t)
+            if r == nil { ok = false }
+            print("  \(t.debugDescription) -> \(r.map { String(format: "%.2f", $0) } ?? "nil ✗ SHOULD PARSE")")
+        }
+        print("\nreject — a typo must leave the marker alone, never move it to 0")
+        for t in ["", "abc", "1:75", "-5", "1:2:3", ":", "1:", "12s", "1,5"] {
+            let r = parseClock(t)
+            if r != nil { ok = false }
+            print("  \(t.debugDescription) -> \(r.map { String(format: "%.2f ✗ SHOULD REJECT", $0) } ?? "nil ok")")
+        }
+        print(ok ? "\n✓ ผ่าน" : "\n✗ ไม่ผ่าน")
+    }
+
+    /// The overview strip's peaks. Two things to prove: it agrees with the zoomed-out column peaks,
+    /// and interleaving the two does NOT evict either cache — sharing one would re-walk the whole
+    /// envelope twice per frame, which is the exact cost the column cache exists to avoid.
+    static func overviewTest() {
+        let songs = Library.scan()
+        guard let s = songs.first, let a = try? Analysis.analyse(url: Library.url(s)) else {
+            print("no songs / decode failed"); return
+        }
+        let w = 1400
+        print(String(format: "song: %@  dur=%.2f  width=%d", Library.baseName(s), a.duration, w))
+
+        let ov = a.overviewPeaks(width: w)
+        let full = a.columnPeaks(viewStart: 0, viewEnd: a.duration, width: w)
+        var maxDiff: Float = 0
+        for i in 0..<min(ov.count, full.count) { maxDiff = max(maxDiff, abs(ov[i] - full[i])) }
+        print(String(format: "  agreement with full-song columnPeaks: maxDiff=%.4f  (bucket rounding only)",
+                     maxDiff))
+
+        func time(_ body: () -> Void) -> Double {
+            let t0 = CFAbsoluteTimeGetCurrent(); body(); return (CFAbsoluteTimeGetCurrent() - t0) * 1000
+        }
+        // `w + 1` is a width neither cache holds, so this is the true recompute cost.
+        let cold = time { _ = a.overviewPeaks(width: w + 1) }
+        let cached = time { _ = a.overviewPeaks(width: w + 1) }
+        // Now one frame of the real app, in order: the zoomed waveform, then the strip. If they
+        // shared a cache each would evict the other and both numbers below would read `cold`.
+        _ = a.overviewPeaks(width: w)
+        _ = a.columnPeaks(viewStart: 10, viewEnd: 25, width: w)
+        let stripAfterZoom = time { _ = a.overviewPeaks(width: w) }
+        let zoomAfterStrip = time { _ = a.columnPeaks(viewStart: 10, viewEnd: 25, width: w) }
+        print(String(format: "  recompute=%.3f ms   same width again=%.3f ms", cold, cached))
+        print(String(format: "  strip after a zoomed columnPeaks = %.3f ms  (must stay cached)", stripAfterZoom))
+        print(String(format: "  zoomed columnPeaks after the strip = %.3f ms  (must stay cached)", zoomAfterStrip))
+        let ok = maxDiff < 0.0001 && stripAfterZoom < cold / 4 && zoomAfterStrip < cold / 4
+        print(ok ? "\n✓ ผ่าน — ข้อมูลตรงกัน และไม่กวนแคชกันเอง"
+                 : "\n✗ ไม่ผ่าน" + (maxDiff >= 0.0001 ? " — ข้อมูลไม่ตรงกัน" : " — แคชตีกัน"))
+    }
+
     /// Does "รีเซ็ตเล่นแล้ว" actually clear the badges? Tests the model logic without the UI.
     static func resetTest() {
         let log = LogStore()

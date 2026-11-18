@@ -26,6 +26,31 @@ enum MarkerField: String, CaseIterable {
     /// The field's value on a whole config, for "what it is now" next to a pending proposal.
     static func text(_ f: MarkerField, _ c: SongConfig) -> String { f.text(c.current) }
 
+    /// The three fields that are a time on the waveform, in the order the setup panel shows them.
+    static let times: [MarkerField] = [.introStart, .introEnd, .hook]
+
+    /// The keyPath this field writes, so a nudge or a typed value does not need a switch at every
+    /// call site. nil for the two fields that are not a position in the song.
+    var timeKey: WritableKeyPath<SongConfig, Double>? {
+        switch self {
+        case .introStart: return \.introStart
+        case .introEnd:   return \.introEnd
+        case .hook:       return \.hook
+        case .trimDb, .ignoreEnd: return nil
+        }
+    }
+
+    /// The physical key that marks this field, for on-screen hints.
+    var hotKey: String {
+        switch self {
+        case .introStart: return "I"
+        case .introEnd:   return "O"
+        case .hook:       return "H"
+        case .ignoreEnd:  return "E"
+        case .trimDb:     return "—"
+        }
+    }
+
     /// Formatted for display — seconds for the markers, dB for trim, a word for the flag.
     func text(_ b: SongBase) -> String {
         switch self {

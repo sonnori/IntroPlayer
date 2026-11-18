@@ -8,6 +8,32 @@ func fmtTime(_ t: Double) -> String {
 }
 func fmtSec(_ t: Double) -> String { String(format: "%.2fs", t) }
 
+/// `1:23.45` — the format the typed marker fields use. The hundredths are not decoration: that is
+/// the precision markers are stored at, and the precision the waveform can no longer show once the
+/// view is zoomed out.
+func fmtClock(_ t: Double) -> String {
+    let v = max(0, t.isFinite ? t : 0)
+    let cs = Int((v * 100).rounded())
+    return String(format: "%d:%02d.%02d", cs / 6000, (cs / 100) % 60, cs % 100)
+}
+
+/// Accepts `83.5`, `1:23`, `1:23.4`, `1:23.45` — and nothing else. Returns nil rather than
+/// guessing, so a typo leaves the marker where it was instead of moving it to 0. `1:75` is
+/// rejected too: silently reading it as 2:15 is the kind of help nobody asked for.
+func parseClock(_ s: String) -> Double? {
+    let t = s.trimmingCharacters(in: .whitespaces)
+    guard !t.isEmpty else { return nil }
+    let parts = t.split(separator: ":", omittingEmptySubsequences: false)
+    if parts.count == 1 {
+        guard let v = Double(parts[0]), v.isFinite, v >= 0 else { return nil }
+        return v
+    }
+    guard parts.count == 2,
+          let m = Double(parts[0]), let sec = Double(parts[1]),
+          m.isFinite, sec.isFinite, m >= 0, sec >= 0, sec < 60 else { return nil }
+    return m * 60 + sec
+}
+
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
     @State private var keyMonitor: Any?
@@ -19,7 +45,12 @@ struct ContentView: View {
                 saveFailureBar
                 ReceiveBanner()
                 HStack(spacing: 0) {
-                    SongListView()
+                    // The log REPLACES the song list rather than covering the app. As a sheet it
+                    // hid the song it was describing, which is why `1`/`2`/`I`/`O`/`H` had to be
+                    // blocked while it was open and why Space had to be special-cased back in.
+                    // Side by side, the transport and the current song stay visible and live, so
+                    // none of that is necessary.
+                    if model.showLog { LogPanel() } else { SongListView() }
                     CenterView()
                     SetupPanel()
                 }
@@ -45,7 +76,6 @@ struct ContentView: View {
             if let m = keyMonitor { NSEvent.removeMonitor(m) }
             keyMonitor = nil
         }
-        .sheet(isPresented: $model.showLog) { LogPanel() }
         .sheet(isPresented: $model.showHandover) { HandoverPanel() }
         .sheet(isPresented: Binding(get: { model.importPlan != nil },
                                     set: { if !$0 { model.importPlan = nil } })) { DiffPanel() }
@@ -183,22 +213,34 @@ struct ContentView: View {
                 }
             }
             if e.modifierFlags.intersection([.control, .option]).isEmpty == false { return e }
-            if NSApp.keyWindow?.firstResponder is NSTextView { return e }   // typing in a field
 
-            let sheetUp = model.showLog || model.showHandover || model.importPlan != nil
+            let sheetUp = model.showHandover || model.importPlan != nil
+
+            if NSApp.keyWindow?.firstResponder is NSTextView {
+                // Typing. The marker time fields are numeric, so Space is never valid input
+                // there — and a focus left in a field must never be the reason a buzz cannot be
+                // stopped. Inside a sheet the setter-name field takes real text, so Space is left
+                // alone there.
+                if !sheetUp, e.keyCode == 49, model.player.isPlaying {
+                    model.player.toggleStart(config: model.config())
+                    return nil
+                }
+                return e
+            }
             if e.keyCode == 53 {                                                 // Esc
                 if model.pending != nil { model.cancelPending(); return nil }
                 if model.importPlan != nil { model.importPlan = nil; return nil }
                 if model.showHandover { model.showHandover = false; return nil }
-                if model.showLog { model.showLog = false; return nil }
+                if model.showLog { model.showLog = false; return nil }   // pane, not a sheet
                 return e
             }
-            // With a sheet up, `1`/`2` played an SE and appended a REAL log event, and I/O/H moved
-            // markers on the song hidden behind it. The GM opens these panels mid-taping — they
-            // must not be able to corrupt the take.
+            // With the handover or diff sheet up, `1`/`2` would play an SE and append a REAL log
+            // event, and I/O/H would move markers on a song nobody can see. Space still passes
+            // through as PAUSE only: a contestant can buzz at any moment, and being unable to stop
+            // the audio is worse than any of the above.
             //
-            // Space is the exception, as PAUSE only: a contestant can buzz while the log is open,
-            // and being unable to stop the audio is worse than any of the above.
+            // The log is NOT in this set any more — it is a pane beside the song, so every key
+            // keeps its normal meaning while it is open.
             if sheetUp {
                 if e.keyCode == 49, model.player.isPlaying {
                     model.player.toggleStart(config: model.config())
@@ -228,6 +270,9 @@ struct ContentView: View {
             case 35: model.updateConfigQuiet { $0.played.toggle() }; model.pulse(PulseID.played)
             case 36: model.confirmCurrent()                                      // Return
             case 48: model.nextNeedingReview()                                   // Tab
+            // Audition the hook and stop. `R` stays unbounded — that one is on camera.
+            case 5:  model.previewHook(); model.pulse(PulseID.preview)                     // G
+            case 46: model.cycleFocusMarker()                                              // M
             case 6:  model.zoomIntro(); model.pulse(PulseID.zoomIntro)                     // Z
             case 27, 78: model.zoomBy(1.6); model.pulse(PulseID.zoomOut)                   // -
             case 24, 69: model.zoomBy(1 / 1.6); model.pulse(PulseID.zoomIn)                // =
@@ -236,8 +281,14 @@ struct ContentView: View {
             case 126: model.cancelPending(); model.move(by: -1)                // up
             case 33: model.cancelPending(); model.moveColumn(by: -1)           // [
             case 30: model.cancelPending(); model.moveColumn(by: 1)            // ]
-            case 123: model.pan(by: -model.viewSpan * 0.25)
-            case 124: model.pan(by: model.viewSpan * 0.25)
+            // Shift turns the pan keys into a 0.01 s nudge of the focused marker — the precision
+            // neither the ± buttons (0.1 s) nor a drag at a readable zoom can reach.
+            case 123:
+                if e.modifierFlags.contains(.shift) { model.nudgeFocused(by: -AppModel.nudgeStep) }
+                else { model.pan(by: -model.viewSpan * 0.25) }
+            case 124:
+                if e.modifierFlags.contains(.shift) { model.nudgeFocused(by: AppModel.nudgeStep) }
+                else { model.pan(by: model.viewSpan * 0.25) }
             default: return e
             }
             return nil
@@ -269,31 +320,30 @@ struct SongListView: View {
                         .font(Typo.font(12)).foregroundStyle(Palette.muted)
                     Spacer()
                 }
+                // Rescan stays a button: it is the safe one and the one pressed most (a round
+                // dropped in while the app is open is the commonest real complaint). The two that
+                // throw work away move behind `⋯`, out of slamming range of it — they were three
+                // identical 11pt pills in a row, one of which can wipe a taping's badges.
                 HStack(spacing: 6) {
                     smallButton("⟳ อ่านโฟลเดอร์ใหม่") { model.rescan(); model.flash("อ่าน songs/ ใหม่แล้ว") }
-                    smallButton("↺ รีเซ็ตเล่นแล้ว") {
-                        let used = model.usedInRound
-                        guard used > 0 else {
-                            model.flash("ยังไม่มีเพลงที่ใช้ไปในรอบนี้ — ไม่มีอะไรต้องล้าง")
-                            return
+                    Menu {
+                        Button("↺ รีเซ็ตเล่นแล้ว — เริ่มถ่ายรอบใหม่") { resetPlayedFlow() }
+                        Button("🗑 ล้างเพลงเก่า\(model.orphanCount > 0 ? " (\(model.orphanCount))" : "")") {
+                            pruneFlow()
                         }
-                        guard confirmDestructive(
-                            title: "เริ่มถ่ายรอบใหม่?",
-                            body: "จะล้างสถานะ \"เล่นแล้ว\" และป้าย ✓/✗ ของ \(used) เพลง "
-                                + "ในรอบ \(Library.label(model.currentPlaylist)) "
-                                + "(log เก่ายังเก็บไว้ครบ ไม่ได้ลบ)",
-                            ok: "เริ่มรอบใหม่") else { return }
-                        model.flash(model.resetPlayed())
+                        .disabled(model.orphanCount == 0)
+                    } label: {
+                        Text("⋯").font(Typo.font(13, .semibold))
                     }
-                    smallButton("🗑 ล้างเพลงเก่า\(model.orphanCount > 0 ? " (\(model.orphanCount))" : "")") {
-                        guard model.orphanCount > 0 else { model.flash(model.pruneOrphans()); return }
-                        guard confirmDestructive(
-                            title: "ลบข้อมูลเพลงที่ไม่มีไฟล์แล้ว?",
-                            body: "จะลบ \(model.orphanCount) รายการที่หาไฟล์ใน songs/ ไม่เจอ — "
-                                + "ถ้าเพลงพวกนั้นแค่ถูกย้ายโฟลเดอร์ มาร์กเกอร์จะหายถาวร",
-                            ok: "ลบ") else { return }
-                        model.flash(model.pruneOrphans())
-                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .frame(width: 38)
+                    .padding(.vertical, 2)
+                    .background(Palette.panel2)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.line)
+                        .allowsHitTesting(false))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .help("รีเซ็ตสถานะเล่นแล้ว / ล้างข้อมูลเพลงที่ไม่มีไฟล์")
                 }
             }
             .padding(10)
@@ -331,6 +381,31 @@ struct SongListView: View {
         .frame(width: model.isWide ? 780 : 300)
         .background(Palette.panel)
         .overlay(alignment: .trailing) { Rectangle().fill(Palette.line).frame(width: 1) }
+    }
+
+    private func resetPlayedFlow() {
+        let used = model.usedInRound
+        guard used > 0 else {
+            model.flash("ยังไม่มีเพลงที่ใช้ไปในรอบนี้ — ไม่มีอะไรต้องล้าง")
+            return
+        }
+        guard confirmDestructive(
+            title: "เริ่มถ่ายรอบใหม่?",
+            body: "จะล้างสถานะ \"เล่นแล้ว\" และป้าย ✓/✗ ของ \(used) เพลง "
+                + "ในรอบ \(Library.label(model.currentPlaylist)) "
+                + "(log เก่ายังเก็บไว้ครบ ไม่ได้ลบ)",
+            ok: "เริ่มรอบใหม่") else { return }
+        model.flash(model.resetPlayed())
+    }
+
+    private func pruneFlow() {
+        guard model.orphanCount > 0 else { model.flash(model.pruneOrphans()); return }
+        guard confirmDestructive(
+            title: "ลบข้อมูลเพลงที่ไม่มีไฟล์แล้ว?",
+            body: "จะลบ \(model.orphanCount) รายการที่หาไฟล์ใน songs/ ไม่เจอ — "
+                + "ถ้าเพลงพวกนั้นแค่ถูกย้ายโฟลเดอร์ มาร์กเกอร์จะหายถาวร",
+            ok: "ลบ") else { return }
+        model.flash(model.pruneOrphans())
     }
 
     private var playedCount: Int {

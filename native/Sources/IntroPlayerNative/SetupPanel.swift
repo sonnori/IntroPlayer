@@ -75,7 +75,7 @@ struct SetupPanel: View {
 
         loudnessBlock(c)
 
-        Text("เล่นเพลงฟัง พอถึงจุด กดปุ่ม Mark หรือคีย์ I / O / H ได้เลยขณะเล่น · บนคลื่นเสียง: คลิก = เลื่อนหัวเล่น, ลากเส้นสี = ปรับ marker, ลากที่ว่าง = เลื่อนดู · หมุนล้อ = ซูม · Space เล่นต่อจากตรงที่ค้างอยู่ ถ้าจะกลับต้น Intro กด S")
+        Text("เล่นเพลงฟัง พอถึงจุด กดปุ่ม Mark หรือคีย์ I / O / H ได้เลยขณะเล่น · พิมพ์เวลาลงช่องได้ตรงๆ (1:23.45 หรือ 83.45) · Shift+←/→ ขยับ marker ที่เลือกทีละ 0.01s, M สลับ marker · G ฟัง Hook แล้วหยุดเอง · บนคลื่นเสียง: คลิก = เลื่อนหัวเล่น, ลากเส้นสี = ปรับ marker, ลากที่ว่าง = เลื่อนดู · หมุนล้อ = ซูม · แถบล่างสุด = ทั้งเพลง ลากเพื่อเลื่อนช่วงที่ดู · Space เล่นต่อจากตรงที่ค้างอยู่ ถ้าจะกลับต้น Intro กด S")
             .font(Typo.font(11)).foregroundStyle(Palette.muted)
             .padding(.top, 4)
     }
@@ -86,7 +86,11 @@ struct SetupPanel: View {
                 RoundedRectangle(cornerRadius: 3).fill(m.color).frame(width: 12, height: 12)
                 Text(m.label).font(Typo.font(13, .semibold))
                 Spacer()
-                Text(fmtSec(c[keyPath: m.key])).font(Typo.font(15, mono: true))
+                if let f = m.field {
+                    MarkerTimeField(field: f, value: c[keyPath: m.key])
+                } else {
+                    Text(fmtSec(c[keyPath: m.key])).font(Typo.font(15, mono: true))
+                }
                 // The revert sits next to the VALUE, not in the nudge row below — a "put it
                 // back" button beside the fine-tune buttons is a mis-press waiting to happen.
                 if let f = m.field, c.onsiteEdits.contains(f) {
@@ -109,8 +113,14 @@ struct SetupPanel: View {
                 }
             }
             HStack(spacing: 8) {
-                nudge("−") { model.updateConfig { $0[keyPath: m.key] = max(0, (($0[keyPath: m.key] - 0.1) * 100).rounded() / 100) } }
-                nudge("+") { model.updateConfig { $0[keyPath: m.key] = (($0[keyPath: m.key] + 0.1) * 100).rounded() / 100 } }
+                nudge("−") {
+                    if let f = m.field { model.focus(f) }
+                    model.updateConfig { $0[keyPath: m.key] = max(0, (($0[keyPath: m.key] - 0.1) * 100).rounded() / 100) }
+                }
+                nudge("+") {
+                    if let f = m.field { model.focus(f) }
+                    model.updateConfig { $0[keyPath: m.key] = (($0[keyPath: m.key] + 0.1) * 100).rounded() / 100 }
+                }
                 if m.key == \SongConfig.introStart {
                     Button {
                         guard let p = model.current, let a = model.analysis else { return }
@@ -123,6 +133,18 @@ struct SetupPanel: View {
                     .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color(red: 0.165, green: 0.42, blue: 0.502)))
                     .clipShape(RoundedRectangle(cornerRadius: 7))
                     .help("หาจุดที่เพลงเริ่มดังให้อัตโนมัติ แล้วเลื่อนทั้งช่วง Intro ตามไป")
+                }
+                if m.key == \SongConfig.hook {
+                    Button { model.previewHook() } label: {
+                        Text("♪").frame(width: 38, height: 38).contentShape(Rectangle())
+                    }
+                    .buttonStyle(PressStyle())
+                    .foregroundStyle(Palette.purple)
+                    .background(Palette.panel)
+                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(Palette.purple.opacity(0.55)))
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                    .pulseTarget(PulseID.preview, corner: 7)
+                    .help("ฟัง Hook \(Int(Player.previewSec)) วิแล้วหยุดเอง (G) — ไม่เหมือน Reveal ที่เล่นต่อ")
                 }
                 Button {
                     if let f = m.field { model.requestMark(f) } else { model.mark(m.key) }
@@ -143,11 +165,22 @@ struct SetupPanel: View {
                 Text("🎯 ตั้งให้อัตโนมัติ — ปรับเองได้ตามใจ")
                     .font(Typo.font(10)).foregroundStyle(Palette.cyan)
             }
+            if m.field == model.focusMarker {
+                Text("Shift+←/→ ขยับทีละ 0.01s · M สลับไปตัวอื่น")
+                    .font(Typo.font(10)).foregroundStyle(Palette.muted)
+            }
         }
         .padding(12)
         .background(Palette.panel2)
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Palette.line))
+        // The focused card is where Shift+←/→ lands. Carried by the border, which is otherwise
+        // uniform across all three cards, so the difference is unmissable without a new colour.
+        .overlay(RoundedRectangle(cornerRadius: 10)
+            .stroke(m.field == model.focusMarker ? Palette.lineStrong : Palette.line,
+                    lineWidth: m.field == model.focusMarker ? 2 : 1)
+            .allowsHitTesting(false))
         .clipShape(RoundedRectangle(cornerRadius: 10))
+        .contentShape(Rectangle())
+        .onTapGesture { if let f = m.field { model.focus(f) } }
     }
 
     private func loudnessBlock(_ c: SongConfig) -> some View {
@@ -166,6 +199,12 @@ struct SetupPanel: View {
                 Text("เกลี่ยความดังอัตโนมัติ (ทุกเพลง)").font(Typo.font(13))
             }
             .toggleStyle(.checkbox)
+
+            levelBar(c)
+            if clampPinned(c) {
+                Text("เกลี่ยชนเพดาน ±12 dB แล้ว — เพลงนี้ยังไม่ดังเท่าเป้า ต้องช่วยด้วย Trim")
+                    .font(Typo.font(10)).foregroundStyle(Palette.amber)
+            }
 
             HStack(spacing: 6) {
                 Text("วัดความดังจาก").font(Typo.font(12)).foregroundStyle(Palette.muted)
@@ -200,6 +239,49 @@ struct SetupPanel: View {
         .background(Palette.panel2)
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Palette.line))
         .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// Is the auto-levelling pinned at its clamp? `applyGain` limits the automatic part to
+    /// 0.25x..4.0x, i.e. ±12.04 dB.
+    private func clampPinned(_ c: SongConfig) -> Bool {
+        model.store.normalize && abs(model.player.gainDb - c.trimDb) >= 11.9
+    }
+
+    /// The gain as a position between the clamps, not only a number.
+    ///
+    /// "+12.0 dB" does not tell you that the auto-levelling wanted MORE and was cut off there —
+    /// and that is the one case where the song still goes out quiet and a manual Trim is the only
+    /// remedy. The white tick is the automatic part alone, so the gap between it and the end of
+    /// the fill IS the trim: how much of the level is a human decision reads off the bar.
+    private func levelBar(_ c: SongConfig) -> some View {
+        let total = model.player.gainDb
+        let auto = total - c.trimDb
+        let pinned = clampPinned(c)
+        return HStack(spacing: 7) {
+            Text("−12").font(Typo.font(10, latinOnly: true)).foregroundStyle(Palette.dim)
+            Canvas { ctx, size in
+                let w = size.width, h = size.height
+                func gx(_ db: Double) -> CGFloat { CGFloat((min(12, max(-12, db)) + 12) / 24) * w }
+                let mid = gx(0)
+                ctx.fill(Path(roundedRect: CGRect(x: 0, y: h / 2 - 3, width: w, height: 6),
+                              cornerRadius: 3), with: .color(Palette.panel))
+                let tx = gx(total)
+                ctx.fill(Path(roundedRect: CGRect(x: min(mid, tx), y: h / 2 - 3,
+                                                  width: max(2, abs(tx - mid)), height: 6),
+                              cornerRadius: 3),
+                         with: .color(pinned ? Palette.amber : Palette.accent))
+                ctx.fill(Path(CGRect(x: mid - 0.5, y: 0, width: 1, height: h)),
+                         with: .color(Palette.lineStrong))
+                if model.store.normalize {
+                    let ax = gx(auto)
+                    ctx.fill(Path(CGRect(x: ax - 1, y: 1, width: 2, height: h - 2)),
+                             with: .color(.white.opacity(0.85)))
+                }
+            }
+            .frame(height: 16)
+            .help("แถบ = ความดังรวม · ขีดขาว = ส่วนที่เกลี่ยอัตโนมัติ · ส่วนต่าง = Trim ที่ตั้งเอง")
+            Text("+12").font(Typo.font(10, latinOnly: true)).foregroundStyle(Palette.dim)
+        }
     }
 
     private func scopeButton(_ t: String, _ s: LoudnessScope) -> some View {
@@ -238,5 +320,53 @@ struct SetupPanel: View {
         .buttonStyle(PressStyle()).foregroundStyle(fg).background(bg)
         .overlay(RoundedRectangle(cornerRadius: 9).stroke(border))
         .clipShape(RoundedRectangle(cornerRadius: 9))
+    }
+}
+
+/// Typed `mm:ss.hh` entry for one marker — the precision a drag cannot give you at a zoom level
+/// where you can still see the song, and the only way to copy a time off a reference.
+///
+/// The text is LOCAL state, committed on Return or on losing focus, never per keystroke. Bound
+/// straight to the model it would push an undo snapshot per character and write a half-typed
+/// number — and since `updateConfig` clamps Intro End to at least `introStart + minIntro`, the
+/// lone "1" on the way to "1:20" would drag the other marker along with it.
+struct MarkerTimeField: View {
+    @EnvironmentObject var model: AppModel
+    let field: MarkerField
+    let value: Double
+
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField("", text: $text)
+            .textFieldStyle(.plain)
+            .font(Typo.font(15, mono: true))
+            .multilineTextAlignment(.trailing)
+            .frame(width: 88)
+            .padding(.horizontal, 7).padding(.vertical, 4)
+            .background(focused ? Palette.panel : Palette.panel3)
+            .overlay(RoundedRectangle(cornerRadius: 6)
+                .stroke(focused ? Palette.cyan : Palette.line)
+                .allowsHitTesting(false))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .focused($focused)
+            .onSubmit { commit(); focused = false }
+            .onAppear { text = fmtClock(value) }
+            // While it is not being edited the field has to track the waveform drag, the ±
+            // buttons, an undo and an import — anything that moves the marker from elsewhere.
+            .onChange(of: value) { v in if !focused { text = fmtClock(v) } }
+            .onChange(of: focused) { f in
+                if f { model.focus(field); text = fmtClock(value) } else { commit() }
+            }
+            .help("พิมพ์ 1:23.45 หรือ 83.45 แล้วกด Enter · พิมพ์ผิดจะคืนค่าเดิมให้")
+    }
+
+    private func commit() {
+        // Reject rather than clamp: a typo leaves the marker exactly where it was, which is the
+        // behaviour you want from a field sitting next to a question that is already signed off.
+        guard let t = parseClock(text) else { text = fmtClock(value); return }
+        model.setMarkerTime(field, t)
+        if let k = field.timeKey { text = fmtClock(model.config()[keyPath: k]) }
     }
 }

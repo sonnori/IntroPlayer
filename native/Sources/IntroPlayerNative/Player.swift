@@ -5,18 +5,24 @@ import Foundation
 /// is that playback must never run past Intro End except on a deliberate Reveal.
 enum PlayMode {
     case idle, intro, reveal, free
+    /// A bounded audition of the hook — stops by itself, unlike `reveal`. See `previewHook`.
+    case preview
 
     var chipText: String {
         switch self {
-        case .reveal: return "● เล่นเฉลย / Hook"
-        case .free:   return "● เล่นต่อ (ไม่หยุดเอง)"
-        default:      return "● เล่น Intro"
+        case .reveal:  return "● เล่นเฉลย / Hook"
+        case .free:    return "● เล่นต่อ (ไม่หยุดเอง)"
+        case .preview: return "● ฟัง Hook"
+        default:       return "● เล่น Intro"
         }
     }
 }
 
 final class Player: ObservableObject {
     static let fadeSec: Double = 0.4
+    /// How long `previewHook` plays. Long enough to recognise a chorus, short enough that the
+    /// setter can audition the same spot repeatedly without the song running away from them.
+    static let previewSec: Double = 6
 
     @Published private(set) var isPlaying = false
     @Published private(set) var mode: PlayMode = .idle
@@ -35,6 +41,9 @@ final class Player: ObservableObject {
     /// marker outward has to re-schedule — the node has nothing beyond this to render.
     private var scheduledEndFrame: AVAudioFramePosition = 0
     private var engineReady = false
+    /// Where a `.preview` is allowed to run to. Bounded in `play(from:)` the same way the intro is,
+    /// so the stop is structural and not merely timer-driven.
+    private var previewEnd: Double = 0
 
     /// Fade state. The fade is offset so silence lands exactly on Intro End — it starts at
     /// `introEnd - fadeSec`, never after, so audio never plays past the intro range.
@@ -97,6 +106,7 @@ final class Player: ObservableObject {
         engine.connect(limiter, to: engine.mainMixerNode, format: fmt)
         engineReady = true
         seekOffset = 0; pausedAt = 0; position = 0
+        previewEnd = 0
         mode = .idle
         node.volume = 1
         // Never carry the previous song's gain into this one — a +12 dB track followed by a loud
@@ -168,6 +178,24 @@ final class Player: ObservableObject {
         play(from: h)
     }
 
+    /// Audition the hook and stop. `reveal` plays on forever on purpose — it is what the audience
+    /// hears — so hunting for the hook meant Reveal, listen, Space, nudge, Reveal again, with the
+    /// song further away every time. This is the setter's version of the same jump.
+    func previewHook(config c: SongConfig) {
+        cancelFade()
+        let h = min(max(0, c.hook), max(0, duration - 0.3))
+        previewEnd = min(duration, h + Player.previewSec)
+        mode = .preview
+        play(from: h)
+    }
+
+    /// Seconds before a running preview stops itself. nil whenever one is not running, which is
+    /// what lets the guard strip tell "bounded" from "nothing will stop this".
+    var previewRemaining: Double? {
+        guard mode == .preview, isPlaying || fading else { return nil }
+        return max(0, previewEnd - position)
+    }
+
     func reset(config c: SongConfig) {
         cancelFade()
         pause()
@@ -207,6 +235,8 @@ final class Player: ObservableObject {
         var endFrame = f.length
         if mode == .intro, let c = configProvider?(), !c.ignoreEnd, c.introEnd > c.introStart {
             endFrame = min(endFrame, AVAudioFramePosition(min(duration, c.introEnd) * sr))
+        } else if mode == .preview, previewEnd > 0 {
+            endFrame = min(endFrame, AVAudioFramePosition(min(duration, previewEnd) * sr))
         }
         let frames = AVAudioFrameCount(max(0, endFrame - startFrame))
         guard frames > 0 else { pause(); return }
@@ -296,6 +326,13 @@ final class Player: ObservableObject {
 
         if position >= duration - 0.01 && duration > 0 {
             pause(); mode = .idle; onAutoStop?()
+            return
+        }
+
+        // Bounded preview: same fade, same "land exactly on the boundary" rule as the intro.
+        if mode == .preview {
+            guard previewEnd > 0 else { pause(); mode = .idle; onAutoStop?(); return }
+            if position >= max(0, previewEnd - Player.fadeSec) { beginFade(endAt: previewEnd) }
             return
         }
 

@@ -198,4 +198,38 @@ final class Analysis {
         colCache = out
         return out
     }
+
+    private var ovCache: [Float] = []
+    private var ovWidth = 0
+
+    /// Peaks for the whole song, for the overview strip.
+    ///
+    /// This needs its OWN cache. `columnPeaks` keeps a single entry keyed on the view window, so
+    /// having the strip ask it for `0..duration` while the main waveform asks for a zoomed window
+    /// would make the two evict each other and re-walk the entire envelope **twice per frame** —
+    /// the exact cost the column cache exists to avoid. The strip's window never changes, so
+    /// width alone is a sufficient key.
+    func overviewPeaks(width: Int) -> [Float] {
+        guard width > 0, !env.isEmpty else { return [] }
+        if width == ovWidth, !ovCache.isEmpty { return ovCache }
+        // Same indexing as `columnPeaks` over 0..duration — floor/ceil on bucketHz, not a
+        // proportional split of env.count. Proportional division drops the bucket each column
+        // shares with the next, which cost up to 0.17 of normalised peak at a transient: the strip
+        // and a zoomed-out waveform drew visibly different shapes for the same audio.
+        var out = [Float](repeating: 0, count: width)
+        let span = max(1e-4, duration)
+        for x in 0..<width {
+            var i0 = Int((Double(x) / Double(width) * span * bucketHz).rounded(.down))
+            var i1 = Int((Double(x + 1) / Double(width) * span * bucketHz).rounded(.up))
+            if i1 <= i0 { i1 = i0 + 1 }
+            i0 = max(0, i0); i1 = min(env.count, i1)
+            var m: Float = 0
+            var i = i0
+            while i < i1 { if env[i] > m { m = env[i] }; i += 1 }
+            out[x] = m / globalPeak
+        }
+        ovWidth = width
+        ovCache = out
+        return out
+    }
 }

@@ -25,28 +25,52 @@ struct LogPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Text("📋 บันทึกการถ่ายทำ").font(Typo.font(14, .bold))
-                Text(scopeLabel).font(Typo.font(12)).foregroundStyle(Palette.muted)
-                Spacer()
-                Toggle(isOn: $model.logAllRounds) { Text("ดูทุกรอบ").font(Typo.font(12)) }
-                    .toggleStyle(.checkbox).foregroundStyle(Palette.muted)
-                Button { model.showLog = false } label: {
-                    Text("✕").font(Typo.font(16)).frame(width: 28, height: 28)
+            // Pane header, not a sheet title bar: it must read as "the song list has been
+            // swapped out", because the pane it replaces is where the eye expects the list.
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 10) {
+                    Text("📋 บันทึกการถ่ายทำ").font(Typo.font(14, .bold))
+                    Spacer()
+                    Button { model.showLog = false } label: {
+                        HStack(spacing: 5) {
+                            Text("✕").font(Typo.font(13))
+                            Text("ปิด").font(Typo.font(12))
+                        }
+                        .padding(.horizontal, 9).frame(height: 26)
                         .contentShape(Rectangle())
+                    }
+                    .buttonStyle(PressStyle(corner: 6)).foregroundStyle(Palette.muted)
+                    .background(Palette.panel)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.line)
+                        .allowsHitTesting(false))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .help("ปิดแล้วกลับไปดูรายการเพลง (L หรือ Esc)")
                 }
-                    .buttonStyle(PressStyle()).foregroundStyle(Palette.muted)
+                HStack(spacing: 10) {
+                    Text(scopeLabel).font(Typo.font(12)).foregroundStyle(Palette.muted)
+                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Toggle(isOn: $model.logAllRounds) { Text("ดูทุกรอบ").font(Typo.font(12)) }
+                        .toggleStyle(.checkbox).foregroundStyle(Palette.muted).fixedSize()
+                }
             }
-            .padding(14)
-            Divider().overlay(Palette.line)
+            .padding(12)
+            .background(Palette.panel2)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(Palette.line).frame(height: 1).allowsHitTesting(false)
+            }
 
             let s = summarise(currentSession)
-            HStack(spacing: 10) {
-                stat("\(s.filter(\.correct).count)", "มีคนตอบถูก — ใช้ตัดต่อได้", Palette.green)
-                stat("\(s.filter { !$0.correct }.count)", "ใช้ในกองแล้ว แต่ไม่มีคนตอบ", Palette.amber)
-                stat("\(s.count)", "โจทย์ที่ใช้ไปทั้งหมด", Palette.text)
+            // Three tiles side by side need the wide pane; at 300pt they stack rather than
+            // squeeze, because the number is the part that has to stay legible across the room.
+            Group {
+                if model.isWide {
+                    HStack(spacing: 10) { statTiles(s) }
+                } else {
+                    VStack(spacing: 8) { statTiles(s) }
+                }
             }
-            .padding(14)
+            .padding(12)
             Divider().overlay(Palette.line)
 
             ScrollView {
@@ -65,14 +89,13 @@ struct LogPanel: View {
             }
 
             Divider().overlay(Palette.line)
-            HStack(spacing: 8) {
+            FlowRow(spacing: 8, lineSpacing: 8) {
                 foot("📄 คัดลอกเป็นข้อความ") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(exportText(), forType: .string)
                     model.flash("คัดลอกแล้ว")
                 }
                 foot("⤓ บันทึก CSV") { saveCSV() }
-                Spacer()
                 foot("↩ ยกเลิกรายการล่าสุด", Palette.amber) {
                     if let e = model.logStore.undoLast(playlist: model.logAllRounds ? nil : model.currentPlaylist) {
                         model.flash("ยกเลิก \(Library.title(e.path)) แล้ว")
@@ -97,11 +120,22 @@ struct LogPanel: View {
                     model.objectWillChange.send()
                 }
             }
-            .padding(14)
+            .padding(12)
         }
-        .frame(width: 760, height: 640)
-        .background(Palette.float)
-        .preferredColorScheme(.dark)
+        // Matches the song list it replaces, so the three panes keep their widths and the centre
+        // pane does not resize when the log opens mid-taping.
+        .frame(width: model.isWide ? 780 : 300)
+        .frame(maxHeight: .infinity)
+        .background(Palette.panel)
+        .overlay(alignment: .trailing) {
+            Rectangle().fill(Palette.line).frame(width: 1).allowsHitTesting(false)
+        }
+    }
+
+    @ViewBuilder private func statTiles(_ s: [Summary]) -> some View {
+        stat("\(s.filter(\.correct).count)", "มีคนตอบถูก — ใช้ตัดต่อได้", Palette.green)
+        stat("\(s.filter { !$0.correct }.count)", "ใช้ในกองแล้ว แต่ไม่มีคนตอบ", Palette.amber)
+        stat("\(s.count)", "โจทย์ที่ใช้ไปทั้งหมด", Palette.text)
     }
 
     @ViewBuilder private var rows: some View {

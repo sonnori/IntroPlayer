@@ -187,7 +187,14 @@ struct WaveformView: View {
                                 // config.json has song 102 in exactly that state.
                                 if abs(mx - g.startLocation.x) <= bd { bd = abs(mx - g.startLocation.x); best = m.key }
                             }
-                            if let best { dragKey = best } else { panLast = g.startLocation.x }
+                            if let best {
+                                dragKey = best
+                                // The nudge target follows the hand: whatever was just dragged is
+                                // what Shift+arrow should refine.
+                                if let f = MarkerField.times.first(where: { $0.timeKey == best }) {
+                                    model.focus(f)
+                                }
+                            } else { panLast = g.startLocation.x }
                         }
                         if let k = dragKey {
                             let t = max(0, min(model.player.duration, xToTime(g.location.x, w)))
@@ -259,12 +266,24 @@ struct WaveformView: View {
             onsiteGhost(ctx, b.hook, c.hook, w, h)
         }
 
+        // The window a hook audition will play, while one is running. Drawn under the markers so
+        // the HOOK flag stays on top of its own band.
+        if model.previewArmed {
+            let s0 = timeToX(c.hook, w)
+            let s1 = timeToX(min(model.player.duration, c.hook + Player.previewSec), w)
+            ctx.fill(Path(CGRect(x: s0, y: 0, width: max(1, s1 - s0), height: h)),
+                     with: .color(Palette.hook.opacity(0.16)))
+        }
+
         // Opposite edges, so two markers on the same time can never occlude each other — which
         // is exactly song 102's real state (introStart == introEnd).
-        marker(ctx, x1, Palette.cyan, h, "IN", top: true)
-        marker(ctx, x2, c.ignoreEnd ? Palette.cyan.opacity(0.3) : Palette.cyan, h, "OUT", top: false)
+        let fm = model.focusMarker
+        marker(ctx, x1, Palette.cyan, h, "IN", top: true, focused: fm == .introStart)
+        marker(ctx, x2, c.ignoreEnd ? Palette.cyan.opacity(0.3) : Palette.cyan, h, "OUT",
+               top: false, focused: fm == .introEnd)
         if c.hook > 0 {
-            marker(ctx, timeToX(c.hook, w), Palette.hook, h, "HOOK", top: true, dashed: true)
+            marker(ctx, timeToX(c.hook, w), Palette.hook, h, "HOOK", top: true, dashed: true,
+                   focused: fm == .hook)
         }
 
         // A proposal awaiting its second press: dashed stem, HOLLOW cap, frozen at the position
@@ -311,15 +330,19 @@ struct WaveformView: View {
 
     /// `label` goes ON the flag: the legend lives in another view and only renders when the window
     /// is wide, and two 3pt coloured lines are not a distinction under studio light at 1x.
+    /// `focused` marks the one `Shift+←/→` will nudge. It is carried by WIDTH and an outline, not
+    /// by a different hue: every hue in this app already means exactly one thing, and "which of
+    /// these three am I nudging" is not worth a fourth meaning for cyan.
     private func marker(_ ctx: GraphicsContext, _ x: CGFloat, _ color: Color, _ h: CGFloat,
-                        _ label: String, top: Bool, dashed: Bool = false) {
+                        _ label: String, top: Bool, dashed: Bool = false, focused: Bool = false) {
+        let stem: CGFloat = focused ? 3 : 2
         if dashed {
             var p = Path()
             var y: CGFloat = 0
-            while y < h { p.addRect(CGRect(x: x - 1, y: y, width: 2, height: 5)); y += 8 }
+            while y < h { p.addRect(CGRect(x: x - stem / 2, y: y, width: stem, height: 5)); y += 8 }
             ctx.fill(p, with: .color(color))
         } else {
-            ctx.fill(Path(CGRect(x: x - 1, y: 0, width: 2, height: h)), with: .color(color))
+            ctx.fill(Path(CGRect(x: x - stem / 2, y: 0, width: stem, height: h)), with: .color(color))
         }
         let yBase: CGFloat = top ? 0 : h
         let dir: CGFloat = top ? 1 : -1
@@ -329,9 +352,101 @@ struct WaveformView: View {
         tri.addLine(to: CGPoint(x: x, y: yBase + 9 * dir))
         tri.closeSubpath()
         ctx.fill(tri, with: .color(color))
+        if focused {
+            var ring = Path()
+            ring.move(to: CGPoint(x: x - 9, y: yBase + 0.5 * dir))
+            ring.addLine(to: CGPoint(x: x + 9, y: yBase + 0.5 * dir))
+            ring.addLine(to: CGPoint(x: x, y: yBase + 13 * dir))
+            ring.closeSubpath()
+            ctx.stroke(ring, with: .color(.white.opacity(0.9)), lineWidth: 1.5)
+        }
         // `.foregroundStyle` on Text is macOS 14+; this app targets 13.
         ctx.draw(Text(label).font(Typo.font(10, .bold, latinOnly: true)).foregroundColor(color),
                  at: CGPoint(x: x + 4, y: top ? 15 : h - 15), anchor: .leading)
+    }
+}
+
+/// A fixed whole-song strip under the waveform.
+///
+/// `select()` now opens zoomed on the intro, which is right — but it meant nothing on screen said
+/// WHERE in the song that window sat, so a hook at 1:40 and one at 3:10 looked identical and the
+/// only way to orient yourself was to zoom out and lose the detail you came for.
+///
+/// It moves the VIEW and never the playhead. Two stacked surfaces where a click means different
+/// things is how an intended pan becomes an accidental seek — and a seek while playing re-derives
+/// the play mode, so that mistake can disarm the intro-end stop.
+struct OverviewStrip: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let c = model.config()
+            Canvas { ctx, size in draw(ctx: ctx, size: size, c: c) }
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { g in centreView(at: g.location.x, w) }
+                        .onEnded { g in centreView(at: g.location.x, w) }
+                )
+        }
+        .frame(height: 34)
+        .background(Palette.panel2)
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.line).allowsHitTesting(false))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .help("ทั้งเพลง — ลากเพื่อเลื่อนช่วงที่กำลังดู (ไม่ขยับหัวเล่น)")
+    }
+
+    private func centreView(at x: CGFloat, _ w: CGFloat) {
+        let d = model.player.duration
+        guard d > 0, w > 1 else { return }
+        let t = Double(max(0, min(w, x)) / w) * d
+        let span = model.viewSpan
+        model.viewStart = t - span / 2
+        model.viewEnd = model.viewStart + span
+        model.clampView()
+    }
+
+    private func draw(ctx: GraphicsContext, size: CGSize, c: SongConfig) {
+        let w = size.width, h = size.height
+        let d = model.player.duration
+        guard let a = model.analysis, a.isReady, w > 1, d > 0 else { return }
+        func sx(_ t: Double) -> CGFloat { CGFloat(max(0, min(1, t / d))) * w }
+
+        // Its own cache — see Analysis.overviewPeaks for why it cannot share the column cache.
+        let cols = a.overviewPeaks(width: Int(w))
+        let mid = h / 2
+        var p = Path()
+        for i in 0..<cols.count {
+            let amp = max(0.5, CGFloat(cols[i]) * h * 0.42)
+            p.addRect(CGRect(x: CGFloat(i), y: mid - amp, width: 1, height: amp * 2))
+        }
+        ctx.fill(p, with: .color(Palette.waveOut))
+
+        let a0 = sx(c.introStart), a1 = sx(c.ignoreEnd ? d : c.introEnd)
+        ctx.fill(Path(CGRect(x: a0, y: 0, width: max(1, a1 - a0), height: h)),
+                 with: .color(Palette.cyan.opacity(0.28)))
+        if c.hook > 0 {
+            ctx.fill(Path(CGRect(x: sx(c.hook) - 1, y: 0, width: 2, height: h)),
+                     with: .color(Palette.hook))
+        }
+
+        // The visible window, shown by dimming everything outside it rather than outlining it:
+        // at 2560px wide a deep zoom is a 2px window, and a 2px outline is invisible while a
+        // 2px gap in a dark wash is not.
+        if model.isZoomed {
+            let s = sx(model.viewStart), e = sx(model.viewEnd)
+            ctx.fill(Path(CGRect(x: 0, y: 0, width: s, height: h)),
+                     with: .color(Palette.bg.opacity(0.62)))
+            ctx.fill(Path(CGRect(x: e, y: 0, width: w - e, height: h)),
+                     with: .color(Palette.bg.opacity(0.62)))
+            ctx.stroke(Path(CGRect(x: s, y: 0.75, width: max(2, e - s), height: h - 1.5)),
+                       with: .color(Palette.lineStrong), lineWidth: 1.5)
+        }
+
+        let px = sx(model.player.position)
+        ctx.fill(Path(CGRect(x: px - 1.5, y: 0, width: 3, height: h)), with: .color(Palette.ink))
+        ctx.fill(Path(CGRect(x: px - 0.5, y: 0, width: 1, height: h)), with: .color(.white))
     }
 }
 

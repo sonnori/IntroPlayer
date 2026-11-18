@@ -50,6 +50,15 @@ final class AppModel: ObservableObject {
     }
     @Published var pending: PendingMark?
     private var pendingTask: Task<Void, Never>?
+
+    // MARK: fine adjustment
+    /// Which marker `Shift+←/→` nudges. Follows whatever the setter last touched — a drag, an
+    /// `I`/`O`/`H`, a typed value or a ± press — so the nudge always means "the one I am working
+    /// on" without a mode anybody has to remember. `M` cycles it explicitly.
+    @Published var focusMarker: MarkerField = .introStart
+    /// One hundredth of a second: the precision markers are actually stored at. The ± buttons
+    /// deliberately stay at 0.1 s — this is the step you cannot get from them or from a drag.
+    static let nudgeStep: Double = 0.01
     /// 2 s is tight for someone watching the stage rather than the screen; the only cost of a
     /// longer window is a longer-lived ghost marker.
     static let pendingWindow: Double = 2.5
@@ -311,7 +320,51 @@ final class AppModel: ObservableObject {
 
     func mark(_ key: WritableKeyPath<SongConfig, Double>) {
         let t = (player.position * 100).rounded() / 100
+        if let f = MarkerField.times.first(where: { $0.timeKey == key }) { focusMarker = f }
         updateConfig { $0[keyPath: key] = t }
+    }
+
+    /// Note this takes focus even when the field is not a time: pressing `E` then `Shift+←` should
+    /// not quietly move Intro Start because that was the last *time* field touched.
+    func focus(_ f: MarkerField) {
+        guard focusMarker != f else { return }
+        focusMarker = f
+        objectWillChange.send()
+    }
+
+    /// `M` — step the nudge target through the three markers.
+    func cycleFocusMarker() {
+        let all = MarkerField.times
+        let i = all.firstIndex(of: focusMarker) ?? 0
+        focusMarker = all[(i + 1) % all.count]
+        flash("ปรับละเอียด: \(focusMarker.label)  (Shift+←/→)")
+        objectWillChange.send()
+    }
+
+    /// `Shift+←/→`. Deliberately not guarded by the two-press rule: a 0.01 s step cannot put a
+    /// song on camera, and a confirmation per 10 ms of movement would make the feature useless.
+    func nudgeFocused(by d: Double) {
+        guard current != nil, let k = focusMarker.timeKey else { return }
+        updateConfig { $0[keyPath: k] = max(0, (($0[keyPath: k] + d) * 100).rounded() / 100) }
+        flash(String(format: "%@ %.2fs", focusMarker.label, config()[keyPath: k]))
+    }
+
+    /// A typed `mm:ss.hh` (or plain seconds) value. Rejecting rather than clamping is deliberate:
+    /// the caller restores the displayed text, so a typo leaves the marker where it was.
+    func setMarkerTime(_ f: MarkerField, _ t: Double) {
+        guard current != nil, let k = f.timeKey else { return }
+        guard t.isFinite, t >= 0 else { return }
+        focus(f)
+        let v = player.duration > 0 ? min(t, player.duration) : t
+        updateConfig { $0[keyPath: k] = (max(0, v) * 100).rounded() / 100 }
+    }
+
+    /// `G` — audition the hook for a few seconds and stop. See `Player.previewHook`.
+    func previewHook() {
+        guard current != nil else { return }
+        cancelPending()
+        focus(.hook)
+        player.previewHook(config: config())
     }
 
     // MARK: - two-press confirmation while playing
@@ -325,6 +378,7 @@ final class AppModel: ObservableObject {
     /// the playhead is parked where they chose. While PLAYING the first press only proposes.
     func requestMark(_ f: MarkerField) {
         guard current != nil else { return }
+        focus(f)
         guard player.isPlaying else { pending = nil; applyMark(f, at: player.position); return }
         if let pm = pending, pm.field == f {
             pendingTask?.cancel()
@@ -441,6 +495,14 @@ final class AppModel: ObservableObject {
         guard introGuardArmed else { return nil }
         return max(0, config().introEnd - player.position)
     }
+
+    /// A bounded hook audition stops on its own, so the "⚠ ไม่หยุดเอง" warning must not fire
+    /// during one. Crying wolf on a state that is in fact safe is how a real warning gets ignored.
+    var previewArmed: Bool { player.previewRemaining != nil }
+
+    /// Seconds until playback stops by itself, whichever bound is in force. nil means nothing
+    /// will stop it — which is exactly what the amber strip is for.
+    var secondsToStop: Double? { player.previewRemaining ?? secondsToIntroEnd }
 
     @discardableResult
     func applyAutoStart(_ path: String, analysis a: Analysis, manual: Bool) -> Bool {
