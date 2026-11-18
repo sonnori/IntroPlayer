@@ -1,0 +1,1055 @@
+# RGF Intro Player — Developer Handoff
+
+Handoff doc for continuing development (e.g. in Claude Code). Covers architecture, code map, data
+schema, the audio pipeline, the playback state machine, known edge cases, and suggested next steps.
+
+> This is the single source of truth. `DEV.md` is just a pointer here — don't fork it again.
+
+---
+
+## 1. What this is
+
+A local, offline web app for a **song-intro quiz game show**. The Game Master (GM) plays a short
+intro of a song; contestants buzz to answer; the GM pauses, plays sound effects, and can reveal the
+song by jumping to its hook/chorus.
+
+**Status:** working prototype, used in real tapings.
+
+**Two people, one at a time.** A *setter* (คนเซ็ตโจทย์) prepares a round — finds songs, places
+markers, sets per-song trim — and a different *operator* (คนรันถ่าย) runs the taping. Still a
+single-process, single-machine tool: they do not run at the same time, they hand a folder over.
+See §8e.
+
+> **The operator keeps full editing ability — do NOT add a read-only or locked "show mode".**
+> This was considered and rejected: things go wrong on set and the operator is the only person
+> there. The problem was never *who may edit*, it is *was the edit intended, is it visible, can it
+> be undone, can it be sent back*. That is what §8e and the two-press confirm (§11) solve.
+
+### Core requirements (original spec)
+- Runs 100% locally, **no internet** needed.
+- Reads audio files from `./songs/` and lists them alphabetically.
+- GM controls: **Start** (play intro), **Pause** (on buzz), **Reveal** (jump to hook and play on).
+- Intro is a **range** `[introStart, introEnd]`; playback must **not** continue past `introEnd`
+  into the song, *except* when revealing.
+- Progress/waveform view.
+- Two SE buttons: `/se/correct.mp3`, `/se/wrong.mp3` (fire-and-forget, no scoring).
+
+---
+
+## 2. Design principles / constraints
+
+- **No third-party runtime deps.** Server is Python **standard library only** (works with the
+  system `python3` that ships via Xcode Command Line Tools on macOS). Client is a single vanilla
+  HTML file, no build step, no npm, no CDN.
+- **Offline.** Everything is served from localhost. Waveform + loudness analysis use the browser's
+  built-in Web Audio API. Nothing is fetched from the network.
+- **Original audio files are never modified.** The server streams raw bytes. All audio shaping
+  happens on the *output* in the browser (see §7).
+- **Config is a single JSON file** keyed by filename, so moving the whole folder to another machine
+  carries all settings.
+
+---
+
+## 3. Tech stack
+
+**Native (primary — §6c)**
+
+| Layer  | Tech |
+|--------|------|
+| App    | SwiftUI + AppKit, SwiftPM executable (`native/`), macOS 13 target, no `.xcodeproj` |
+| Audio  | AVAudioEngine → AVAudioUnitEQ (level) → PeakLimiter, `scheduleSegment` for seeking |
+| Data   | the same `config.json` / `log.json` as the web version — §9, §8d |
+| Launch | `IntroPlayerNative.app`, assembled by `./native/build.sh` |
+
+**Web (fallback — §6, §8)**
+
+| Layer  | Tech |
+|--------|------|
+| Server | Python 3 stdlib (`http.server`, `socketserver`), ~300 lines, `server.py` |
+| Client | Single-file vanilla HTML/CSS/JS, `index.html`, ~1400 lines |
+| Audio  | HTML5 `<audio>` + Web Audio API (GainNode + DynamicsCompressor), Canvas waveform |
+| Launch | `IntroPlayer.app` (bash-script bundle, no compiled code); `start.command` as fallback |
+
+No framework, no bundler, no tests harness yet.
+
+---
+
+## 4. Run it (dev)
+
+```bash
+cd IntroPlayer
+python3 server.py           # serves http://localhost:8000
+# then open http://localhost:8000
+```
+
+Port is hard-coded to `8000` in `server.py` (`PORT`). If it is already taken, the server prints a
+short "port in use" message and exits with status 2 instead of dumping a traceback.
+
+**For the show operator** there is `IntroPlayer.app` — see §6b. `start.command` still works and is
+kept as the fallback path (it is the only route that shows server output live in a Terminal).
+
+---
+
+## 5. Directory layout
+
+```
+IntroPlayer/
+├── server.py            # local HTTP server (stdlib only)       — web version
+├── index.html           # entire GM app (HTML+CSS+JS in one file) — web version
+├── native/              # SwiftUI rewrite, the primary app now — see §6c
+├── IntroPlayerNative.app/ # built by native/build.sh (not hand-edited)
+├── IntroPlayer.app/     # launcher bundle for the WEB version — no compiled code, see §6b
+├── start.command        # macOS launcher (fallback / dev)
+├── config.json          # saved settings, keyed by path under songs/ (auto-written)
+├── log.json             # taping log: correct/wrong events, chronological (§8d, auto-written)
+├── songs/               # audio files (.mp3/.m4a/.wav/.ogg/.flac/.aac)
+│   └── <รอบถ่าย>/        # optional subfolder = one playlist/taping (§8c); loose files still fine
+│       └── round.json   # written by "ส่งต่อ" — the handover unit is this folder (§8e)
+├── se/                  # correct.mp3, wrong.mp3
+├── วิธีใช้งาน-SETUP.md   # end-user guide (Thai)
+├── CLAUDE.md            # this file
+└── DEV.md               # pointer to CLAUDE.md
+```
+
+---
+
+## 6. Server (`server.py`)
+
+A single threaded `http.server` handler. Key points:
+
+**Endpoints**
+- `GET /` and `/index.html` → serves `index.html`.
+- `GET /api/songs` → `{"songs": [...]}`, **paths relative to `songs/`** (POSIX separators), found by
+  walking `songs/` recursively, sorted case-insensitively. Hidden files/dirs skipped. A file sitting
+  loose in `songs/` yields a bare filename, exactly as the old flat listing did.
+- `GET /api/config` → contents of `config.json` (`{}` if missing/invalid).
+- `POST /api/config` → overwrites `config.json` with the posted JSON body (pretty-printed, UTF-8).
+- `POST /api/hello` → `{id}` heartbeat; returns `{"clients": n}` live windows. See §12.
+- `GET /api/log` → `{"events": [...]}` from `log.json` (empty list if missing/invalid).
+- `POST /api/log` → `{op}` of `append` (with `event`), `undo`, or `clear`. Returns the full updated
+  list. **Append-only, server-side clock** — see §8d for why this differs from `/api/config`.
+- `GET /songs/<file>` and `GET /se/<file>` → static audio with **HTTP Range support** (206 Partial
+  Content). Range is required so the browser can seek/scrub and so Reveal can jump instantly.
+
+**Notable details**
+- `_serve_file()` implements Range parsing manually (stdlib `SimpleHTTPRequestHandler` doesn't do
+  206). Streams in 64 KB chunks.
+- `_safe_join()` normalizes the path and blocks traversal outside `songs/`/`se/` (returns 403).
+- `ThreadingMixIn` + `allow_reuse_address` so multiple audio range requests don't block each other.
+- Logging is silenced (`log_message` overridden).
+
+Server is essentially "done" — most future work is client-side.
+
+---
+
+## 6b. `IntroPlayer.app` (launcher bundle)
+
+The GM-facing entry point. **It contains no compiled code** — the "executable" is a bash script, so
+there is still no build step and no Xcode dependency. Structure:
+
+```
+IntroPlayer.app/Contents/
+├── Info.plist              # CFBundleExecutable=IntroPlayer, CFBundleIconFile=AppIcon
+├── PkgInfo                 # "APPL????"
+├── MacOS/IntroPlayer       # bash launcher (chmod +x)
+└── Resources/AppIcon.icns  # generated, see below
+```
+
+What the launcher does, in order:
+1. Resolves `APP_ROOT` as `$0/../../..` — i.e. **the bundle must stay in the same folder as
+   `server.py`**. If it can't find `server.py`, it shows an `osascript` alert (there is no Terminal
+   to print to) and exits.
+2. Picks `python3`/`python`; missing Python produces an alert naming `xcode-select --install`.
+3. **Refuses to open a second window.** If `pgrep -f -- "--user-data-dir=$PROFILE"` finds a live UI,
+   it shows an alert and exits — see §12 for why two windows are destructive. The test is on the
+   *profile*, not the port: the server may legitimately be up with no window (started by hand).
+4. If port 8000 already answers, reuses that instance and does **not** kill it on exit. Otherwise
+   starts `server.py` detached, logging to `~/Library/Logs/IntroPlayer.log`, and waits (up to 6 s)
+   for the port to come up.
+5. Runs `caffeinate -d -i -w <server pid>` so the Mac and its display stay awake exactly as long as
+   the server lives — no stray assertion left behind if the app is force-quit.
+6. Opens Chrome (or Edge) with `--app=<url>` and a dedicated `--user-data-dir` under
+   `~/Library/Application Support/IntroPlayer/browser`. That gives a window with no tab bar and no
+   address bar, and keeps the operator's own tabs, extensions and notifications out of the taping.
+7. Blocks on `pgrep -f -- "--user-data-dir=$PROFILE"` rather than on the PID it spawned, because
+   Chrome may hand off to an existing process for that profile and return immediately. When the
+   window closes, the `trap` kills the server (TERM, then KILL after 1 s).
+
+**No Chromium browser installed** → falls back to `open <url>` in the default browser plus a
+blocking `osascript` dialog with a single "หยุด IntroPlayer" button, since in that case there is no
+window whose lifetime the script can follow.
+
+**Icon.** `Resources/AppIcon.icns` was generated from a 1024px PNG drawn with a throwaway
+stdlib-only script (`zlib` + `struct`, signed-distance-field rounded rect / triangle), then
+`sips` → iconset → `iconutil -c icns`. The source script is not kept in the repo; regenerate by hand
+if the icon ever needs to change. `index.html` carries a matching inline-SVG data-URI favicon.
+
+> **Two Dock icons.** The bundle shows its own icon; the Chrome `--app` window shows Chrome's. The
+> bundle icon is the one to quit. Not worth solving — a single-icon setup would mean either a real
+> Cocoa/WKWebView app (needs Xcode) or Safari's "Add to Dock", which cannot start the server.
+
+> **Gatekeeper.** The bundle is unsigned and un-notarized. First launch needs right-click → Open.
+> Copying the folder to another Mac re-triggers the quarantine prompt.
+
+---
+
+## 6c. `IntroPlayerNative.app` — the native rewrite (`native/`)
+
+A full SwiftUI/AppKit port of the GM app. **It is now the primary way the tool is run**; the web
+version (§6, §8) is kept working as the fallback, and both read and write the *same*
+`config.json` / `log.json` in the project root, so the operator can switch mid-taping.
+
+```
+native/
+├── Package.swift                  # SwiftPM executable, macOS 13 target, no .xcodeproj on purpose
+├── build.sh                       # builds + assembles IntroPlayerNative.app
+├── Info.plist
+└── Sources/IntroPlayerNative/
+    ├── App.swift          @main, headless diagnostic flags
+    ├── AppModel.swift     the single ObservableObject the whole UI reads
+    ├── Player.swift       AVAudioEngine graph + the playback state machine (§10)
+    ├── Analysis.swift     envelope, prefix sums, intro-onset detection (§7a/§7a1)
+    ├── Store.swift        config.json + log.json, same schema as the web app (§9, §8d)
+    ├── Library.swift      songs/ scan, path helpers, columns, Diagnostics
+    ├── Handoff.swift      round.json, pre-flight checks, import plan/diff (§8e)
+    ├── HandoverPanel.swift export sheet, diff/accept sheet, receive banner
+    ├── Typography.swift   the Thai font cascade, type scale and Palette (§6d)
+    ├── ContentView.swift  3-pane layout, header, the NSEvent key monitor
+    ├── CenterView.swift / SetupPanel.swift / WaveformView.swift / LogPanel.swift
+    └── Feedback.swift     PressStyle, pulseTarget, confirmDestructive
+```
+
+### Build
+
+```bash
+./native/build.sh          # release, universal (arm64 + x86_64) — use this to hand the app over
+./native/build.sh debug    # this machine's arch only, for iterating
+```
+
+`build.sh` assembles into `IntroPlayerNative.app.new` and swaps at the end, so a failure part-way
+cannot leave you with no app (the old script `rm -rf`'d the bundle first). It also ad-hoc codesigns
+so macOS stops re-prompting after each rebuild, and prints the architectures it produced.
+
+### Headless diagnostics
+
+```bash
+BIN=./IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative
+INTROPLAYER_DIAG=1 $BIN --analyse      # per-song duration, detected intro start, whole/intro RMS
+INTROPLAYER_DIAG=1 $BIN --playtest     # asserts playback stops AT introEnd (overshoot must be 0)
+INTROPLAYER_DIAG=1 $BIN --columns      # ASCII waveform at 3 zoom levels
+INTROPLAYER_DIAG=1 $BIN --resetflow    # drives resetPlayed() end to end
+INTROPLAYER_DIAG=1 $BIN --rescantest   # folder added while running → must appear after rescan
+INTROPLAYER_DIAG=1 $BIN --resettest    # ISO date parsing / session boundary
+INTROPLAYER_DIAG=1 $BIN --preflight    # the handover checklist, per round (read-only)
+INTROPLAYER_DIAG=1 $BIN --titles       # raw filename vs cleaned display title (read-only)
+INTROPLAYER_DIAG=1 $BIN --handoff      # export → on-site edit → plan → accept AND reject
+```
+
+`--handoff` is the only end-to-end proof that `base` is stamped by the handover and not by
+editing, and that a rejected row keeps the local value while an accepted one takes the sender's.
+Run it after any change to `Handoff.swift` or `Store.swift`.
+
+**`INTROPLAYER_DIAG=1` is required.** `--resetflow`, `--rescantest`, `--resettest` and `--handoff`
+**write to
+the operator's real `config.json` / `log.json`** — back both up before running them and restore
+afterwards (`--handoff` also leaves a `songs/<round>/round.json` to delete). Without the env var
+the flag is refused with exit 2, so a stray argument can't reset a taping.
+
+> **Do not drive the running app with synthetic keystrokes** (`osascript`, `key code …`). If the
+> target app isn't frontmost the keystroke lands in whatever is, which during this work meant
+> typing into an unrelated project. Verify through the headless flags instead.
+
+### AppKit/SwiftUI traps this app actually hit
+
+These are not style notes — each one was a user-visible defect.
+
+- **A `Timer.publish` stored in a View is useless here.** `ContentView` is re-initialised on every
+  model publish, so the publisher was recreated and resubscribed each time; measured **1 tick in
+  2 s** while `Player` published at 50 Hz. `followPlayhead()` was therefore dead exactly during
+  playback. The heartbeat is now `Player.onTick`, fired from the guard timer, which runs regardless
+  of what the window is doing (same reasoning as the web version's `guardId`, §8b).
+- **A `.overlay` is hit-testable.** The toast sat over the bottom-centre of the window — i.e. over
+  ✓ Correct — and killed the lower half of the two most important buttons in a taping for 2.4 s
+  after any message. Overlays that are decoration need `.allowsHitTesting(false)`; that includes
+  `RoundedRectangle().stroke()` borders, which were eating waveform seek clicks along the edge.
+- **`.buttonStyle(.plain)` hit-tests the glyphs only** — every button needs
+  `.contentShape(Rectangle())` or only the text itself is clickable.
+- **Scroll events are routed by hit-testing.** An NSView that overrides `scrollWheel(with:)` must
+  claim the cursor, which would swallow the SwiftUI drag/click gestures on the same surface;
+  returning `nil` from `hitTest` fixed the clicks and silently killed the zoom. `WheelCatcher` now
+  only reports its rect and a **local `NSEvent` monitor** (`.scrollWheel` + `.magnify`) filters on
+  it. Note AppKit's `scrollingDeltaY` is the **opposite sign** to the DOM's `deltaY`.
+- **`NSEvent.addLocalMonitorForEvents` must be nil'd on removal.** `installKeyMonitor` guards on
+  `keyMonitor == nil`, so forgetting that left every shortcut permanently dead after one
+  disappear/reappear cycle.
+- **The key monitor is global, so it fires over sheets too.** With the log panel open, `1`/`2` were
+  appending real log events to the song hidden behind it. The handler now bails on `showLog`.
+- **Don't write a `@Published` from inside a layout pass** (`onAppear` / `onChange(of: geo.size)`) —
+  `AppModel.setWide` defers it and skips no-op writes.
+- **`ForEach(…enumerated(), id: \.offset)` reuses views against the wrong model** after a removal.
+  `LogEvent` is `Identifiable` with a `t + path + event + dup` id.
+- **`ISO8601DateFormatter.date(from:)` costs ~26 µs** and the badge logic called it thousands of
+  times a second. `LogEvent.date` is parsed once at load; `status(of:)` is memoised behind
+  `invalidateStatus()`; `resetAt` is parsed once into `resetAtCache`.
+
+---
+
+## 6d. Type and colour (`Typography.swift`)
+
+Two things here were **measured, not chosen by eye**, and both are easy to undo by accident.
+
+### `.font(.system)` does not render this app's Thai in SF
+
+CoreText resolves Thai to **`.ThonburiUI-Regular`** (verify with `CTRunGetAttributes`). ThonburiUI
+ships three weights, so `.medium`, `.semibold`, `.bold` and `.heavy` **all collapse onto
+`ThonburiUI-Bold`** — the app had two usable Thai weights, not five, and no hierarchy was even
+expressible. Its mark zone also overflows the declared ascent at 13 pt, clipping tone marks.
+
+The fix is a **cascade, not a font swap**: SF stays the base descriptor (Latin, metrics, tabular
+digits) with `SukhumvitSet` as the Thai fallback. Measured at 13 pt:
+
+| | ascender | descender | line box |
+|---|---|---|---|
+| SF base (what the app had) | 12.57 | −2.74 | 16.0 |
+| **SF + SukhumvitSet cascade** | **12.57** | **−2.74** | **16.0 — identical** |
+| `NSFont(name: "SukhumvitSet-Text")` directly | 14.34 | −6.16 | 20.0 (**+25 %**) |
+
+So the cascade costs **zero layout change**. Using the face directly inflates every row by a
+quarter — don't "simplify" it to that. `SukhumvitSet.ttc` is in
+`/System/Library/Fonts/Supplemental/` on every macOS 13+, so this adds no dependency. (Sarabun is
+NOT — it is a downloadable asset, missing on the next Mac.)
+
+### No Thai below 12 pt (`Typo.thaiFloor`)
+
+Rasterised at 1×, the mark stack of `ตั้งค่าแล้ว` is a single ~25 %-coverage row at 10–11 pt: `่`
+and `ั` fuse into a grey smear. This machine is a 2560×1080 LG WFHD — **`scale = 1.0`, ~81 PPI** —
+so there is no Retina margin to hide it. It matters most for `✗ ไม่มีคนตอบ` vs `✓ ตอบถูก`: a burned
+question misread as a usable one defeats the whole point of the log (§8d). `Typo.font` clamps for
+you; pass `latinOnly: true` only for Latin micro labels like `Space` or `1xx`.
+
+### One meaning per hue
+
+Before this, **green meant four things** (configured badge, Intro End marker, intro-range fill,
+Correct), **amber six** (Wrong, free mode, played, Ignore Intro End, save failure, Hook) and cyan
+four. The state that can put a whole song on camera cannot share a colour with "this was played".
+
+| hue | the only meaning |
+|---|---|
+| `accent` blue | transport, "playing the intro" |
+| `cyan` | the Intro bracket — **both** ends, told apart by which edge the flag sits on |
+| `green` | a human answered correctly. Nothing else. |
+| `red` | wrong / burned question, and destructive controls |
+| `amber` | **the intro-end stop is not armed, or something is wrong.** Nothing else. |
+| `purple` | Reveal, and the Hook marker it jumps to |
+| `onsite` magenta | changed after the handover |
+
+Three measured constraints behind that table:
+
+- **`accent` vs `purple` collide at deutan ΔE 1.2** — literally the same colour to a deutan
+  viewer. Blue-vs-purple can therefore *never* be the only carrier of the armed/disarmed bit; the
+  guard strip uses amber **plus a word**, and amber is ~24 ΔL\* from both.
+- The outcome pair must be **saturated green + saturated red** (deutan ΔE 35.5). Two pastels
+  collapse to 9.6, and the palette this replaced sat at **7.3** — that was `✓ Correct` vs
+  `✗ Wrong`, the two biggest buttons in the app.
+- Grey ladder steps are now 5.5–6.9 ΔL\* (they were 4.2–4.4, which reads as one flat field at 1×),
+  and `float` sits 19 L\* above `panel` so a sheet reads as above its pane. `LogPanel` used to be
+  `Palette.panel` — the identical value to the panes behind it.
+
+## 7. Audio pipeline (important)
+
+Two independent uses of Web Audio:
+
+### a) Waveform + loudness analysis (`loadWaveform` → `buildEnvelope`)
+On song select, the file is fetched as an ArrayBuffer and `decodeAudioData`'d in a throwaway
+`AudioContext` (immediately `close()`d). One pass over the decoded channel produces:
+- `env` — peak amplitude per ~1 ms bucket, for the canvas waveform (see §8b).
+- `sqPrefix` — a `Float64Array` cumulative **sum of squares**, so `rmsRange(t0,t1)` is O(1).
+
+This does **not** touch playback; it's analysis only. The decoded buffer is dropped afterwards.
+
+### a1) Auto-detected Intro Start (`detectIntroStart`)
+A song with no markers yet gets its `introStart` guessed from where the music actually begins, so
+the GM never opens a song whose intro is 8 seconds of silence. Applied in `loadWaveform`, and
+re-runnable from the 🎯 button next to Intro Start. Moving the start **keeps the intro's length** —
+the GM picks a duration, not an end point.
+
+**One threshold cannot do this job**, which the real library proves: song 103 carries 0.0118 of tape
+hiss in its first second, while song 107's actual opening notes are only 0.0066 — the noise in one
+file is louder than the music in another. So it runs two stages:
+
+1. Find a **confident loud onset**: short-window RMS above `max(songRms*0.08, 0.004)`, sustained for
+   `ONSET_HOLD` (60 ms) so a click can't trip it.
+2. **Walk backwards** from that onset while anything audible continues (`quietThr`), stopping at the
+   first real gap. This recovers a quiet lead-in without being fooled by hiss — the silence in front
+   of the music is what stops the walk.
+
+Then subtract `PRE_ROLL` (0.25 s) so the first note isn't clipped. Measured against the first
+audible sound across all 9 songs, the result lands within ±0.2 s on 7 of them; the two outliers are
+a hiss-prefixed file (correctly skipped) and a slow fade-in (0.85 s in).
+
+> `auto:true` marks the guess. `isConfigured()` must check it **before** the value comparison —
+> an auto start moves `introStart`/`introEnd` off their defaults, which would otherwise light up the
+> green "set" badge and claim the GM had configured the song. `afterCfgChange()` clears the flag
+> (and removes the on-screen note, since it doesn't re-render the setup panel).
+
+### a2) What the auto-gain measures (`measuredRms`)
+`loudnessScope` (`config._settings.loudnessScope`, default **`'intro'`**) picks the window:
+
+- **`'intro'`** — RMS of `[introStart, introEnd]`, i.e. *only the audio the audience actually hears*.
+- **`'song'`** — RMS of the whole file (the original behaviour).
+
+Why the default changed: the GM only ever plays ~15 s of intro, but the old code averaged the whole
+file. Songs with a soft intro and a loud chorus therefore measured "loud" and got **under-boosted on
+exactly the part that airs** — and since intros are usually the sparse part of a track, the error
+skews one way, quiet.
+
+Measured on the first 8 songs of the library (intro taken as 0–15 s, the default range):
+
+| scope | on-air intro level, spread across the 8 songs |
+|-------|-----------------------------------------------|
+| whole song (old) | **9.4 dB** — from −8.2 dB to +1.1 dB off target |
+| intro range (new) | **0.0 dB** — every song lands on `TARGET_RMS` |
+
+Zero is expected, not suspicious: when the measurement window is the playback window, the gain is
+by construction `TARGET_RMS / measured`. It only drifts off target when the ±12 dB clamp bites or
+the fallback kicks in.
+
+`measuredRms()` falls back to whole-song when the intro range is shorter than `MIN_SCOPE_SEC`
+(0.5 s) or quieter than `MIN_USABLE_RMS` (0.005) — a silent lead-in would otherwise divide into
+the maximum +12 dB boost. The reason is surfaced in the UI under the scope buttons (`#scopeNote`).
+
+Because the intro range *is* the measurement window, `afterCfgChange()` calls `applyGain()`: moving
+a marker re-levels the song. Gain is deliberately **not** re-applied during a marker drag — writing
+`gainNode.gain.value` mid-playback would click.
+
+> **Migration note:** any `trimDb` set before this change was dialled in against whole-song
+> measurement, so those songs are now corrected twice. Re-check trim on songs that carry one, or
+> flip the scope back to "ทั้งเพลง".
+
+### b) Playback graph (`ensureGraph`)
+Created lazily on the **first play** (Web Audio needs a user gesture). Wiring:
+
+```
+<audio> element ─► MediaElementSource ─► GainNode ─► DynamicsCompressor (limiter) ─► destination
+```
+
+- **GainNode** = level only. Combined gain = `autoGain * trim` where
+  `autoGain = clamp(TARGET_RMS / songLoudness, 0.25, 4.0)` when normalize is on (else 1), and
+  `trim = dbToGain(config[song].trimDb)`. See `applyGain()`.
+- **DynamicsCompressor** is configured as a brick-wall-ish limiter (threshold −1 dB, ratio 20) to
+  stop clipping when a quiet track is boosted.
+
+> **Audio-quality note (asked about during dev):** the source file is untouched, but the *output*
+> passes through gain + limiter **at all times once the graph exists** — even when normalize is off,
+> the limiter still sits in the path and will act on peaks ≥ −1 dBFS. This is inaudible in practice
+> but not bit-perfect on the loudest passages. If bit-perfect output is ever needed (e.g. recording
+> a broadcast), add a true bypass: when `normalizeEnabled === false && trimDb === 0`, connect
+> `srcNode → destination` directly and skip gain+limiter. Currently NOT implemented (left as-is by
+> product decision). SE sounds bypass the graph entirely (plain `new Audio()`), so they're always raw.
+
+### c) Intro-end fade (`startIntroFade`)
+When auto-stopping at `introEnd`, we fade the gain to ~0 so there's no hard click. The fade is
+**offset to finish exactly at `introEnd`** (starts at `introEnd − FADE_SEC`, default 0.4 s), so audio
+never plays past the intro range. Manual stop (Space/Reset) is instant, no fade (`cancelFade`).
+After a fade the gain is left low and restored on the next play (avoids a pop while pausing).
+
+---
+
+## 8. Client architecture (`index.html`)
+
+Everything is one file: `<style>`, markup (3-column layout: song list / center player / setup
+panel), and one `<script>`.
+
+### Key module-level state
+- `songs` — array of filenames from `/api/songs`.
+- `config` — the whole config object (see §9). Special key `_settings` holds app-wide settings.
+- `current` — currently selected filename (or null).
+- `mode` — playback intent: `'idle' | 'intro' | 'reveal' | 'free'` (drives the intro-end auto-stop).
+- `env`, `envHz`, `globalPeak` — amplitude envelope for the waveform (see §8b).
+- `view` — `{s,e}`, the visible time window in seconds. `colPeaks`/`colKey` cache it per pixel column.
+- `songLoudness` — loudness cache, filename → RMS.
+- `rafId` (drawing) and `guardId` (intro-end guard) — see §8b for why they are separate.
+- `audioCtx`, `srcNode`, `gainNode`, `limiterNode`, `graphReady` — Web Audio graph.
+- `normalizeEnabled` — master loudness toggle (persisted in `config._settings.normalize`).
+- `fading`, `fadeTimer`, `FADE_SEC` — intro-end fade state.
+- `dragKey` — which marker is being dragged on the waveform.
+
+### Function map (grouped)
+- **Load/render:** `init`, `renderList`, `selectSong`, `renderSetup`, `syncFields`.
+- **Waveform/canvas:** `loadWaveform`, `buildEnvelope`, `measureLoudness`, `sizeCanvas`, `timeToX`,
+  `xToTime`, `draw`, `marker`, `rebuildCols`.
+- **Zoom/pan:** `viewSpan`, `clampView`, `zoomFit`, `zoomAt`, `zoomBy`, `zoomIntro`, `panBy`,
+  `isZoomed`, `updateZoomLabel`, `followPlayhead`.
+- **Markers/config:** `cfgFor` (returns/creates per-song settings), `markAt`, `setIgnoreEnd`,
+  `setTrim`, `setNormalize`, `setPlayed`, `resetPlayed`, `pruneOrphans`, `afterCfgChange`,
+  `saveConfig` (debounced POST to `/api/config`).
+- **Transport:** `startLoop`/`stopLoop` (rAF draw loop), `checkIntroEnd`, `startIntroFade`,
+  `cancelFade`, `reflectPlaying`, `updateChip`, `setIdle`, `toggleStart`, `testIntro`, `reveal`,
+  `resetSong`.
+- **Audio graph:** `ensureGraph`, `resumeCtx`, `applyGain`, `dbToGain`, `clamp`.
+- **SE:** `playSE`.
+- **Keyboard/nav:** global `keydown` handler, `moveSel`.
+
+---
+
+## 8b. Waveform zoom + the two loops
+
+### Envelope, not PCM
+`buildEnvelope()` reduces the decoded channel to an **amplitude envelope at `ENV_HZ` (1000)
+buckets/sec** — ~1 MB for a 4½-minute song, versus ~45 MB for the raw Float32 PCM. The decoded
+`AudioBuffer` is dropped right after, so nothing large stays resident. 1 ms resolution is far finer
+than the deepest zoom (`MIN_SPAN` = 0.2 s), so zooming never needs the PCM again.
+
+### Per-column cache
+`rebuildCols(W)` collapses the envelope into one peak per canvas pixel column for the current view,
+keyed on `W + view.s + view.e`. `draw()` calls it every frame but it early-returns unless the view
+or the canvas width changed. This is what keeps the draw loop cheap: recompute cost scales with the
+**visible span**, not the song length, so a deep zoom (where the view moves every frame) is the
+cheapest case, and full-song view (expensive) is recomputed only on an explicit zoom/resize.
+
+Column peaks are normalised against `globalPeak` (whole-song max), not a per-view max — otherwise a
+quiet passage would balloon to full height as soon as you zoomed into it.
+
+### Interaction
+- **Wheel/two-finger** = zoom at the pointer; trackpad pinch arrives as `ctrlKey+deltaY` and lands
+  on the same path. Shift-wheel or horizontal wheel = pan.
+- **Drag on empty canvas** = pan. Because click-to-seek shares that surface, mousedown only records
+  a *pending* seek (`panFrom`); past `PAN_SLOP` (4 px) it becomes a pan, and a release with no
+  movement calls `seekTo()`. Dragging **on** a marker line still moves the marker (unchanged).
+  Note the seek fires on mouse**up**, not mousedown — that is what makes the two gestures separable.
+- `followPlayhead()` keeps the playhead on screen while playing, jumping a page at a time rather
+  than scrolling continuously — cheaper, and much less dizzying to watch while marking.
+- Markers are stored at **0.01 s** now (they were 0.1 s); zoom is what makes that precision usable.
+  The `− / +` nudge buttons deliberately still step 0.1 s.
+
+### Why `guardId` exists (important)
+Drawing runs on `requestAnimationFrame`. **Chrome freezes rAF entirely for a backgrounded or
+minimised window** — verified: 0 frames/sec. The intro-end auto-stop used to ride on that same rAF
+tick, so a GM who switched apps mid-intro would have heard the intro run straight into the song,
+violating the app's core requirement. `startLoop()` therefore also arms
+`guardId = setInterval(checkIntroEnd, 40)`; pages playing audio are exempt from Chrome's intensive
+timer throttling, so the guard keeps firing. **Don't move `checkIntroEnd` back to rAF-only.**
+
+(The fade itself was never at risk: `startIntroFade` schedules a `linearRampToValueAtTime` on the
+`AudioContext` clock, which no throttling touches. Only the `finish()` timeout is throttled, and it
+just pauses and snaps `currentTime` back to `introEnd` — silent either way.)
+
+### Persistence flow
+Any settings change → mutate `config` in memory → `saveConfig()` (debounced 250 ms) → `POST
+/api/config` → server writes `config.json`. On load, `init()` GETs both songs and config.
+
+---
+
+## 8c. Playlists (subfolders of `songs/`)
+
+A subfolder of `songs/` is a **playlist = one taping session**; loose files form an unnamed round
+labelled `ROOT_LABEL`. Songs are identified end-to-end by their **path relative to `songs/`**.
+
+- `playlistOf` / `baseName` / `titleOf` / `songUrl` are the path helpers. `songUrl()` encodes each
+  segment separately — `encodeURIComponent` on the whole path would turn `/` into `%2F`.
+- `currentPlaylist` filters the list, the ↑/↓ navigation, the header counts, and **`resetPlayed`**
+  (that button means "starting a new taping", and a taping is one folder — clearing other rounds
+  from it would be a nasty surprise). `pruneOrphans` stays global.
+- Remembered in `_settings.lastPlaylist`. **This is what makes a newly added folder look like
+  "the app can't find my songs"** (reported from real use): the scan finds it, the picker lists it,
+  but the app reopens on the remembered round so the new one is hidden behind the dropdown. The
+  native app therefore rescans on window activation, on `Cmd+R`, and from a **⟳ อ่านโฟลเดอร์ใหม่**
+  button, and names any newly-found rounds in a toast. The web version relies on `Cmd+R`.
+- **The picker is hidden while every file is loose**, so a library that was never reorganised looks
+  and behaves exactly as it did before this feature existed.
+
+### Three columns inside a round
+The list splits the selected playlist into 3 columns by the **leading digit of the filename**:
+`1xx` / `2xx` / `3xx + everything else` (`colOf()`). It is display-only — nothing is stored per
+column, and a file with no leading digit lands in column 3.
+
+- `↑`/`↓` stay **inside** the active column; `[` / `]` hop between columns (skipping empty ones)
+  and land on that column's first song. `←`/`→` were unavailable — they pan the waveform.
+- `activeCol` follows whatever song is selected, including mouse clicks. `selectSong()` doesn't
+  rebuild the list, so it calls `syncColHighlight()` to move the header highlight.
+- Sized for the 2560×1080 ultrawide this runs on: list 780px still leaves ~1460px for the
+  waveform. A `max-width:1500px` media query falls back to the original single column with the
+  group headers stacked inline, so a narrower window still works.
+- Titles are clamped to 2 lines with the full name in a `title` tooltip — uniform row heights
+  matter more than complete titles when scanning during a take.
+
+### Why paths, not filenames
+Config keys had to move from bare filename to relative path. If two rounds contain the same
+filename — which happens when a song is reused — filename keys would make them share one entry,
+including **`played`**: you would open a fresh taping with songs already crossed off. Path keys keep
+rounds independent, and loose files keep their bare-filename key, so old flat configs still match.
+
+The cost is that a reused song starts blank. `findDonor()` looks for the same basename already
+configured in another round and offers `copyCfgFrom()` — it copies markers/`ignoreEnd`/`trimDb` but
+**never `played`**, and the button disappears once the song is configured.
+
+> Moving a file between folders orphans its settings (same trade-off as renaming — see §9).
+
+---
+
+## 8d. Taping log (`log.json`)
+
+Questions are not run in list order, so the running order itself is the thing worth recording. The
+log is a flat chronological event list — that ordering plus the timestamps is what lets the edit
+team find each take on the tape.
+
+```json
+{"events":[{"t":"2026-08-04T23:46:28+07:00","playlist":"EP01","path":"EP01/02_x.mp3","event":"correct"}]}
+```
+
+**Only `correct` and `wrong` are logged.** `reveal` means "question used" too, but the GM hammers
+Reveal while hunting for the hook during setup, which would bury the real takes — so it is
+deliberately excluded. The server rejects any other `event` value.
+
+**Derived status** (`statusOf(path)`, scanning the events):
+| result | meaning | badge |
+|--------|---------|-------|
+| `correct` | at least one Correct — answered | green ✓ ตอบถูก |
+| `wrong` | Wrong(s) but never a Correct — **used on set, unusable in the edit** | amber ✗ ไม่มีคนตอบ |
+| `null` | never used | — |
+
+That middle row is the whole point of the feature: the question is burned (it aired on set and
+can't be reused) yet contributes nothing to the cut.
+
+**Why a separate file and an append endpoint.** `/api/config` POSTs the whole object, so two open
+windows clobber each other (§12). The log takes one event and appends server-side, so it can't be
+lost that way, and the timestamp comes from the server rather than a client clock.
+
+Only `score()` (Correct/Wrong) sets `played=true`. **Reveal deliberately does not** — the GM
+hammers it while hunting for the hook during setup, so it is the same bad signal that keeps it
+out of the log. `P` remains the manual override.
+
+**UI**: header button (or `L`), Esc/backdrop closes. Scoped to the current playlist with a "ดูทุกรอบ"
+toggle. Exports as text (grouped summary + true running order) or CSV with a UTF-8 BOM so Excel
+reads Thai correctly. `↩ ยกเลิกรายการล่าสุด` exists because mis-presses happen live.
+
+### Sessions: how `resetPlayed` interacts with the log
+**`resetPlayed` does not delete log events** — the log is the tape's history and must survive
+starting a new taping. But the ✓/✗ badges are *derived* from the log, so clearing only `played`
+left them stuck forever and reset looked broken (reported from real use).
+
+Fix: `resetPlayed` stamps `config._settings.resetAt[playlist]` with the current time, and
+`statusOf()` ignores events at or before that stamp. Nothing is deleted; the badges just reflect
+the current taping. `isCurrentSession(e)` is the shared predicate — the song badges, the log
+summary tiles, the header button count and the text export all use it, so they can't disagree.
+
+The log panel still lists **every** event: pre-reset rows are dimmed (`.lrow.past`) under a
+`↺ เริ่มถ่ายรอบใหม่` divider, so older takes read as history rather than as a failed reset. The CSV
+keeps every row too and adds a `รอบถ่าย` column (`ปัจจุบัน`/`ก่อนหน้า`).
+
+> Clearing the log outright is still a separate, explicitly-confirmed button.
+
+---
+
+## 8e. Handover between setter and operator
+
+The unit of handover is **one round folder**. `round.json` is written *into* it, so copying
+`songs/EP05/` carries the questions with the audio and there is no second thing to remember.
+
+```
+songs/EP05/
+├── round.json     ← the questions: introStart, introEnd, hook, trimDb, ignoreEnd (+ configured/auto)
+├── 101_....mp3
+└── 102_....mp3
+```
+
+**`round.json` is an export format, not the live file.** `config.json` stays the working file for
+both the native and the web app — that is what keeps the web fallback usable mid-taping (§6c).
+Dropping the live store into the round folder instead would have recreated §12's clobber problem
+across two machines.
+
+**Import is a MERGE**, touching only the five question fields. It never writes `played`,
+`resetAt` or the log. This is why session state can stay inside `config.json`: the thing that
+wiped a taping was whole-file handover, not the fact that `played` sits next to `introStart`.
+
+### `base` — what was signed off
+
+Every song carries `base: {introStart, introEnd, hook, trimDb, ignoreEnd}`, written **only** by
+export and import — never by an ordinary marker edit. So:
+
+- `onsiteEdits` is **derived** (`current != base`), never stored, so it cannot go stale — same
+  reasoning as `isCurrentSession` deriving from `resetAt` rather than a flag.
+- The setter's value is never lost, so every field has a `↺ คืนค่าเดิม` and the waveform can show
+  a ghost stem at the old position.
+- `base == nil` means this round never went through a handover, so a library that was never
+  handed over shows no on-site badges at all.
+
+Stamp `base` on every save and "แก้ที่กอง" means nothing. Don't.
+
+### The return path
+
+The operator exports `round.json` back (a few KB, no audio). The setter imports it and
+`Handoff.plan` produces one `DiffRow` **per changed field**, compared **incoming-vs-local** — not
+incoming-vs-base, so it is still correct when BOTH sides edited the same song since the handover;
+the setter sees both values and picks. Accepting takes the sender's value, rejecting keeps the
+local one, and either way `base` is re-stamped from the result so both sides agree again.
+
+A bulk import drops the undo stack (`afterBulkChange`) — `Cmd+Z` must not restore half a round.
+
+### Pre-flight
+
+`Preflight.fast` is the no-decode checklist (missing file, never opened, still auto-guessed, intro
+shorter than 3 s, hook past the end of the song, hook still at the default 60 s); the sheet opens
+on it instantly. `Preflight.silentIntros` needs a decode per song and fills in behind it. Each row
+jumps to its song and closes the sheet, so a warning is fixed in place rather than closed, hunted
+and reopened.
+
+> Run `--preflight` against the real library before trusting a change here. It was what confirmed
+> the hook step is being skipped in practice: **8 of 9 songs still had `hook: 60` exactly.**
+
+Handover never *blocks* — a round with warnings sometimes has to go out — but a blocking warning
+routes the button through `confirmDestructive` first.
+
+## 9. `config.json` schema
+
+Keyed by **path relative to `songs/`** (a bare filename for loose files). Example:
+
+```json
+{
+  "_settings": {
+    "normalize": true, "loudnessScope": "intro", "lastPlaylist": "EP01",
+    "resetAt": { "EP01": "2026-08-06T01:40:00.000Z" }   // "new taping starts here" — see §8d
+  },
+  "EP01/SongA.m4a": {
+    "introStart": 14.2,   // seconds; intro begins here
+    "introEnd": 15.5,     // seconds; auto-stop (with fade) lands here
+    "hook": 60,           // seconds; Reveal jumps here
+    "trimDb": 0,          // per-song manual gain trim, dB (−12..+12)
+    "ignoreEnd": false,   // if true, don't auto-stop at introEnd
+    "played": false,      // "used this taping" flag (ephemeral-ish)
+    "configured": true,   // GM actually placed markers — drives the green "set" badge
+    "auto": false,        // introStart was guessed, not set by the GM (§7a1)
+    "base": {             // what the setter signed off at handover — §8e. Written ONLY by
+      "introStart": 14.2, // export/import, never by an ordinary edit. Absent = this round
+      "introEnd": 15.5,   // never went through a handover, so no on-site badges show.
+      "hook": 60, "trimDb": 0, "ignoreEnd": false
+    }
+  }
+}
+```
+
+- `cfgFor(name)` lazily fills defaults from `DEFAULT_CFG`
+  `{introStart:0, introEnd:15, hook:60, ignoreEnd:false}`, and returns a **throwaway** copy when
+  `name` is falsy so browsing with no song selected can't write a `"null"` key.
+  `trimDb`/`played`/`configured` are optional (treated as 0/false when absent).
+- **Merely selecting a song creates its entry** (with defaults). That's why the file grows just from
+  browsing; the prune button is the cleanup.
+- `configured` is written by `afterCfgChange()` — i.e. only by marker edits, not by trim/played.
+  `isConfigured()` falls back to comparing against `DEFAULT_CFG` for entries written before the flag
+  existed, so old configs keep their badge.
+- `_settings` is app-wide; excluded from the song list and from orphan pruning.
+- **Keys are paths**, so renaming *or moving* an audio file orphans its settings. The
+  **🗑 ล้างเพลงเก่า** button (`pruneOrphans`) deletes entries whose files no longer exist under
+  `songs/`. See §8c for why paths rather than filenames.
+
+---
+
+## 10. Playback state machine (and a fixed bug)
+
+`mode` decides whether the intro-end auto-stop applies:
+- `idle` — stopped/ready.
+- `intro` — playing the intro; `checkIntroEnd` fades+stops at `introEnd` (unless `ignoreEnd`).
+- `reveal` — playing from the hook; **no** auto-stop.
+- `free` — playing from a point already past `introEnd`; **no** auto-stop.
+
+`modeForPosition(t,c)` is the single rule — `(t < introEnd-0.02 || ignoreEnd) ? 'intro' : 'free'` —
+and **both** entry points below call it, so they cannot drift apart.
+
+**Space/Start (`toggleStart`) — Start never rewinds:**
+- If playing (any mode) → pause instantly (cancels any fade).
+- If stopped → **play from wherever the playhead is**, mode via `modeForPosition`.
+
+**Click-to-seek (`seekTo`) — seeking re-arms or disarms the guard:**
+- Seeking is deliberate, so while playing it re-derives the mode for where you landed. That is what
+  lets the GM **click past Intro End mid-playback and keep playing without ticking Ignore Intro
+  End** — previously `mode` stayed `'intro'` and the guard faded out the moment you landed.
+- Seeking *back* inside the range re-arms the auto-stop.
+- It calls `cancelFade()` first: a click during the intro-end fade means "keep going", not "stop".
+  Skipping that would leave the gain ramped to ~0 and the audio silent after the jump.
+- While **paused** it only moves the playhead — it never starts playback, and leaves `mode` alone
+  for `toggleStart` to derive on the next Space.
+
+So the guard arms itself whenever playback is before Intro End, and past that point there is no
+intro left to protect. The amber `free` chip makes it visible that the auto-stop is *not* armed.
+
+Every other `currentTime` write is a deliberate rewind: `loadedmetadata` and `resetSong` park on
+`introStart`, `testIntro` jumps there, `reveal` jumps to `hook`, and the fade's `finish()` snaps
+back to `introEnd`.
+
+The playhead lands on `introStart` by itself in the cases that matter — selecting a song, and
+**Reset (`S`)**, which is the one key that rewinds. `Test Intro` also jumps to `introStart`
+explicitly. Pause-on-buzz → Space resumes exactly where it stopped, still in `intro` mode.
+
+> **Superseded behaviour:** Start used to force `currentTime = introStart` whenever `mode !== 'intro'`.
+> That made it impossible to audition from a clicked position, which is why it changed. The bug the
+> old rule was guarding against (below) is still handled — by deriving the mode from the playhead
+> rather than by rewinding.
+
+> **Bug that was fixed:** previously, after using Reveal (common while setting the hook), `mode`
+> stayed `'reveal'`, so pressing Space resumed in reveal mode and played *past* `introEnd` — looking
+> like "Ignore Intro End" was on when it wasn't. Fix: Start from a stopped state always begins a
+> fresh intro unless we were paused mid-intro. Also added a defensive `fading=false` reset in
+> `setIdle`, a `cancelFade()` at the start of `toggleStart`'s play path, and a visible status chip
+> (`updateChip`: blue "เล่น Intro" / purple "เล่นเฉลย/Hook" / "หยุด") so the mode is always visible.
+
+---
+
+## 11. Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `Space` | Start / Pause (universal) |
+| `S` | Reset (stop + jump to introStart) |
+| `R` | Reveal (jump to hook, play on) — deliberately does **not** mark Played |
+| `1` / `2` | SE correct / wrong — **also writes the taping log** (§8d) |
+| `L` | Open/close the taping log (`Esc` closes) |
+| `P` | Toggle Played on current song |
+| `I` / `O` / `H` | Mark introStart / introEnd / hook at playhead — **confirm-on-second-press while playing** |
+| `E` | Toggle Ignore Intro End — same two-press rule |
+| `Return` | ยืนยันค่านี้ — clears `auto`, advances to the next song needing review |
+| `Tab` | Jump to the next song needing review |
+| `Cmd+Z` | Undo the last marker edit (≤40 deep) |
+| `Cmd+E` | Open the handover pre-flight |
+| `↑` / `↓` | Previous / next song **within the active column** |
+| `[` / `]` | Move to the previous / next column |
+| `+` / `−` | Zoom waveform in / out (around the playhead) |
+| `0` | Zoom to fit the whole song |
+| `Z` | Zoom to the intro range |
+| `←` / `→` | Pan the view by 25% of the visible span |
+
+Handler ignores keystrokes when focus is in an `<input>`, and bails on Cmd/Ctrl/Alt so `Cmd+R`
+reloads instead of firing Reveal.
+
+### The two-press rule (`I` / `O` / `H` / `E`)
+
+These four keys were instant, silent and irreversible, and they sit on the same keyboard as the
+four keys the operator hammers during a take. **`E` is the worst**: keyCode 14 is next to `R` (15),
+and it disarms the intro-end stop outright — which plays the whole song on camera.
+
+- **Stopped → immediate.** That is the setter's normal way of working and the playhead is parked
+  where they chose, so the guard would only be friction.
+- **Playing → the first press only proposes.** A second press of the SAME key within 2.5 s
+  commits. `Esc`, a seek, Reveal, Reset or any song change cancels it; the window expires silently.
+- **The committed value is the position captured at the FIRST press.** Using the second press's
+  position would let 2.5 s of playback drift into the marker and silently set the wrong value —
+  this is the detail that would make the whole feature quietly wrong.
+
+Why keyed on `isPlaying` rather than a mode toggle: a mode has to be remembered, and the day
+somebody forgets to switch it is the day it does not help.
+
+> **Switch on `e.code`, never `e.key`.** This machine's input source is often **Thai**, where the S
+> key reports `e.key === 'ห'` — every letter shortcut in the app silently stopped working. `e.code`
+> is `'KeyS'` under any layout. Digits likewise need `Digit1`/`Numpad1`. Don't "simplify" this back.
+
+---
+
+## 12. Known limitations / edge cases
+
+- **Single machine, single operator.** No auth, no concurrency, localhost only.
+- **Two open windows clobber each other's config.** Every save POSTs the *whole* `config` object, so
+  a second window/tab loaded earlier will overwrite anything the first one saved. (Hit for real
+  while testing the `.app` alongside a browser tab.) Two guards now exist, but the underlying
+  whole-object write is still there — a per-song PATCH endpoint would be the real fix:
+  1. The `.app` refuses to launch a second time (`pgrep` on the browser profile → alert → exit).
+  2. Every window pings `POST /api/hello` every 4 s; the server keeps a `CLIENTS` dict with a
+     12 s TTL and returns the live count, and any window seeing `clients > 1` shows a red banner.
+     This is what catches a stray browser tab, which the launcher check cannot see.
+- **Web Audio needs a gesture:** normalization/fade only engage after the first click/play. Before
+  that, gain isn't applied.
+- **Long files:** `decodeAudioData` loads the whole file into memory for analysis. Fine for songs;
+  very long files could be heavy. Only the ~1 MB envelope is retained afterwards (§8b).
+- **Filename-keyed config:** renaming a file loses its markers (by design; prune button cleans up).
+- **`played` persists** in `config.json` across reloads (intentional, survives a mid-show reload);
+  reset with the **↺ รีเซ็ตเล่นแล้ว** button when starting a new taping.
+- **No automated tests.** Current verification is `node --check` on the extracted script + manual
+  server smoke tests (curl the endpoints).
+
+### Fixed (was broken, don't re-introduce)
+
+**Native app** (see §6c for the AppKit/SwiftUI traps behind several of these):
+- `I`/`O`/`H`/`E` wrote a marker **instantly, silently and irreversibly** from the live playhead,
+  on the same keyboard the operator hammers during a take. `E` was the dangerous one — keyCode 14
+  sits next to `R` (15) and it disarms the intro-end stop, i.e. plays the whole song on camera.
+  See the two-press rule in §11, and note the committed value must come from the FIRST press.
+- **There was no undo anywhere** (only `LogStore.undoLast`), and `store.set` writes straight
+  through. One accidental waveform drag silently overwrote a configured marker for good.
+  `pushUndo` coalesces same-song snapshots inside 700 ms, so one drag is one undo step, not sixty.
+- The status chip rendered **only while playing** (`CenterView.chip` keyed on `playing`), and
+  `Player.pause()` leaves `mode` untouched. So pausing past Intro End — or ticking `E` — left the
+  disarmed state **invisible in exactly the moment the operator decides to press Space**. It is
+  now a fixed-height strip derived from `modeForPosition` + `ignoreEnd`, truthful while paused,
+  with a countdown: "armed" has to be proven by a moving number, not asserted by a label.
+- `isARepeat` blocks a HELD key but not two taps: two `1`s 120 ms apart **overlapped two correct
+  stings on camera and wrote two log events**. `score` now has a 400 ms lockout.
+- The key monitor returned `e` for everything once `showLog` was true — including keyCode 49, so
+  **Space could not pause when a contestant buzzed with the log open.** Space now passes through
+  as pause-only; `1`/`2`/`I`/`O`/`H` stay blocked.
+- `configured = true` was a side effect of ANY marker write, so there was no way to say "that
+  guess is right" without first changing it — the setter could not sweep a round. `Return`
+  confirms, `Tab` jumps to the next song needing review.
+- `select()` called `zoomFit()`, which at ~6 px/s puts a 15 s intro in ~90 px of 1460 — every song
+  started with a manual `Z`. It opens on `zoomIntro()` now. A second `zoomFit()` in the analysis
+  callback also **wiped any zoom made during the decode**; removed.
+- "Never opened" and "the app guessed it" both rendered the **same empty badge** — completely
+  different things to a setter. Three states now: `○ ยังไม่เปิด` / `🎯 เดาไว้` / `✓ ตั้งค่าแล้ว`.
+- `✓` meant both "played" (amber) and "correct" (green) — two near-identical glyphs, different
+  meanings. `played` is the dimming and strikethrough only; it gets no badge.
+- Marker flags were all at the top edge with a `<=` z-order tie-break, so two markers on the same
+  time could not both be grabbed. Intro Start caps at the top, Intro End at the **bottom**, which
+  makes song 102's `introStart == introEnd` reachable by construction.
+- The full-height progress rect was drawn **on top of** the intro-range tint, so the zone changed
+  colour as the playhead crossed it and both read as "some kind of range". Progress is 1-D now: a
+  6 pt bar on the bottom edge.
+- The waveform was pinned at `height: 140` with ~580 pt of empty `Spacer()` below it, so a quiet
+  lead-in rendered 3–4 px tall and the marker drag target was a sliver. It fills the pane.
+- Transport buttons used `.fixedSize()`, so "▶ Start" → "❚❚ Pause" changed width and Reveal /
+  Reset / Played **slid sideways every time playback started** — a click aimed at Reset could land
+  on Reveal. Fixed widths, fixed order. Correct/Wrong went from 12 pt apart to 56 pt.
+- A failed save was 12 pt amber text in the header — the same colour as `played`, at the smallest
+  size in the app, for the one condition that silently loses a day of markers. Full-width red bar.
+- `isWide`'s 1500 px breakpoint left the centre pane 378 px at exactly 1500 (a 330 px waveform and
+  a wrapped transport row). Raised to 1900.
+- `Player.pause()` called `node.pause()` **before** reading the playhead. `playerTime(forNodeTime:)`
+  returns nil the moment the node stops, so `livePosition()` fell through to the stale `pausedAt`
+  and assigned it to itself — **the playhead jumped back to the previous pause on every buzz**
+  (measured 5.00 s where it should have been 6.98 s). Read the position first.
+- The intro-end stop relied on the guard timer alone. `play(from:)` now **bounds the scheduled
+  segment at Intro End**, so the node has nothing left to render past it and the core requirement
+  is structural rather than timer-dependent. `Player.remode()` re-schedules when the marker moves
+  *outward* (or Ignore Intro End is ticked) mid-playback — the drag commits on mouse-up, not per
+  frame, or the reschedule clicks.
+- The fade ramped **dB**, which sounds like an instant 42% drop on the first step and is
+  perceptually silent a quarter of the way in. It is linear in amplitude (`node.volume`), like the
+  web original.
+- The intro-end guard **failed open**: a missing config or a degenerate `introEnd <= introStart`
+  let playback run on. It now stops instead. Independently, `Store.decode` repairs such a range at
+  load (and demotes the entry to `auto`, so the green "set" badge shows the song still needs the
+  GM) — the live `config.json` had song 102 at `introStart == introEnd == 33.73`, which made
+  `modeForPosition` return `.free` and would have played the whole song on camera.
+- `load()` didn't reset the gain, so a +12 dB track followed by a loud one went out 12 dB hot if
+  Start was pressed before analysis finished.
+- `Analysis` indexed the envelope at a flat `envHz` (1000) while the actual bucket rate is
+  `sampleRate/step` = 1002.27 Hz at 44.1 kHz — a 0.227% drift, **half a second by minute four**,
+  which put the drawn waveform out of step with the playhead used to place markers. Use `bucketHz`.
+- `Analysis.columnPeaks` had no cache, so the whole envelope was re-walked on every Canvas render.
+  The web version's `rebuildCols` early-return (§8b, "what keeps the draw loop cheap") had simply
+  not been ported.
+- `select()` spawned an uncancelled `Task.detached` full-file decode per song and cached nothing —
+  holding ↓ through a round started one per song, all concurrent. Now cancelled and cached by path.
+- `LogStore.append/undoLast/clear` rewrote a stale snapshot, which would delete every event the web
+  fallback had appended server-side since launch. They `load()` first.
+- `saveNow()` reported `"saved ✓"` unconditionally — a read-only volume or a TCC-blocked folder
+  looked fine all day and lost every marker at quit. It now catches, sets `saveFailed`, and the
+  header shows it. Also: `JSONSerialization` raises an **Obj-C** exception on NaN that `try?`
+  cannot catch, so `Store.decode` rejects non-finite values before they reach the file.
+- The save is debounced 250 ms, so quitting right after a marker edit dropped it. `AppModel`
+  flushes on `willTerminate` / `willResignActive`.
+- `resetAt` was decoded with a whole-dictionary cast, so one bad value failed the lot and
+  `writeSettings` then **erased every reset stamp in the file**. Decoded per key now.
+- `isCurrentSession` returned `true` for an undatable event (fail-open), which is what a stuck
+  badge looks like. The web app writes `toISOString()` (always milliseconds) and the Python server
+  writes `timespec="seconds"`; **one `ISO8601DateFormatter` cannot parse both**, so a reset done in
+  the web app parsed as nil. There are two formatters, and the predicate fails closed.
+- `↺ รีเซ็ตเล่นแล้ว` / `🗑 ล้างเพลงเก่า` / `🗑 ล้าง log` had no confirmation; `pruneOrphans` would
+  delete the entire config if `songs/` became unreadable (scan returns `[]` → everything an
+  orphan). Both are guarded, and `rescan` keeps the old list rather than silently emptying it.
+- Reveal jumped to `hook` unclamped — the default is 60 s, so every song shorter than that
+  scheduled zero frames and **Reveal went silent on camera**.
+- Two markers on the same time: the tie-break was strict `<`, so the later one could never be
+  grabbed and Intro End was unreachable on the waveform (exactly song 102's state).
+- Switching playlist left `current` in the old round, so Correct/Wrong logged the song under the
+  *other* round's playlist.
+- `flash()` compared message text, so two identical messages made the first timer clear the second
+  toast early. It counts instead.
+
+**Web version:**
+- `loadWaveform` opened with `if(decoding) return;`, which dropped the **newer** request: clicking
+  song B while A was still decoding left B with no waveform, no auto-gain and no auto Intro Start,
+  stuck on "กำลังวิเคราะห์คลื่นเสียง…" until re-selected. It uses a token — latest selection wins.
+- `normalizeEnabled` used to be initialised at script-parse time, when `config` is still `{}` — so
+  `_settings.normalize:false` never survived a reload. It is now read inside `init()` **after** the
+  config fetch resolves.
+- `draw()` used to call `cfgFor(current)` with no null guard (e.g. on window resize before any song
+  was selected), creating a `config["null"]` entry. `draw()` now returns early and `cfgFor()` refuses
+  to store for a falsy name.
+- The green "set" badge used to test `c.introStart||c.introEnd||c.hook`, which the defaults
+  (`introEnd:15`, `hook:60`) satisfy — so every song ever selected looked configured. See
+  `isConfigured()` in §9.
+- `document.querySelectorAll('.nudge')` also matched the trim **0** reset button (it carries
+  `.nudge` but no `data-k`) and was assigned *after* `$('trimReset').onclick`, silently replacing it.
+  Clicking it wrote `config[song][undefined] = NaN`, which serialises as `"undefined": null`. The
+  selector is now `.nudge[data-k]`.
+- The intro-end auto-stop ran only on the rAF tick, which Chrome freezes for a background window —
+  see the `guardId` note in §8b.
+- The keyboard handler switched on `e.key`, so every letter shortcut died whenever the Thai input
+  source was active. See §11.
+- **The song list would not scroll once a column was taller than the window.** Two separate breaks
+  in the same height chain: (a) `#songList` sits between `.list` and `.cols` and had no flex rules,
+  so it took its content height and the columns were sized against *that* rather than the window;
+  (b) `.cols` used `flex-basis:auto`, which makes the base size the content height. Both let the
+  stack outgrow `.list`, whose `overflow:hidden` then clipped it with no scrollbar anywhere. The
+  narrow fallback had a third variant — `.col` kept the wide layout's `flex:1 1 0`. Rule of thumb
+  for this layout: **every element between `.list` and `.colbody` needs `flex:1 1 0` + `min-height:0`**
+  (or `flex:0 0 auto` in the stacked fallback, where `.list` itself is the scroller). Only shows up
+  with more songs than fit on screen — test with ~60.
+- The log overlay used the `hidden` attribute while `.logwrap` set `display:flex`. An author
+  `display` beats the UA sheet's `[hidden]{display:none}`, so the panel could not be closed at all.
+  Fixed with an explicit `.logwrap[hidden]{display:none}`. Any future overlay needs the same pair.
+
+---
+
+## 13. Suggested next steps / ideas
+
+Product / UX
+- Optional **true audio bypass** switch for bit-perfect output (see §7 note).
+- Adjustable **fade length** and **loudness target** in the UI (currently `FADE_SEC` / `TARGET_RMS`
+  constants).
+- Separate **audience/second-screen view** (read-only progress, big song reveal).
+- Auto-sort or hide **played** songs. (Per-episode song sets via subfolders: done, §8c.
+  Setter → operator handover: done, §8e.)
+- Countdown timer / buzzer-time display during intro.
+
+Engineering
+- **Refactor `index.html`** into `app.js` + `styles.css` if it keeps growing (still no build step).
+- Add a small **test suite** (e.g. Playwright) for the state machine and the intro-end/fade logic.
+- Make **port configurable** (env var / CLI arg). "Port already in use" is handled; the `.app`
+  reuses a live instance rather than failing.
+- Consider **EBU R128 (ffmpeg loudnorm)** offline pre-processing as an alternative/complement to the
+  in-browser RMS normalization for more accurate leveling.
+- Persist **UI prefs** (last selected song, normalize toggle) — normalize already persists.
+
+---
+
+## 14. Quick verification recipe
+
+### Native app
+
+```bash
+./native/build.sh debug
+BIN=./IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative
+
+# back up first — the write-y flags touch the operator's real data
+cp config.json log.json /tmp/
+
+INTROPLAYER_DIAG=1 $BIN --analyse    # detection + loudness per song
+INTROPLAYER_DIAG=1 $BIN --playtest   # overshoot must be 0.000, ignoreEnd must still bypass
+INTROPLAYER_DIAG=1 $BIN --resetflow  # must print "✓ ผ่าน" and keep every log event
+
+cp /tmp/config.json /tmp/log.json .  # restore
+```
+
+### Web version
+
+```bash
+# syntax-check the client script
+python3 - <<'PY'
+import re; h=open('index.html',encoding='utf-8').read()
+open('/tmp/app.js','w').write(re.search(r'<script>(.*)</script>',h,re.S).group(1))
+PY
+node --check /tmp/app.js
+
+# smoke-test the server
+python3 server.py & sleep 1
+curl -s localhost:8000/api/songs
+curl -s -D - -o /dev/null -H 'Range: bytes=0-99' "localhost:8000/songs/SOME_FILE.mp3" | grep -i 'HTTP\|Content-Range'
+```

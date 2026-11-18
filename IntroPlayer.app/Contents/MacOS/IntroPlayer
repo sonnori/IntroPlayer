@@ -1,0 +1,151 @@
+#!/bin/bash
+#
+# IntroPlayer.app — launcher for the RGF Intro Player.
+#
+# This bundle has no compiled code: it starts server.py without a visible Terminal
+# window, opens a chromeless browser window, keeps the Mac awake while the show is
+# running, and shuts the server down when that window is closed.
+#
+# It must sit in the same folder as server.py.
+#
+set -u
+
+PORT=8000
+URL="http://localhost:$PORT"
+PROFILE="$HOME/Library/Application Support/IntroPlayer/browser"
+LOG="$HOME/Library/Logs/IntroPlayer.log"
+
+# .../IntroPlayer.app/Contents/MacOS/IntroPlayer -> the folder holding the .app
+APP_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+
+alert() {  # $1 = message. Shown as a real dialog; there is no Terminal to print to.
+  /usr/bin/osascript -e "display alert \"IntroPlayer\" message \"$1\" as critical" >/dev/null 2>&1
+}
+
+die() { alert "$1"; exit 1; }
+
+# ---- preconditions -------------------------------------------------------
+[ -f "$APP_ROOT/server.py" ] || die "หา server.py ไม่เจอ\n\nIntroPlayer.app ต้องอยู่ในโฟลเดอร์เดียวกับ server.py และโฟลเดอร์ songs/"
+
+if command -v python3 >/dev/null 2>&1; then
+  PY=python3
+elif command -v python >/dev/null 2>&1; then
+  PY=python
+else
+  die "ยังไม่ได้ติดตั้ง Python\n\nเปิดแอป Terminal แล้วพิมพ์:\nxcode-select --install\n\nติดตั้งเสร็จแล้วเปิด IntroPlayer อีกครั้ง"
+fi
+
+cd "$APP_ROOT" || die "เข้าโฟลเดอร์ $APP_ROOT ไม่ได้"
+mkdir -p "$(dirname "$LOG")" "$PROFILE"
+
+# ---- single instance ------------------------------------------------------
+# Two windows on the same server is the one thing that reliably corrupts config.json: each window
+# POSTs the WHOLE config object, so whichever saves last wipes the other's markers. Refuse to open
+# a second one rather than warn and carry on. Test the UI window (the profile), not the port —
+# the server may legitimately be up with no window (e.g. started by hand from Terminal).
+port_open() { "$PY" -c "
+import socket,sys
+s=socket.socket(); s.settimeout(0.25)
+sys.exit(0 if s.connect_ex(('127.0.0.1',$PORT))==0 else 1)
+" >/dev/null 2>&1; }
+ui_running() { pgrep -f -- "--user-data-dir=$PROFILE" >/dev/null 2>&1; }
+
+UI_UP=false
+ui_running && UI_UP=true
+
+# Healthy and already open → say so and stop. But a window whose server has died must NOT hit this
+# path: refusing there would strand the operator with a dead window and no way to restart. In that
+# case fall through, revive the server, and reuse the window that is already on screen.
+if $UI_UP && port_open; then
+  /usr/bin/osascript -e 'display alert "IntroPlayer เปิดอยู่แล้ว" message "มีหน้าต่าง IntroPlayer เปิดอยู่แล้ว — ไปใช้หน้าต่างนั้นได้เลย
+
+ถ้าเปิดสองหน้าต่างพร้อมกัน ค่าที่ตั้งไว้ (marker, Trim) จะเขียนทับกันเองจนหายได้ โปรแกรมเลยไม่เปิดซ้ำให้
+
+หาหน้าต่างไม่เจอ? กดไอคอน IntroPlayer ที่ Dock" as informational' >/dev/null 2>&1
+  exit 0
+fi
+
+# ---- server --------------------------------------------------------------
+SERVER_PID=""
+cleanup() {
+  if [ -n "$SERVER_PID" ]; then
+    kill "$SERVER_PID" 2>/dev/null
+    # give it a moment to release the port before the next launch
+    for _ in 1 2 3 4 5; do kill -0 "$SERVER_PID" 2>/dev/null || break; sleep 0.2; done
+    kill -9 "$SERVER_PID" 2>/dev/null
+  fi
+}
+trap cleanup EXIT
+# A trapped INT/TERM runs the handler and then *resumes* the script — without this the launcher
+# would survive a force-quit, kill its server, and keep looping. macOS then still sees the bundle
+# as running, so `open` only activates it and the app can never be restarted. Exit explicitly and
+# let the EXIT trap do the cleanup.
+trap 'exit 143' INT TERM
+
+if port_open; then
+  : # already running (double launch) — reuse it and leave it alone on exit
+else
+  echo "--- $(date) starting ---" >>"$LOG"
+  "$PY" server.py >>"$LOG" 2>&1 &
+  SERVER_PID=$!
+  # keep the Mac (and its display) awake only for as long as the server lives
+  /usr/bin/caffeinate -d -i -w "$SERVER_PID" >/dev/null 2>&1 &
+
+  for _ in $(seq 1 60); do
+    port_open && break
+    kill -0 "$SERVER_PID" 2>/dev/null || break
+    sleep 0.1
+  done
+  if ! port_open; then
+    # Show the actual reason in the dialog. "See the log file" is useless to an operator standing
+    # in a studio — the ERROR lines server.py prints are already written for a human to read.
+    WHY=$(grep -E "^ERROR:|^ +[a-zA-Zก-๙]" "$LOG" 2>/dev/null | tail -4 \
+          | sed 's/^ERROR: //' | tr -d '"\\' | tr '\n' '@' | sed 's/@/\\n/g')
+    [ -z "$WHY" ] && WHY="ไม่ทราบสาเหตุ"
+    die "เปิดเซิร์ฟเวอร์ไม่สำเร็จ\n\n$WHY\n\nรายละเอียดเต็ม:\n$LOG"
+  fi
+fi
+
+# ---- UI window -----------------------------------------------------------
+CHROME=""
+for c in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+         "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+         "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"; do
+  [ -x "$c" ] && { CHROME="$c"; break; }
+done
+
+if $UI_UP; then
+  # The window was already on screen with a dead server; we just revived it. Reuse that window
+  # instead of opening a second one, and fall through to the wait loop so the trap still cleans up.
+  # backgrounded: `display alert` is modal, and blocking here would stall the script before the
+  # wait loop below, so the server would outlive its window until someone clicked OK.
+  /usr/bin/osascript -e 'display alert "เปิดเซิร์ฟเวอร์ใหม่ให้แล้ว" message "หน้าต่าง IntroPlayer ยังเปิดอยู่ แต่ตัวรันเบื้องหลังหยุดไป — เปิดให้ใหม่แล้ว
+
+กลับไปที่หน้าต่างเดิมแล้วกด Command + R เพื่อโหลดหน้าใหม่" as informational' >/dev/null 2>&1 &
+elif [ -n "$CHROME" ]; then
+  # --app gives a window with no tab bar and no address bar; the private profile
+  # keeps other tabs, extensions and notifications out of the way during a taping.
+  "$CHROME" --app="$URL" \
+            --user-data-dir="$PROFILE" \
+            --no-first-run \
+            --no-default-browser-check \
+            --disable-features=Translate >/dev/null 2>&1 &   # Chrome is very chatty; keep the log for server errors
+  sleep 1
+else
+  # No Chromium browser: fall back to the default browser plus an explicit stop button,
+  # since we have no window whose lifetime we can follow.
+  /usr/bin/open "$URL"
+  /usr/bin/osascript -e 'display dialog "IntroPlayer กำลังทำงานอยู่
+
+เล่นเกมได้ที่หน้าต่างเบราว์เซอร์
+กดปุ่มข้างล่างเมื่อเลิกใช้งาน" buttons {"หยุด IntroPlayer"} default button 1 with title "IntroPlayer" with icon note' >/dev/null 2>&1
+  exit 0
+fi
+
+# Wait for the window to close, then the trap shuts the server down. Must sit outside the branches
+# above: the revived-server path has no window of its own to wait on but still owns the server, and
+# falling through to exit here would have the trap kill the server we just started.
+# Track the profile, not a PID — Chrome may hand off to an existing process and return at once.
+while pgrep -f -- "--user-data-dir=$PROFILE" >/dev/null 2>&1; do sleep 1; done
+
+exit 0

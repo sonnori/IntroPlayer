@@ -1,0 +1,27 @@
+# ── build output ─────────────────────────────────────────────────────────
+# SwiftPM build dir — ~900 MB, regenerate with ./native/build.sh
+native/.build/
+# Assembled native bundle, built by native/build.sh. The web launcher
+# IntroPlayer.app/ IS tracked: it contains no compiled code, only a bash
+# script + icns (see CLAUDE.md §6b).
+IntroPlayerNative.app/
+IntroPlayerNative.app.new/
+
+# ── operator data, NOT code ──────────────────────────────────────────────
+# Written continuously by the running app (markers, played flags, resetAt,
+# taping log). Deliberately untracked so a `git checkout .` during code work
+# can never wipe a setter's markers or a taping's log. The backup path for
+# these is copying the round folder — see CLAUDE.md §8e.
+config.json
+log.json
+# Export artifact, written into a round folder by "ส่งต่อ"
+songs/*/round.json
+
+# ── audio ────────────────────────────────────────────────────────────────
+# The song library (~29 MB of commercial music). The app scans whatever is
+# in songs/ at runtime; nothing here is needed to build.
+songs/
+
+# ── local / machine-specific ─────────────────────────────────────────────
+.claude/settings.local.json
+.DS_Store

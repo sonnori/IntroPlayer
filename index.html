@@ -1,0 +1,1384 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IntroPlayer — Song Intro Quiz</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%23e25232'/><path d='M38 25 L75 50 L38 75 Z' fill='%23fff'/></svg>">
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1f232c; --line:#2a2f3a;
+    --text:#e8eaed; --muted:#9aa3b2; --accent:#4f8cff;
+    --green:#2ecc71; --red:#ff5566; --amber:#ffb340; --cyan:#27d3e0; --purple:#7a5cff;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    display:flex; flex-direction:column; height:100vh; overflow:hidden;
+  }
+  header{padding:12px 18px; display:flex; align-items:center; gap:14px; flex:0 0 auto; background:#e25232; color:#fff}
+  header h1{font-size:16px; margin:0; letter-spacing:.5px; color:#fff}
+  header .dot{width:9px;height:9px;border-radius:50%;background:#7a1d10}
+  header .dot.ok{background:#093}
+  header .save{margin-left:auto; font-size:12px; color:rgba(255,255,255,.85)}
+  .layout{flex:1 1 auto; display:flex; min-height:0}
+
+  /* list */
+  .list{width:780px; flex:0 0 780px; border-right:1px solid var(--line); background:var(--panel);
+    display:flex; flex-direction:column; overflow:hidden}
+  .list .head{padding:10px 12px; background:var(--panel); border-bottom:1px solid var(--line); display:flex; flex-direction:column; gap:7px; flex:0 0 auto}
+  /* flex-basis 0, not auto: with `auto` the base height is the content height, so a long column
+     inflates .cols past .list and everything gets clipped by .list's overflow:hidden with no
+     scrollbar anywhere. Only shows up once a column is taller than the window. */
+  /* #songList sits between .list and .cols. It has to carry the height constraint too — a plain
+     div here takes its content height, so the columns get measured against that instead of the
+     window and no scrollbar ever appears. */
+  #songList{flex:1 1 0; min-height:0; display:flex; flex-direction:column}
+  .cols{flex:1 1 0; display:flex; min-height:0}
+  .col{flex:1 1 0; min-width:0; min-height:0; display:flex; flex-direction:column; border-right:1px solid var(--line)}
+  .col:last-child{border-right:none}
+  .colhead{padding:7px 10px; font-size:11px; color:var(--muted); background:var(--panel2);
+    border-bottom:1px solid var(--line); flex:0 0 auto; display:flex; gap:6px; align-items:baseline}
+  .colhead b{color:var(--text); font-size:12px}
+  .col.oncol .colhead{background:#243049; color:#cfe0ff}
+  .colbody{flex:1 1 auto; overflow-y:auto; min-height:0}
+  .colempty{color:var(--muted); font-size:11px; text-align:center; padding:18px 8px}
+  /* Narrow window (or a non-ultrawide machine): fall back to the original single column.
+     Everything inside must go back to natural height and let .list be the one scroller — leaving
+     the wide layout's `flex:1 1 0` on .col made the stack taller than .list, which clips it
+     (overflow:hidden) with nothing scrollable anywhere. */
+  @media (max-width:1500px){
+    .list{width:280px; flex:0 0 280px; overflow-y:auto}
+    .list .head{position:sticky; top:0; z-index:3}
+    #songList{flex:0 0 auto; display:block}
+    .cols{flex:0 0 auto; flex-direction:column; overflow:visible}
+    .col{flex:0 0 auto; border-right:none; border-bottom:1px solid var(--line)}
+    .colbody{flex:0 0 auto; overflow:visible}
+  }
+  .list .head .hcount{font-size:12px; color:var(--muted)}
+  .list .head .hactions{display:flex; gap:6px}
+  .list .head .rst{flex:1; background:var(--panel2); border:1px solid var(--line); color:var(--muted); border-radius:6px; padding:6px 4px; cursor:pointer; font-size:11px; text-align:center}
+  .list .head .rst:hover:not(:disabled){color:var(--text); border-color:#3a4150}
+  .list .head .rst:disabled{cursor:default}
+  .plsel{width:100%; background:var(--panel2); border:1px solid var(--line); color:var(--text);
+    border-radius:6px; padding:7px 8px; font-size:12px; cursor:pointer}
+  .plsel:hover{border-color:#3a4150}
+  .copybtn{width:100%; background:#123040; border:1px solid #2a6b80; color:#5bd6ff; border-radius:9px;
+    padding:10px; font-size:12px; font-weight:600; cursor:pointer; margin-bottom:12px}
+  .copybtn:hover{filter:brightness(1.2)}
+  .song{padding:10px 14px; cursor:pointer; border-bottom:1px solid #20242d; display:flex; align-items:center; gap:8px; font-size:14px}
+  .song:hover{background:var(--panel2)}
+  .song.active{background:#243049; color:#fff}
+  .song.played{opacity:.45}
+  .song.played .title{text-decoration:line-through}
+  .song .badge{margin-left:auto; font-size:10px; color:var(--muted); flex:0 0 auto}
+  /* keep rows a uniform height so the columns stay scannable under pressure —
+     the full name is in the tooltip */
+  .song .title{display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
+    overflow:hidden; min-width:0}
+  .song.configured .badge{color:var(--green)}
+  .song.played .badge{color:var(--amber); opacity:1}
+
+  /* center */
+  .center{flex:1 1 auto; display:flex; flex-direction:column; padding:20px 24px; min-width:0; gap:16px}
+  .nowtitle{font-size:22px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .nowsub{color:var(--muted); font-size:13px; margin-top:-8px}
+
+  .times{display:flex; justify-content:space-between; font-variant-numeric:tabular-nums; font-size:13px; color:var(--muted); margin-bottom:6px}
+  .wfwrap{position:relative; background:var(--panel2); border:1px solid var(--line); border-radius:8px; overflow:hidden}
+  #wf{display:block; width:100%; height:120px; cursor:pointer}
+  .wfmsg{position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:13px; pointer-events:none}
+  .legend{display:flex; gap:16px; font-size:11px; color:var(--muted); margin-top:6px}
+  .legend span{display:flex; align-items:center; gap:5px}
+  .legend i{width:10px;height:10px;border-radius:2px;display:inline-block}
+  .zoomctl{margin-left:auto; display:flex; align-items:center; gap:6px}
+  .zoomctl button{background:var(--panel2); border:1px solid var(--line); color:var(--text);
+    border-radius:6px; padding:4px 10px; font-size:11px; cursor:pointer; line-height:1.4}
+  .zoomctl button:hover{background:#2a2f3a; border-color:#3a4150}
+  .zoomctl .zlab{font-variant-numeric:tabular-nums; min-width:76px; text-align:right; color:var(--muted)}
+
+  .transport{display:flex; gap:12px; align-items:center; flex-wrap:wrap}
+  button.btn{border:none; border-radius:10px; padding:14px 22px; font-size:15px; font-weight:600; cursor:pointer; color:#fff; background:var(--panel2); transition:.08s; user-select:none}
+  button.btn:hover{filter:brightness(1.15)}
+
+  /* press feedback — every button, mouse or keyboard.
+     During a take the GM drives this by keyboard, so a shortcut has to look like a press too;
+     `pulse()` adds .pressed and the ring confirms the key registered. */
+  button:active, .ignore:active, select:active{transform:translateY(1px) scale(.99)}
+  button.btn:active{filter:brightness(1.35)}
+  .nudge:active, .markbtn:active, .lbtn:active, .scopebtn:active,
+  .zoomctl button:active, .testbtn:active, .playedbtn:active, .copybtn:active,
+  .rst:active, .logbtn:active{filter:brightness(1.4)}
+  @keyframes pressflash{
+    0%  {box-shadow:0 0 0 0 rgba(255,255,255,.65); filter:brightness(1.5)}
+    100%{box-shadow:0 0 0 13px rgba(255,255,255,0); filter:brightness(1)}
+  }
+  .pressed{animation:pressflash .34s ease-out}
+  button.btn:disabled{opacity:.4; cursor:not-allowed}
+  .btn.play{background:var(--accent)}
+  .btn.pause{background:var(--amber); color:#1a1a1a}
+  .btn.reveal{background:var(--purple)}
+  .btn.played.on{background:var(--amber); color:#1a1a1a}
+  .chip{font-size:12px; padding:6px 12px; border-radius:20px; color:var(--muted); background:var(--panel2); border:1px solid var(--line); white-space:nowrap}
+  .chip.intro{color:#0c0c0c; background:var(--accent); border-color:var(--accent)}
+  .chip.rev{color:#fff; background:var(--purple); border-color:var(--purple)}
+  .chip.free{color:#0c0c0c; background:var(--amber); border-color:var(--amber)}
+  .btn .k{font-weight:400; opacity:.7; font-size:12px; margin-left:6px}
+  .se{display:flex; gap:12px; margin-top:auto}
+  .btn.correct{background:var(--green); flex:1; padding:20px; font-size:18px; color:#08210f}
+  .btn.wrong{background:var(--red); flex:1; padding:20px; font-size:18px}
+
+  /* setup */
+  .setup{width:320px; flex:0 0 320px; border-left:1px solid var(--line); background:var(--panel); padding:18px; overflow-y:auto}
+  .setup h2{font-size:13px; color:var(--muted); margin:0 0 14px; text-transform:uppercase; letter-spacing:.5px}
+  .testbtn{width:100%; background:var(--purple); border:none; color:#fff; border-radius:9px; padding:12px; font-size:14px; font-weight:600; cursor:pointer; margin-bottom:18px}
+  .testbtn:hover{filter:brightness(1.15)}
+  .playedbtn{width:100%; background:var(--panel2); border:1px solid var(--line); color:var(--text); border-radius:9px; padding:11px; font-size:13px; font-weight:600; cursor:pointer; margin-bottom:12px}
+  .playedbtn:hover{filter:brightness(1.15)}
+  .playedbtn.on{background:#2a2418; border-color:var(--amber); color:var(--amber)}
+  .playedbtn .k{font-weight:400; opacity:.6; font-size:12px; margin-left:6px}
+  .ignore{display:flex; align-items:center; gap:10px; background:var(--panel2); border:1px solid var(--line); border-radius:10px; padding:11px 12px; margin-bottom:18px; cursor:pointer; user-select:none; font-size:13px}
+  .ignore.on{border-color:var(--amber); background:#2a2418}
+  .ignore input{width:18px;height:18px;accent-color:var(--amber); cursor:pointer}
+  .ignore small{color:var(--muted); font-size:11px}
+  .ignore .k{margin-left:auto; font-size:11px; color:var(--muted); border:1px solid var(--line); border-radius:4px; padding:2px 7px}
+  .loudtoggle{display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-bottom:12px}
+  .loudtoggle input{width:16px;height:16px;accent-color:#5bd6ff;cursor:pointer}
+  .loudtoggle small{color:var(--muted)}
+  .scoperow{display:flex; align-items:center; gap:6px; margin-bottom:8px}
+  .scopebtn{flex:1; background:var(--panel); border:1px solid var(--line); color:var(--muted);
+    border-radius:6px; padding:6px 4px; font-size:11px; cursor:pointer}
+  .scopebtn:hover{color:var(--text); border-color:#3a4150}
+  .scopebtn.on{background:#123040; border-color:#5bd6ff; color:#5bd6ff; font-weight:600}
+  .scopenote{font-size:10px; color:var(--muted); margin:-2px 0 10px; min-height:13px}
+  .trimrow{display:flex; align-items:center; gap:8px}
+  .trimrow .tl{font-size:12px; color:var(--muted); white-space:nowrap}
+  .trimrow input[type=range]{flex:1; accent-color:#5bd6ff; cursor:pointer}
+  .trimrow .tv{font-size:12px; font-variant-numeric:tabular-nums; width:54px; text-align:right; color:var(--text)}
+  .mk{background:var(--panel2); border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:12px}
+  .mk .top{display:flex; align-items:center; gap:8px; margin-bottom:10px}
+  .mk .swatch{width:12px;height:12px;border-radius:3px}
+  .mk .name{font-size:13px; font-weight:600}
+  .mk .val{margin-left:auto; font-variant-numeric:tabular-nums; font-size:15px; color:var(--text)}
+  .mk .ctrls{display:flex; gap:8px; align-items:center}
+  .mk .markbtn{flex:1; border:none; border-radius:7px; padding:10px; font-size:13px; font-weight:600; cursor:pointer; color:#0c0c0c}
+  .mk .markbtn .k{font-weight:400; opacity:.6; margin-left:4px}
+  .mk .nudge{background:var(--panel); border:1px solid var(--line); color:var(--text); width:38px; height:38px; border-radius:7px; cursor:pointer; font-size:16px}
+  .mk .nudge:hover{background:#2a2f3a}
+  .mk .nudge.auto{border-color:#2a6b80; background:#123040}
+  .mk .nudge.auto:hover{background:#1b4457}
+  .autonote{font-size:10px; color:#5bd6ff; margin-top:8px}
+  .hint{font-size:11px; color:var(--muted); line-height:1.6; margin-top:6px; border-top:1px solid var(--line); padding-top:14px}
+  .hint b{color:var(--text)}
+  .empty{color:var(--muted); text-align:center; margin-top:40px; font-size:14px; line-height:1.6}
+  .dupwarn{flex:0 0 auto; background:#5a1f14; color:#ffd9d0; border-bottom:1px solid #8a3020;
+    padding:9px 18px; font-size:13px; text-align:center}
+  .dupwarn[hidden]{display:none}
+  .dupwarn b{color:#fff}
+
+  /* taping log */
+  .logbtn{margin-left:auto; background:rgba(0,0,0,.22); border:1px solid rgba(255,255,255,.35);
+    color:#fff; border-radius:7px; padding:6px 12px; font-size:12px; cursor:pointer; font-weight:600}
+  .logbtn:hover{background:rgba(0,0,0,.38)}
+  header .save{margin-left:14px}
+  .song.st-correct .badge{color:var(--green); opacity:1}
+  .song.st-wrong .badge{color:var(--amber); opacity:1}
+  .logwrap{position:fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:center;
+    justify-content:center; z-index:50}
+  /* must beat the rule above — an author `display` wins over the UA's [hidden]{display:none},
+     so without this the panel stays on screen no matter what closeLog() sets */
+  .logwrap[hidden]{display:none}
+  .logbox{background:var(--panel); border:1px solid var(--line); border-radius:12px; width:min(760px,92vw);
+    max-height:86vh; display:flex; flex-direction:column; box-shadow:0 18px 60px rgba(0,0,0,.5)}
+  .loghead{display:flex; align-items:center; gap:12px; padding:14px 16px; border-bottom:1px solid var(--line)}
+  .loghead b{font-size:14px}
+  .lmuted{color:var(--muted); font-size:12px}
+  .lall{margin-left:auto; font-size:12px; color:var(--muted); display:flex; align-items:center; gap:6px; cursor:pointer}
+  .lall input{accent-color:var(--accent); cursor:pointer}
+  .lclose{background:none; border:none; color:var(--muted); font-size:18px; cursor:pointer; padding:0 4px}
+  .lclose:hover{color:var(--text)}
+  .logsum{display:flex; gap:10px; padding:12px 16px; border-bottom:1px solid var(--line); flex-wrap:wrap}
+  .lstat{flex:1; min-width:150px; background:var(--panel2); border:1px solid var(--line); border-radius:9px; padding:10px 12px}
+  .lstat .n{font-size:22px; font-weight:700; font-variant-numeric:tabular-nums}
+  .lstat .l{font-size:11px; color:var(--muted); margin-top:2px}
+  .lstat.ok .n{color:var(--green)} .lstat.no .n{color:var(--amber)}
+  .logbody{overflow-y:auto; padding:6px 16px 14px}
+  .lgrp{font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin:14px 0 6px}
+  .lrow{display:flex; align-items:center; gap:10px; padding:7px 0; border-bottom:1px solid #20242d; font-size:13px}
+  .lrow .lt{font-variant-numeric:tabular-nums; color:var(--muted); font-size:12px; width:64px; flex:0 0 auto}
+  .lrow .ln{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .lrow .lpl{color:var(--muted); font-size:11px; flex:0 0 auto}
+  .lrow .lv{flex:0 0 auto; font-size:11px; font-weight:600; padding:2px 8px; border-radius:10px}
+  .lv.c{background:#123020; color:var(--green)} .lv.w{background:#2f2413; color:var(--amber)}
+  .lrow.past{opacity:.42}
+  .lreset{margin:14px 0 4px; padding:6px 10px; border-radius:6px; background:#243049; color:#cfe0ff;
+    font-size:11px; text-align:center}
+  .logfoot{display:flex; gap:8px; padding:12px 16px; border-top:1px solid var(--line); flex-wrap:wrap}
+  .lbtn{background:var(--panel2); border:1px solid var(--line); color:var(--text); border-radius:7px;
+    padding:8px 12px; font-size:12px; cursor:pointer}
+  .lbtn:hover{background:#2a2f3a}
+  .lbtn.warn{margin-left:auto; color:var(--amber)}
+  .lbtn.danger{color:var(--red)}
+</style>
+</head>
+<body>
+<header>
+  <div id="statusDot" class="dot"></div>
+  <h1>RGF&nbsp;INTRO&nbsp;PLAYER</h1>
+  <button class="logbtn" id="btnLog" title="บันทึกการถ่ายทำ (L)">📋 Log</button>
+  <div class="save" id="saveState">—</div>
+</header>
+
+<div class="logwrap" id="logWrap" hidden>
+  <div class="logbox">
+    <div class="loghead">
+      <b>📋 บันทึกการถ่ายทำ</b>
+      <span id="logScopeLbl" class="lmuted"></span>
+      <label class="lall"><input type="checkbox" id="logAll"> ดูทุกรอบ</label>
+      <button class="lclose" id="logClose">✕</button>
+    </div>
+    <div class="logsum" id="logSum"></div>
+    <div class="logbody" id="logBody"></div>
+    <div class="logfoot">
+      <button class="lbtn" id="logCopy">📄 คัดลอกเป็นข้อความ</button>
+      <button class="lbtn" id="logCsv">⤓ ดาวน์โหลด CSV</button>
+      <button class="lbtn warn" id="logUndo">↩ ยกเลิกรายการล่าสุด</button>
+      <button class="lbtn danger" id="logClear">🗑 ล้าง log รอบนี้</button>
+    </div>
+  </div>
+</div>
+
+<div class="dupwarn" id="dupWarn" hidden>
+  ⚠️ <b>เปิด IntroPlayer อยู่หลายหน้าต่าง</b> — ปิดให้เหลือหน้าต่างเดียว
+  ไม่งั้นค่าที่ตั้งไว้ (marker / Trim) จะเขียนทับกันเองจนหาย
+</div>
+
+<div class="layout">
+  <div class="list">
+    <div class="head" id="listHead">Songs</div>
+    <div id="songList"></div>
+  </div>
+
+  <div class="center">
+    <div>
+      <div class="nowtitle" id="nowTitle">No song selected</div>
+      <div class="nowsub" id="nowSub">เลือกเพลงจากรายการด้านซ้าย</div>
+    </div>
+
+    <div>
+      <div class="times"><span id="tCur">0:00</span><span id="tDur">0:00</span></div>
+      <div class="wfwrap">
+        <canvas id="wf"></canvas>
+        <div class="wfmsg" id="wfMsg">— ยังไม่ได้เลือกเพลง —</div>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--cyan)"></i>Intro start</span>
+        <span><i style="background:var(--green)"></i>Intro end</span>
+        <span><i style="background:var(--amber)"></i>Hook</span>
+        <span class="zoomctl">
+          <button id="zOut" title="ซูมออก  (คีย์ − )">−</button>
+          <button id="zIn" title="ซูมเข้า  (คีย์ + )">+</button>
+          <button id="zIntro" title="ซูมไปที่ช่วง Intro  (คีย์ Z )">ช่วง Intro</button>
+          <button id="zFit" title="เห็นทั้งเพลง  (คีย์ 0 )">เต็มเพลง</button>
+          <span id="zLabel" class="zlab">เต็มเพลง</span>
+        </span>
+      </div>
+    </div>
+
+    <div class="transport">
+      <button class="btn play" id="btnPlay" disabled>▶ Start<span class="k">Space</span></button>
+      <button class="btn reveal" id="btnReveal" disabled>↪ Reveal (Hook)<span class="k">R</span></button>
+      <button class="btn" id="btnRestart" disabled>⟲ Reset<span class="k">S</span></button>
+      <button class="btn played" id="btnPlayedMain" disabled>✓ Played<span class="k">P</span></button>
+      <span id="modeChip" class="chip"></span>
+    </div>
+
+    <div class="se">
+      <button class="btn correct" id="btnCorrect">✓ Correct<span class="k">1</span></button>
+      <button class="btn wrong" id="btnWrong">✗ Wrong<span class="k">2</span></button>
+    </div>
+  </div>
+
+  <div class="setup">
+    <h2>Setup — ตั้งช่วงเพลง</h2>
+    <div id="setupBody"><div class="empty">ยังไม่ได้เลือกเพลง</div></div>
+  </div>
+</div>
+
+<audio id="player"></audio>
+
+<script>
+const $ = id => document.getElementById(id);
+const player = $('player');
+
+let songs=[], config={}, current=null, mode='idle', rafId=null, guardId=null;
+let decodeToken=0, dpr=Math.max(1,window.devicePixelRatio||1);
+let dragKey=null;
+
+// ---- waveform zoom -------------------------------------------------------
+// `env` is an amplitude envelope at ENV_HZ buckets/sec, built once per song. It is small enough to
+// keep around (~1.2 MB for 5 min) yet fine enough that the deepest zoom is still smooth, so zooming
+// never has to touch the decoded PCM again.
+const ENV_HZ=1000;
+const MIN_SPAN=0.2;             // shortest visible window, seconds
+let env=null, envHz=0, globalPeak=1;
+let sqPrefix=null, envStep=0, pcmLen=0;   // cumulative sum of squares → O(1) RMS for any range
+let view={s:0,e:0};             // visible time window, seconds
+let colPeaks=null, colKey='';   // per-pixel-column peaks, cached until the view changes
+const MK = [
+  {key:'introStart', label:'Intro Start', hot:'I', color:getCss('--cyan')},
+  {key:'introEnd',   label:'Intro End',   hot:'O', color:getCss('--green')},
+  {key:'hook',       label:'Hook',        hot:'H', color:getCss('--amber')},
+];
+function getCss(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim()}
+
+// ---- playlists ----------------------------------------------------------
+// A song is identified by its path relative to songs/. A subfolder = a playlist = one taping.
+// Loose files keep a bare filename, so old flat configs still match.
+const ROOT_LABEL='— ยังไม่ได้จัดรอบ —';
+let currentPlaylist='';
+// Columns split a round by the leading digit of the filename: 1xx / 2xx / everything else.
+// Purely a display grouping — nothing is stored per column.
+const COLS=[{key:'1',label:'1xx'},{key:'2',label:'2xx'},{key:'3',label:'3xx + อื่นๆ'}];
+let activeCol=0;
+function colOf(p){ const c=baseName(p).charAt(0); return c==='1'?0:c==='2'?1:2; }
+function songsInCol(i){ return songsIn(currentPlaylist).filter(s=>colOf(s)===i); }
+// selectSong doesn't rebuild the list, so the header highlight has to be nudged separately
+function syncColHighlight(){
+  document.querySelectorAll('.col').forEach((c,i)=>c.classList.toggle('oncol', i===activeCol));
+}
+function playlistOf(p){ const i=p.lastIndexOf('/'); return i<0?'':p.slice(0,i); }
+function baseName(p){ const i=p.lastIndexOf('/'); return i<0?p:p.slice(i+1); }
+function titleOf(p){ return baseName(p).replace(/\.[^.]+$/,''); }
+// encode each segment so the slashes survive as real path separators
+function songUrl(p){ return '/songs/'+p.split('/').map(encodeURIComponent).join('/'); }
+function allPlaylists(){ return [...new Set(songs.map(playlistOf))].sort((a,b)=>a.localeCompare(b)); }
+function songsIn(pl){ return songs.filter(s=>playlistOf(s)===pl); }
+function setPlaylist(p){
+  currentPlaylist=p;
+  if(!config._settings) config._settings={};
+  config._settings.lastPlaylist=p;
+  saveConfig(); renderList();
+}
+
+function fmt(t){ if(!isFinite(t)||t<0)t=0; const m=Math.floor(t/60),s=Math.floor(t%60); return m+':'+String(s).padStart(2,'0'); }
+function fmts(t){ return (Math.round(t*100)/100).toFixed(2)+'s'; }
+const DEFAULT_CFG={introStart:0,introEnd:15,hook:60,ignoreEnd:false};
+function cfgFor(n){
+  if(!n) return {...DEFAULT_CFG};                 // throwaway: never store a key for "no song"
+  if(!config[n]) config[n]={...DEFAULT_CFG};
+  if(config[n].ignoreEnd===undefined) config[n].ignoreEnd=false;
+  return config[n];
+}
+
+// "set" = the GM actually placed markers on this song. New songs carry the defaults, so a plain
+// value check would light up every song ever touched; `configured` is written by afterCfgChange().
+// The value comparison is the fallback for entries saved before that flag existed.
+function isConfigured(c){
+  if(!c) return false;
+  if(c.configured) return true;
+  // `auto` = the start was guessed for us. It moves introStart/introEnd off their defaults, which
+  // the value check below would read as "the GM set this" and light up the green badge.
+  if(c.auto) return false;
+  return c.introStart!==DEFAULT_CFG.introStart || c.introEnd!==DEFAULT_CFG.introEnd
+      || c.hook!==DEFAULT_CFG.hook || !!c.ignoreEnd;
+}
+
+let saveTimer=null;
+function saveConfig(){
+  $('saveState').textContent='saving…';
+  clearTimeout(saveTimer);
+  saveTimer=setTimeout(async()=>{
+    try{ await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(config)}); $('saveState').textContent='saved ✓'; }
+    catch(e){ $('saveState').textContent='save failed'; }
+  },250);
+}
+
+// ---------- load ----------
+async function init(){
+  try{
+    const [s,c,l]=await Promise.all([fetch('/api/songs'),fetch('/api/config'),fetch('/api/log')]);
+    songs=(await s.json()).songs||[]; config=await c.json()||{};
+    logEvents=((await l.json())||{}).events||[];
+    // must happen here, not at script-parse time — config is empty until this fetch resolves
+    normalizeEnabled = !(config._settings && config._settings.normalize===false);
+    if(config._settings && config._settings.loudnessScope==='song') loudnessScope='song';
+    const pls=allPlaylists();
+    const saved=config._settings && config._settings.lastPlaylist;
+    currentPlaylist = (saved!=null && pls.includes(saved)) ? saved : (pls.length?pls[0]:'');
+    $('statusDot').classList.add('ok');
+  }catch(e){ $('statusDot').classList.remove('ok'); }
+  renderList(); updateLogBtn();
+}
+function renderList(){
+  const list=$('songList');
+  const pls=allPlaylists();
+  if(!pls.includes(currentPlaylist)) currentPlaylist = pls.length?pls[0]:'';
+  const scope=songsIn(currentPlaylist);
+  const played=scope.filter(n=>config[n]&&config[n].played).length;
+  const orphans=Object.keys(config).filter(k=>k!=='_settings' && !songs.includes(k)).length;
+  const head=$('listHead'); head.innerHTML='';
+  // Only show the picker once real folders exist — with everything loose it would be one
+  // pointless dropdown, and the layout should stay exactly as it was.
+  if(pls.length>1 || (pls.length===1 && pls[0]!=='')){
+    const sel=document.createElement('select'); sel.className='plsel';
+    sel.title='เลือกรอบถ่าย (โฟลเดอร์ย่อยใน songs/)';
+    pls.forEach(p=>{
+      const o=document.createElement('option');
+      o.value=p;
+      const inP=songsIn(p);
+      const pd=inP.filter(n=>config[n]&&config[n].played).length;
+      o.textContent=(p===''?ROOT_LABEL:p)+'  ('+inP.length+(pd?' · เล่นแล้ว '+pd:'')+')';
+      if(p===currentPlaylist) o.selected=true;
+      sel.appendChild(o);
+    });
+    sel.onchange=()=>{ setPlaylist(sel.value); updateLogBtn(); if(logOpen) renderLog(); };
+    head.appendChild(sel);
+  }
+  const top=document.createElement('div'); top.className='hcount';
+  top.textContent='Songs ('+scope.length+') · เล่นแล้ว '+played; head.appendChild(top);
+  const row=document.createElement('div'); row.className='hactions';
+  const rst=document.createElement('button'); rst.className='rst'; rst.textContent='↺ รีเซ็ตเล่นแล้ว';
+  rst.title='ล้างสถานะ "เล่นแล้ว" ทุกเพลง — ใช้ตอนเริ่มถ่ายรอบใหม่ (ไม่แตะ marker)'; rst.onclick=resetPlayed;
+  const prn=document.createElement('button'); prn.className='rst'; prn.textContent='🗑 ล้างเพลงเก่า'+(orphans?' ('+orphans+')':'');
+  prn.title='ลบข้อมูลของเพลงที่ลบไฟล์ออกจาก /songs/ แล้ว ('+orphans+' รายการ) — ไม่แตะเพลงที่ยังมีไฟล์'; prn.disabled=!orphans;
+  prn.onclick=pruneOrphans;
+  row.appendChild(rst); row.appendChild(prn); head.appendChild(row);
+  if(!songs.length){ list.innerHTML='<div class="empty" style="padding:20px">ยังไม่มีเพลงใน /songs/<br>วางไฟล์ .mp3 แล้วรีเฟรชหน้า</div>'; return; }
+  if(!scope.length){ list.innerHTML='<div class="empty" style="padding:20px">รอบนี้ยังไม่มีเพลง<br>วางไฟล์ในโฟลเดอร์แล้วรีเฟรชหน้า</div>'; return; }
+  if(current && playlistOf(current)===currentPlaylist) activeCol=colOf(current);
+  list.innerHTML='';
+  const cols=document.createElement('div'); cols.className='cols';
+  COLS.forEach((meta,i)=>{
+    const inCol=scope.filter(s=>colOf(s)===i);
+    const col=document.createElement('div');
+    col.className='col'+(i===activeCol?' oncol':'');
+    const h=document.createElement('div'); h.className='colhead';
+    h.innerHTML='<b>'+meta.label+'</b><span>('+inCol.length+')</span>';
+    col.appendChild(h);
+    const body=document.createElement('div'); body.className='colbody';
+    if(!inCol.length) body.innerHTML='<div class="colempty">—</div>';
+    inCol.forEach(name=>{
+      const div=document.createElement('div');
+      const c=config[name]; const isCfg=isConfigured(c); const st=statusOf(name);
+      const isPlayed=st!==null || (c&&c.played);
+      div.className='song'+(isCfg?' configured':'')+(isPlayed?' played':'')
+        +(st?' st-'+st:'')+(name===current?' active':'');
+      div.dataset.name=name;
+      const badge = st==='correct' ? '✓ ตอบถูก'
+                  : st==='wrong'   ? '✗ ไม่มีคนตอบ'
+                  : isPlayed       ? '✓ เล่นแล้ว'
+                  : isCfg          ? 'ตั้งค่าแล้ว' : '';
+      div.innerHTML='<span class="title">'+titleOf(name)+'</span><span class="badge">'+badge+'</span>';
+      div.title=titleOf(name);          // titles are clamped to 2 lines; hover for the full name
+      div.onclick=()=>selectSong(name);
+      body.appendChild(div);
+    });
+    col.appendChild(body); cols.appendChild(col);
+  });
+  list.appendChild(cols);
+}
+function setPlayed(v){
+  if(!current) return;
+  cfgFor(current).played=v;
+  updatePlayedBtn(); renderList(); renderSetup(); saveConfig();
+}
+function updatePlayedBtn(){
+  const b=$('btnPlayedMain'); if(!b) return;
+  const on=!!(current && cfgFor(current).played);
+  b.classList.toggle('on',on);
+  b.innerHTML=(on?'✓ Played':'Mark Played')+'<span class="k">P</span>';
+}
+function resetPlayed(){
+  // Scoped to the current playlist — this button means "starting a new taping", and a taping
+  // is one folder. Clearing other rounds' history from here would be a nasty surprise.
+  const scope=songsIn(currentPlaylist);
+  const where=currentPlaylist? 'รอบ "'+currentPlaylist+'"' : 'รอบนี้';
+  // count both kinds of "used": the manual flag and anything derived from this taping's log
+  const n=scope.filter(s=>(config[s]&&config[s].played)||statusOf(s)).length;
+  if(n===0){ alert('ยังไม่มีเพลงที่ใช้ไปใน'+where); return; }
+  if(!confirm('เริ่มถ่ายรอบใหม่ใน'+where+' ?\n\n'
+    +'ล้างสถานะของ '+n+' เพลง (เล่นแล้ว / ตอบถูก / ไม่มีคนตอบ)\n'
+    +'บันทึกการถ่าย (Log) ยังเก็บไว้ครบ ไม่ได้ลบ — แค่เริ่มนับรอบใหม่\n'
+    +'marker และรอบอื่นไม่ถูกแตะ')) return;
+  scope.forEach(s=>{ if(config[s]) config[s].played=false; });
+  if(!config._settings) config._settings={};
+  if(!config._settings.resetAt) config._settings.resetAt={};
+  config._settings.resetAt[currentPlaylist]=new Date().toISOString();
+  renderList(); if(current) renderSetup(); updateLogBtn(); if(logOpen) renderLog(); saveConfig();
+}
+function pruneOrphans(){
+  const orphans=Object.keys(config).filter(k=>k!=='_settings' && !songs.includes(k));
+  if(!orphans.length){ alert('ไม่มีข้อมูลค้าง — สะอาดอยู่แล้ว'); return; }
+  if(!confirm('พบข้อมูลของเพลงที่ไม่มีไฟล์แล้ว '+orphans.length+' รายการ\nลบทิ้งไหม? (marker ของเพลงที่ยังมีไฟล์ไม่ถูกแตะ)')) return;
+  orphans.forEach(k=>delete config[k]);
+  renderList(); saveConfig();
+}
+
+function selectSong(name){
+  cancelFade(); current=name; mode='idle'; stopLoop(); player.pause();
+  player.src=songUrl(name); player.load();
+  document.querySelectorAll('.song').forEach(el=>el.classList.toggle('active',el.dataset.name===name));
+  activeCol=colOf(name); syncColHighlight();   // clicking a song also moves the ↑/↓ focus here
+  $('nowTitle').textContent=titleOf(name);
+  $('nowSub').textContent='กำลังโหลด…';
+  $('btnPlay').disabled=false; $('btnReveal').disabled=false; $('btnRestart').disabled=false; $('btnPlayedMain').disabled=false;
+  reflectPlaying(false);
+  updatePlayedBtn(); updateChip(false);
+  env=null; colKey=''; zoomFit();
+  $('wfMsg').style.display='flex'; $('wfMsg').textContent='กำลังวิเคราะห์คลื่นเสียง…';
+  renderSetup(); loadWaveform(name);
+}
+
+player.addEventListener('loadedmetadata',()=>{
+  $('tDur').textContent=fmt(player.duration);
+  $('nowSub').textContent='ยาว '+fmt(player.duration)+(playlistOf(current)?' · รอบ '+playlistOf(current):'');
+  player.currentTime=cfgFor(current).introStart||0;
+  zoomFit(); sizeCanvas(); draw();
+});
+
+// ---------- waveform (Web Audio, offline) ----------
+// Latest selection wins. This used to be `if(decoding) return;`, which dropped the NEWER
+// request: clicking song B while song A was still decoding left B with no waveform, no auto-gain
+// and no auto Intro Start, stuck on "กำลังวิเคราะห์คลื่นเสียง…" until it was re-selected.
+async function loadWaveform(name){
+  const tok=++decodeToken;
+  try{
+    const resp=await fetch(songUrl(name));
+    const buf=await resp.arrayBuffer();
+    if(tok!==decodeToken) return;              // superseded while fetching
+    const AC=window.AudioContext||window.webkitAudioContext;
+    const ac=new AC();
+    const audio=await ac.decodeAudioData(buf);
+    if(tok!==decodeToken){ ac.close(); return; }   // superseded while decoding
+    const ch=audio.getChannelData(0);
+    buildEnvelope(ch, audio.sampleRate);
+    ac.close();
+    // Songs the GM hasn't marked yet get their Intro Start guessed from where the music actually
+    // begins. Guarded on `name===current` because the user may have clicked on to another song
+    // while this was decoding, and detection reads the *live* player duration.
+    if(name===current && !isConfigured(config[name]) && applyAutoStart(name)){
+      syncFields(); renderSetup(); afterAutoStart();
+    }
+    applyGain();
+    $('wfMsg').style.display='none';
+    zoomFit();
+    sizeCanvas(); draw();
+  }catch(e){
+    if(tok===decodeToken) $('wfMsg').textContent='แสดง waveform ไม่ได้ (เล่นได้ปกติ)';
+  }
+}
+
+const wf=$('wf');
+function sizeCanvas(){
+  const r=wf.getBoundingClientRect();
+  wf.width=Math.max(1,Math.round(r.width*dpr));
+  wf.height=Math.max(1,Math.round(r.height*dpr));
+}
+// Builds two things in one pass over the decoded channel:
+//   env      — peak amplitude per bucket, for drawing (see §8b)
+//   sqPrefix — cumulative sum of squares, so the RMS of ANY time range is O(1) afterwards.
+// That is what makes "measure the intro only" cheap enough to redo every time a marker moves.
+function buildEnvelope(ch, sampleRate){
+  const step=Math.max(1, Math.round(sampleRate/ENV_HZ));
+  const n=Math.ceil(ch.length/step);
+  const e=new Float32Array(n);
+  const p=new Float64Array(n+1);
+  let peak=0, run=0;
+  for(let i=0;i<n;i++){
+    const a=i*step, b=Math.min(ch.length, a+step);
+    let m=0, s=0;
+    for(let j=a;j<b;j++){ const v=ch[j]; const av=v<0?-v:v; if(av>m)m=av; s+=v*v; }
+    e[i]=m; run+=s; p[i+1]=run;
+    if(m>peak)peak=m;
+  }
+  env=e; sqPrefix=p; envStep=step; pcmLen=ch.length;
+  envHz=sampleRate/step; globalPeak=peak||1; colKey='';
+}
+// ---- auto-detect where the music actually starts ------------------------
+const PRE_ROLL=0.25;      // back off this much so the first note isn't clipped
+const ONSET_WIN=0.03;     // analysis window
+const ONSET_HOLD=0.06;    // must stay loud this long — ignores clicks/pops in the lead-in
+// Returns the time the music starts, or null. Short-window RMS, not the peak envelope: a single
+// encoder click at the head of an mp3 would trip a peak test instantly.
+//
+// Two stages, because one threshold cannot do this job. Measured on the real library: song 103 has
+// 0.0118 of tape hiss in its first second, while song 107's actual opening notes are only 0.0066 —
+// the noise in one file is louder than the music in another. So:
+//   1. find a CONFIDENT loud onset (threshold relative to the song's own level), then
+//   2. walk backwards from it while anything audible continues, and stop at the first real gap.
+// That recovers a quiet lead-in (107, and the fade-in on 106) without being fooled by hiss (103),
+// because the silence in front of the music is what stops the walk.
+function detectIntroStart(){
+  const d=player.duration;
+  if(!sqPrefix || !isFinite(d) || d<=0) return null;
+  const ref=rmsRange(0,d);
+  if(!(ref>0)) return null;
+  const step=0.01;
+  const loudThr=Math.max(ref*0.08, 0.004);
+  let onset=-1, holdFrom=-1;
+  for(let t=0; t+ONSET_WIN<=d; t+=step){
+    if(rmsRange(t,t+ONSET_WIN)>loudThr){
+      if(holdFrom<0) holdFrom=t;
+      if(t-holdFrom>=ONSET_HOLD){ onset=holdFrom; break; }
+    } else holdFrom=-1;
+  }
+  if(onset<0) return null;
+  const quietThr=Math.max(loudThr*0.12, 0.0025);   // "is anything audible here at all?"
+  let s=onset;
+  while(s-step>=0 && rmsRange(Math.max(0,s-ONSET_WIN), s)>quietThr) s-=step;
+  return Math.max(0, s-PRE_ROLL);
+}
+// Moves the whole intro range, keeping its length — the GM picks a duration, not an end point.
+function applyAutoStart(name, manual){
+  const t=detectIntroStart();
+  if(t===null) return false;
+  const c=cfgFor(name);
+  const span=Math.max(0.5, c.introEnd-c.introStart);
+  c.introStart=Math.round(t*100)/100;
+  c.introEnd=Math.round(Math.min(player.duration, t+span)*100)/100;
+  if(manual){ delete c.auto; }
+  else { c.auto=true; }        // an automatic guess is not the GM's work — see isConfigured()
+  return true;
+}
+
+// RMS between two times, straight off the prefix sums.
+function rmsRange(t0,t1){
+  if(!sqPrefix) return 0;
+  const n=env.length;
+  let i0=Math.max(0,Math.min(n,Math.floor(t0*envHz)));
+  let i1=Math.max(0,Math.min(n,Math.ceil(t1*envHz)));
+  if(i1<=i0) return 0;
+  const count=Math.min(pcmLen, i1*envStep) - i0*envStep;
+  if(count<=0) return 0;
+  return Math.sqrt((sqPrefix[i1]-sqPrefix[i0])/count);
+}
+
+// ---- view window ---------------------------------------------------------
+function viewSpan(){ return Math.max(1e-4, view.e-view.s); }
+function clampView(){
+  const d=player.duration;
+  if(!isFinite(d)||d<=0) return;
+  let span=Math.min(Math.max(viewSpan(), MIN_SPAN), d);
+  let s=view.s;
+  if(s+span>d) s=d-span;
+  if(s<0) s=0;
+  view.s=s; view.e=s+span;
+}
+function zoomFit(){
+  const d=player.duration;
+  view.s=0; view.e=(isFinite(d)&&d>0)?d:1;
+  colKey=''; updateZoomLabel();
+}
+function zoomAt(factor, focusT){
+  const d=player.duration; if(!isFinite(d)||d<=0) return;
+  const span=viewSpan();
+  const frac=Math.max(0,Math.min(1,(focusT-view.s)/span));
+  const next=Math.min(Math.max(span*factor, MIN_SPAN), d);
+  view.s=focusT-frac*next; view.e=view.s+next;
+  clampView(); updateZoomLabel(); draw();
+}
+function zoomBy(factor){                  // zoom around the playhead, or the view centre if it's off-screen
+  const t=player.currentTime;
+  const focus=(t>=view.s&&t<=view.e)? t : (view.s+view.e)/2;
+  zoomAt(factor, focus);
+}
+function zoomIntro(){
+  const d=player.duration; if(!current||!isFinite(d)||d<=0) return;
+  const c=cfgFor(current);
+  const a=Math.min(c.introStart,c.introEnd), b=Math.max(c.introStart,c.introEnd);
+  const pad=Math.max(0.5,(b-a)*0.35);
+  view.s=a-pad; view.e=b+pad;
+  clampView(); updateZoomLabel(); draw();
+}
+function panBy(dt){ view.s+=dt; view.e+=dt; clampView(); updateZoomLabel(); draw(); }
+function isZoomed(){ const d=player.duration; return isFinite(d)&&d>0&&viewSpan()<d-0.01; }
+function updateZoomLabel(){
+  const el=$('zLabel'); if(!el) return;
+  el.textContent=isZoomed()? 'เห็น '+fmts(viewSpan()) : 'เต็มเพลง';
+}
+// Keep the playhead on screen while playing. Jumps a page at a time rather than scrolling
+// continuously — cheaper, and far less dizzying to watch while marking.
+function followPlayhead(){
+  if(!isZoomed()||player.paused) return;
+  const t=player.currentTime, span=viewSpan();
+  if(t<view.s || t>view.e-span*0.08){
+    view.s=t-span*0.15; view.e=view.s+span;
+    clampView(); updateZoomLabel();
+  }
+}
+
+function timeToX(t){ return (t-view.s)/viewSpan()*wf.width; }
+function xToTime(x){ return view.s + (x/wf.width)*viewSpan(); }
+
+function draw(){
+  const ctx=wf.getContext('2d'); const W=wf.width,H=wf.height;
+  ctx.clearRect(0,0,W,H);
+  if(!current){ $('tCur').textContent=fmt(0); return; }   // nothing selected — leave the canvas blank
+  // waveform
+  if(env){
+    rebuildCols(W);
+    ctx.fillStyle='#3a4252';
+    const mid=H/2;
+    for(let x=0;x<W;x++){
+      const a=colPeaks[x]*(H*0.46);
+      if(a>0) ctx.fillRect(x,mid-a,1,a*2);
+    }
+  }
+  const c=cfgFor(current);
+  // intro zone (extends to end of track when ignoreEnd)
+  const x1=timeToX(c.introStart), x2=timeToX(c.introEnd);
+  ctx.fillStyle='rgba(46,204,113,0.14)';
+  ctx.fillRect(x1,0, (c.ignoreEnd? W-x1 : x2-x1), H);
+  // played overlay up to playhead within intro
+  const px=timeToX(player.currentTime);
+  ctx.fillStyle='rgba(79,140,255,0.18)';
+  ctx.fillRect(0,0,px,H);
+  // markers
+  marker(ctx,x1,MK[0].color,H);
+  marker(ctx,x2, c.ignoreEnd? 'rgba(46,204,113,0.35)' : MK[1].color, H);
+  if(c.hook>0) marker(ctx,timeToX(c.hook),MK[2].color,H);
+  // playhead
+  ctx.fillStyle='#fff'; ctx.fillRect(px-1,0,2,H);
+  $('tCur').textContent=fmt(player.currentTime);
+}
+function marker(ctx,x,color,H){
+  ctx.fillStyle=color; ctx.fillRect(x-1.5,0,3,H);
+  ctx.beginPath(); ctx.moveTo(x-6,0); ctx.lineTo(x+6,0); ctx.lineTo(x,9); ctx.closePath(); ctx.fill();
+}
+// One peak per pixel column for the current view. Recomputed only when the view or the canvas
+// width changes, so the rAF loop just reads it back — cost scales with the visible span, not
+// the song length.
+function rebuildCols(W){
+  const key=W+':'+view.s.toFixed(4)+':'+view.e.toFixed(4);
+  if(key===colKey && colPeaks && colPeaks.length===W) return;
+  colKey=key;
+  if(!colPeaks || colPeaks.length!==W) colPeaks=new Float32Array(W);
+  const span=viewSpan();
+  for(let x=0;x<W;x++){
+    let i0=Math.floor((view.s+x/W*span)*envHz);
+    let i1=Math.ceil((view.s+(x+1)/W*span)*envHz);
+    if(i1<=i0) i1=i0+1;
+    if(i0<0) i0=0;
+    if(i1>env.length) i1=env.length;
+    let m=0;
+    for(let i=i0;i<i1;i++){ if(env[i]>m)m=env[i]; }
+    colPeaks[x]=m/globalPeak;
+  }
+}
+
+// drag / click on canvas
+// Away from a marker, mousedown starts a *pending* seek: move the mouse and it pans the view
+// instead, release without moving and it seeks. Both gestures share the empty canvas that way.
+let panFrom=null;
+const PAN_SLOP=4;               // CSS px of movement before a click becomes a pan
+wf.addEventListener('mousedown',e=>{
+  if(!current||!player.duration) return;
+  const x=(e.offsetX)*dpr;
+  // hit-test markers (within 7px)
+  const c=cfgFor(current); let best=null,bd=8*dpr;
+  for(const m of MK){ const mx=timeToX(c[m.key]); if(Math.abs(mx-x)<bd){bd=Math.abs(mx-x);best=m.key;} }
+  if(best){ dragKey=best; }
+  else { panFrom={clientX:e.clientX, t:xToTime(x), moved:false}; }
+});
+window.addEventListener('mousemove',e=>{
+  if(dragKey){
+    const r=wf.getBoundingClientRect();
+    const x=(e.clientX-r.left)*dpr;
+    let t=Math.max(0,Math.min(player.duration,xToTime(x)));
+    cfgFor(current)[dragKey]=Math.round(t*100)/100;   // 0.01 s — zoom exists to place markers this finely
+    syncFields(); draw();
+    return;
+  }
+  if(!panFrom) return;
+  const dx=e.clientX-panFrom.clientX;
+  if(!panFrom.moved && Math.abs(dx)<PAN_SLOP) return;
+  panFrom.moved=true;
+  wf.style.cursor='grabbing';
+  panBy(-dx/wf.getBoundingClientRect().width*viewSpan());
+  panFrom.clientX=e.clientX;
+});
+window.addEventListener('mouseup',()=>{
+  if(dragKey){ dragKey=null; afterCfgChange(); }
+  if(panFrom){
+    if(!panFrom.moved) seekTo(panFrom.t);
+    panFrom=null; wf.style.cursor='';
+  }
+});
+// wheel = zoom at the pointer; shift/horizontal wheel = pan. Trackpad pinch arrives as
+// ctrlKey+deltaY, which lands on the zoom path too.
+wf.addEventListener('wheel',e=>{
+  if(!current||!player.duration) return;
+  e.preventDefault();
+  const r=wf.getBoundingClientRect();
+  if(e.shiftKey || Math.abs(e.deltaX)>Math.abs(e.deltaY)){
+    const d=e.shiftKey&&!e.deltaX ? e.deltaY : e.deltaX;
+    panBy(d/r.width*viewSpan());
+  } else {
+    zoomAt(Math.pow(1.0022, e.deltaY), xToTime((e.clientX-r.left)*dpr));
+  }
+},{passive:false});
+
+// ---------- setup panel ----------
+function renderSetup(){
+  if(!current){ $('setupBody').innerHTML='<div class="empty">ยังไม่ได้เลือกเพลง</div>'; return; }
+  const c0=cfgFor(current);
+  let html=`<button class="playedbtn ${c0.played?'on':''}" id="btnPlayed">${c0.played?'✓ เล่นแล้ว — กดเพื่อยกเลิก':'ทำเครื่องหมายว่าเล่นแล้ว'}<span class="k">P</span></button>`;
+  // Same filename already marked up in another round? Offer to reuse that work.
+  const donor=findDonor(current);
+  if(donor && !isConfigured(c0)) html+=`<button class="copybtn" id="btnCopyCfg"
+    title="คัดลอก Intro Start / Intro End / Hook / Trim จากรอบนั้น (ไม่รวมสถานะเล่นแล้ว)"
+    >⤵ ดึงค่าจากรอบ "${donor.label}"</button>`;
+  html+='<button class="testbtn" id="btnTest">▶ Test Intro (ฟังช่วงโจทย์)</button>';
+  html+=`<label class="ignore ${c0.ignoreEnd?'on':''}" id="ignoreRow">
+      <input type="checkbox" id="ignoreCb" ${c0.ignoreEnd?'checked':''}>
+      <span>Ignore Intro End<br><small>เล่นเลยจุดจบ ไม่หยุดอัตโนมัติ</small></span>
+      <span class="k">E</span></label>`;
+  for(const m of MK){
+    html+=`<div class="mk">
+      <div class="top"><span class="swatch" style="background:${m.color}"></span>
+        <span class="name">${m.label}</span><span class="val" id="val_${m.key}"></span></div>
+      <div class="ctrls">
+        <button class="nudge" data-k="${m.key}" data-d="-0.1">−</button>
+        <button class="nudge" data-k="${m.key}" data-d="0.1">+</button>
+        ${m.key==='introStart'?`<button class="nudge auto" id="btnAutoStart"
+           title="หาจุดที่เพลงเริ่มดังให้อัตโนมัติ แล้วเลื่อนทั้งช่วง Intro ตามไป">🎯</button>`:''}
+        <button class="markbtn" data-k="${m.key}" style="background:${m.color}">Mark ตรงนี้<span class="k">${m.hot}</span></button>
+      </div>${m.key==='introStart'&&c0.auto?'<div class="autonote">🎯 ตั้งให้อัตโนมัติ — ปรับเองได้ตามใจ</div>':''}</div>`;
+  }
+  html+=`<div class="mk" id="loudBlock">
+      <div class="top"><span class="swatch" style="background:#5bd6ff"></span>
+        <span class="name">Loudness</span><span class="val" id="gainReadout">—</span></div>
+      <label class="loudtoggle"><input type="checkbox" id="normCb" ${normalizeEnabled?'checked':''}>
+        <span>เกลี่ยความดังอัตโนมัติ <small>(ทุกเพลง)</small></span></label>
+      <div class="scoperow">
+        <span class="tl">วัดความดังจาก</span>
+        <button class="scopebtn ${loudnessScope==='intro'?'on':''}" data-scope="intro"
+          title="วัดเฉพาะช่วงที่เล่นจริง — แม่นกว่าสำหรับเพลงที่ intro เบาแต่ฮุคดัง">ช่วง Intro</button>
+        <button class="scopebtn ${loudnessScope==='song'?'on':''}" data-scope="song"
+          title="วัดค่าเฉลี่ยทั้งไฟล์ (พฤติกรรมเดิม)">ทั้งเพลง</button>
+      </div>
+      <div class="scopenote" id="scopeNote"></div>
+      <div class="trimrow">
+        <span class="tl">Trim เพลงนี้</span>
+        <input type="range" id="trim" min="-12" max="12" step="0.5" value="${c0.trimDb||0}">
+        <span class="tv" id="trimVal">${(c0.trimDb||0)>0?'+':''}${c0.trimDb||0} dB</span>
+        <button class="nudge" id="trimReset" title="reset">0</button>
+      </div></div>`;
+  html+=`<div class="hint">เล่นเพลงฟัง พอถึงจุด กดปุ่ม <b>Mark</b> หรือคีย์ <b>I / O / H</b> ได้เลยขณะเล่น
+    · บนคลื่นเสียง: <b>คลิก</b> = เลื่อนหัวเล่น, <b>ลากเส้นสี</b> = ปรับ marker, <b>ลากที่ว่าง</b> = เลื่อนดู
+    · <b>หมุนล้อ / ปัดสองนิ้ว</b> บนคลื่น = ซูม (หรือคีย์ <b>+ − 0</b>, <b>Z</b> = ซูมช่วง Intro)
+    ยิ่งซูมยิ่งวางได้ละเอียด ถึงระดับ 0.01 วิ · ปุ่ม <b>− / +</b> ในกล่อง marker ขยับทีละ 0.1 วิ
+    · <b>Space</b> เล่นต่อจากตรงที่หัวเล่นค้างอยู่ ถ้าอยากกลับไปต้น Intro กด <b>S</b>
+    · ทุกค่า save อัตโนมัติ</div>`;
+  $('setupBody').innerHTML=html;
+  $('btnPlayed').onclick=()=>setPlayed(!cfgFor(current).played);
+  $('btnTest').onclick=testIntro;
+  if($('btnCopyCfg')) $('btnCopyCfg').onclick=()=>copyCfgFrom(findDonor(current).path);
+  if($('btnAutoStart')) $('btnAutoStart').onclick=()=>{
+    if(applyAutoStart(current,true)){ syncFields(); draw(); afterCfgChange(); renderSetup(); }
+    else alert('หาจุดเริ่มไม่เจอ — เพลงนี้อาจดังตั้งแต่วินาทีแรก หรือยังโหลดคลื่นเสียงไม่เสร็จ');
+  };
+  $('ignoreCb').onchange=()=>setIgnoreEnd($('ignoreCb').checked);
+  $('normCb').onchange=()=>setNormalize($('normCb').checked);
+  document.querySelectorAll('.scopebtn').forEach(b=>b.onclick=()=>setLoudnessScope(b.dataset.scope));
+  $('trim').oninput=()=>setTrim(parseFloat($('trim').value));
+  $('trimReset').onclick=()=>{ $('trim').value=0; setTrim(0); };
+  document.querySelectorAll('.markbtn').forEach(b=>b.onclick=()=>markAt(b.dataset.k));
+  // [data-k] matters: the trim "0" button also carries .nudge, and an unscoped selector
+  // overwrote its handler and wrote config[song][undefined] = NaN.
+  document.querySelectorAll('.nudge[data-k]').forEach(b=>b.onclick=()=>{
+    cfgFor(current)[b.dataset.k]=Math.max(0,Math.round((cfgFor(current)[b.dataset.k]+parseFloat(b.dataset.d))*100)/100);
+    syncFields(); draw(); afterCfgChange();
+  });
+  syncFields();
+}
+// Songs do get reused across tapings now and then. Path-keyed config means the new copy starts
+// blank, so look for the same filename already configured elsewhere and offer to copy it over.
+function findDonor(p){
+  if(!p) return null;
+  const b=baseName(p);
+  for(const s of songs){
+    if(s===p || baseName(s)!==b) continue;
+    if(isConfigured(config[s])) return {path:s, label:playlistOf(s)||ROOT_LABEL};
+  }
+  return null;
+}
+function copyCfgFrom(src){
+  const s=config[src]; if(!s||!current) return;
+  const d=cfgFor(current);
+  d.introStart=s.introStart; d.introEnd=s.introEnd; d.hook=s.hook;
+  d.ignoreEnd=!!s.ignoreEnd;
+  if(s.trimDb) d.trimDb=s.trimDb;      // deliberately NOT `played` — that is per taping
+  syncFields(); zoomFit(); draw(); afterCfgChange(); renderSetup();
+}
+
+function syncFields(){
+  if(!current) return;
+  const c=cfgFor(current);
+  for(const m of MK){ const el=$('val_'+m.key); if(el) el.textContent=fmts(c[m.key]); }
+}
+function markAt(k){
+  cfgFor(current)[k]=Math.round(player.currentTime*100)/100;
+  syncFields(); draw(); afterCfgChange();
+}
+function setIgnoreEnd(v){
+  if(!current) return;
+  cfgFor(current).ignoreEnd=v;
+  const cb=$('ignoreCb'); if(cb) cb.checked=v;
+  const row=$('ignoreRow'); if(row) row.classList.toggle('on',v);
+  draw(); afterCfgChange();
+}
+function setNormalize(v){
+  normalizeEnabled=v;
+  if(!config._settings) config._settings={};
+  config._settings.normalize=v;
+  applyGain(); saveConfig();
+}
+function setTrim(db){
+  if(!current) return;
+  cfgFor(current).trimDb=db;
+  const tv=$('trimVal'); if(tv) tv.textContent=(db>0?'+':'')+db+' dB';
+  applyGain(); saveConfig();
+}
+function afterAutoStart(){        // auto guess: save it, but don't claim the GM configured the song
+  saveConfig(); renderList(); draw();
+}
+function afterCfgChange(){        // called only by marker edits — trim/played must not count as "set"
+  if(current){
+    const c=cfgFor(current); c.configured=true;
+    // the GM just edited a marker, so it is no longer an automatic guess — drop the flag and the
+    // note (this doesn't re-render the setup panel, so the note has to be cleared by hand)
+    if(c.auto){ delete c.auto; const an=document.querySelector('.autonote'); if(an) an.remove(); }
+  }
+  applyGain();                   // the intro range IS the measurement window now, so gain follows it
+  saveConfig(); renderList();
+  document.querySelectorAll('.song').forEach(el=>el.classList.toggle('active',el.dataset.name===current));
+}
+
+// ---------- transport ----------
+// Drawing rides on rAF (cosmetic — fine for it to pause when the window is hidden), but the
+// intro-end guard must NOT: Chrome freezes rAF for a backgrounded/minimised window, and a GM who
+// switches apps mid-intro would hear the intro run straight into the song. A timer keeps the guard
+// alive there — pages playing audio are exempt from Chrome's intensive timer throttling.
+function startLoop(){
+  stopLoop();
+  const tick=()=>{ followPlayhead(); draw(); checkIntroEnd(); rafId=requestAnimationFrame(tick); };
+  rafId=requestAnimationFrame(tick);
+  guardId=setInterval(checkIntroEnd,40);
+}
+function stopLoop(){
+  if(rafId)cancelAnimationFrame(rafId); rafId=null;
+  if(guardId)clearInterval(guardId); guardId=null;
+}
+const FADE_SEC=0.4;
+let fading=false, fadeTimer=null;
+function checkIntroEnd(){
+  const c=cfgFor(current);
+  if(mode!=='intro' || c.ignoreEnd || fading) return;
+  // start the fade early so silence lands exactly on Intro End (never plays past the range)
+  const fadeStart=Math.max((c.introStart||0)+0.02, c.introEnd-FADE_SEC);
+  if(player.currentTime>=fadeStart) startIntroFade(c.introEnd);
+}
+function startIntroFade(endAt){
+  if(fading) return; fading=true;
+  const remain=Math.max(0.06, endAt-player.currentTime);   // time left until Intro End
+  // leave gain low after fade; it is restored on the next play (avoids a click on pause)
+  const finish=()=>{ fadeTimer=null; fading=false; player.pause(); player.currentTime=endAt; setIdle(); draw(); };
+  if(graphReady && audioCtx){
+    const now=audioCtx.currentTime, g=gainNode.gain;
+    g.cancelScheduledValues(now); g.setValueAtTime(g.value, now);
+    g.linearRampToValueAtTime(0.0001, now+remain);
+    fadeTimer=setTimeout(finish, remain*1000+20);
+  } else {
+    const v0=player.volume, steps=Math.max(5,Math.round(remain/0.03)); let i=0;
+    fadeTimer=setInterval(()=>{ i++; player.volume=Math.max(0, v0*(1-i/steps));
+      if(i>=steps){ clearInterval(fadeTimer); player.volume=v0; finish(); } }, remain*1000/steps);
+  }
+}
+function cancelFade(){          // abort fade for an instant manual stop
+  if(!fading) return;
+  if(fadeTimer){ clearTimeout(fadeTimer); clearInterval(fadeTimer); fadeTimer=null; }
+  fading=false; player.volume=1; applyGain();
+}
+function reflectPlaying(p){
+  const b=$('btnPlay');
+  b.innerHTML=(p?'❚❚ Pause':'▶ Start')+'<span class="k">Space</span>';
+  // classList, not className — assigning the whole string wiped the .pressed flash that pulse()
+  // had just added, so Space was the one shortcut with no visual feedback.
+  b.classList.toggle('pause',p); b.classList.toggle('play',!p);
+  updateChip(p);
+}
+function updateChip(playing){
+  const el=$('modeChip'); if(!el) return;
+  if(!current){ el.textContent=''; el.className='chip'; return; }
+  if(playing){
+    if(mode==='reveal'){ el.textContent='● เล่นเฉลย / Hook'; el.className='chip rev'; }
+    else if(mode==='free'){ el.textContent='● เล่นต่อ (ไม่หยุดเอง)'; el.className='chip free'; }
+    else { el.textContent='● เล่น Intro'; el.className='chip intro'; }
+  } else { el.textContent='⏸ หยุด'; el.className='chip'; }
+}
+function setIdle(){ mode='idle'; fading=false; reflectPlaying(false); stopLoop(); }
+// The single rule for "what does playing from here mean?" — used by both Start and click-to-seek,
+// so the two can't drift apart. Before Intro End the auto-stop is armed; past it there is no intro
+// left to protect, so it's free play and the amber chip says so.
+function modeForPosition(t,c){ return (t < c.introEnd-0.02 || c.ignoreEnd) ? 'intro' : 'free'; }
+// Click-to-seek. Seeking is a deliberate move, so it re-derives the mode for where we landed:
+// that is what lets the GM jump past Intro End mid-playback without ticking Ignore Intro End.
+function seekTo(t){
+  if(!current || !isFinite(player.duration)) return;
+  const c=cfgFor(current);
+  t=Math.max(0, Math.min(player.duration, t));
+  cancelFade();                 // a click during the intro-end fade means "keep going", not "stop"
+  player.currentTime=t;
+  if(!player.paused){ mode=modeForPosition(t,c); reflectPlaying(true); }
+  draw();
+}
+function toggleStart(){
+  if(!current) return; const c=cfgFor(current);
+  ensureGraph(); resumeCtx();
+  if(!player.paused || fading){ cancelFade(); player.pause(); reflectPlaying(false); stopLoop(); return; } // playing → pause anywhere (instant, no fade)
+  cancelFade();
+  // Play from wherever the playhead is — never rewind on its own. Reset (S) is the one key
+  // that rewinds to Intro Start.
+  mode = modeForPosition(player.currentTime, c);
+  applyGain(); player.play(); reflectPlaying(true); startLoop();
+}
+function testIntro(){
+  if(!current) return; const c=cfgFor(current);
+  ensureGraph(); resumeCtx(); cancelFade();
+  player.currentTime=c.introStart||0; mode='intro'; applyGain(); player.play();
+  reflectPlaying(true); startLoop();
+}
+function reveal(){
+  if(!current) return;
+  ensureGraph(); resumeCtx(); cancelFade();
+  // Reveal deliberately does NOT mark the song used: the GM hammers it while hunting for the hook
+  // during setup, so it is a terrible signal for "this question aired". Only Correct/Wrong count.
+  player.currentTime=cfgFor(current).hook||0; mode='reveal'; applyGain(); player.play();
+  reflectPlaying(true); startLoop();
+}
+function resetSong(){ if(!current)return; cancelFade(); player.pause(); player.currentTime=cfgFor(current).introStart||0; setIdle(); draw(); }
+player.addEventListener('pause',()=>{ if(mode!=='reveal') stopLoop(); });
+player.addEventListener('ended',()=>setIdle());
+$('btnPlay').onclick=toggleStart; $('btnReveal').onclick=reveal; $('btnRestart').onclick=resetSong;
+$('zIn').onclick=()=>zoomBy(1/1.6); $('zOut').onclick=()=>zoomBy(1.6);
+$('zFit').onclick=()=>{ zoomFit(); draw(); }; $('zIntro').onclick=zoomIntro;
+$('btnPlayedMain').onclick=()=>{ if(current) setPlayed(!cfgFor(current).played); };
+
+// ---------- SE + taping log ----------
+function playSE(f){ const a=new Audio('/se/'+f); a.play().catch(()=>{}); }
+
+// The log records what actually happened on set, in the order it happened — the running order is
+// not the list order. Only Correct/Wrong are logged: they are deliberate presses during a take.
+// Reveal is NOT logged even though it means "question used", because the GM hammers it while
+// hunting for the hook during setup, which would bury the real takes in noise.
+let logEvents=[];
+// "รีเซ็ตเล่นแล้ว" = starting a fresh taping of this round. The log itself is the tape's history
+// and must survive that, so instead of deleting events we remember when the new taping began and
+// only count what happened after it. Without this the ✓/✗ badges were permanent and reset looked
+// broken — it cleared `played` but the badge is derived from the log.
+function resetAtFor(pl){
+  const s=config._settings && config._settings.resetAt && config._settings.resetAt[pl];
+  if(!s) return null;
+  const d=new Date(s);
+  return isNaN(d) ? null : d;
+}
+function statusOf(path){
+  const since=resetAtFor(playlistOf(path));
+  let wrong=false;
+  for(const e of logEvents){
+    if(e.path!==path) continue;
+    if(since && !(new Date(e.t)>since)) continue;   // ก่อนเริ่มรอบใหม่ — เป็นประวัติ ไม่ใช่รอบนี้
+    if(e.event==='correct') return 'correct';   // answered = usable in the edit
+    if(e.event==='wrong') wrong=true;
+  }
+  return wrong ? 'wrong' : null;                // used on set but nobody got it
+}
+async function postLog(body){
+  try{
+    const r=await fetch('/api/log',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json();
+    if(d && d.events) logEvents=d.events;       // server owns the file and the clock
+  }catch(e){ $('saveState').textContent='log failed'; }
+  renderList(); updateLogBtn(); if(logOpen) renderLog();
+}
+function score(kind){
+  playSE(kind==='correct'?'correct.mp3':'wrong.mp3');
+  if(!current) return;                          // SE still fires; nothing to attribute it to
+  cfgFor(current).played=true; saveConfig(); updatePlayedBtn();
+  postLog({op:'append', event:{playlist:playlistOf(current), path:current, event:kind}});
+}
+$('btnCorrect').onclick=()=>score('correct'); $('btnWrong').onclick=()=>score('wrong');
+
+// ---------- loudness normalization (Web Audio, offline) ----------
+const TARGET_RMS=0.13;          // perceptual loudness target
+let audioCtx=null, srcNode=null, gainNode=null, limiterNode=null, graphReady=false;
+// both are read from config._settings in init(), after the fetch
+let normalizeEnabled = true;
+let loudnessScope = 'intro';    // 'intro' | 'song'
+
+function dbToGain(db){ return Math.pow(10, db/20); }
+function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+
+function ensureGraph(){
+  if(graphReady) return;
+  try{
+    const AC=window.AudioContext||window.webkitAudioContext;
+    audioCtx=new AC();
+    srcNode=audioCtx.createMediaElementSource(player);
+    gainNode=audioCtx.createGain();
+    limiterNode=audioCtx.createDynamicsCompressor();
+    limiterNode.threshold.value=-1.0; limiterNode.knee.value=0;
+    limiterNode.ratio.value=20; limiterNode.attack.value=0.003; limiterNode.release.value=0.12;
+    srcNode.connect(gainNode); gainNode.connect(limiterNode); limiterNode.connect(audioCtx.destination);
+    graphReady=true;
+    applyGain();
+  }catch(e){ /* normalization unavailable; audio still plays */ }
+}
+function resumeCtx(){ if(audioCtx && audioCtx.state==='suspended') audioCtx.resume(); }
+
+const MIN_SCOPE_SEC=0.5;     // an intro range shorter than this is too little to measure
+const MIN_USABLE_RMS=0.005;  // near-silent range (e.g. a song with a silent lead-in)
+
+// Which stretch of audio the auto-gain is measured over. 'intro' is the default because the GM
+// only ever plays the intro: a song with a soft intro and a loud chorus measures loud across the
+// whole file, so whole-song normalisation systematically under-boosts exactly the part you hear.
+// Falls back to the whole song when the intro range is too short or too quiet to measure.
+function measuredRms(){
+  if(!sqPrefix) return {rms:0, scope:null};
+  const d=player.duration;
+  const whole=()=>({rms:rmsRange(0, isFinite(d)&&d>0?d:1e9), scope:'song'});
+  if(loudnessScope!=='intro') return whole();
+  const c=cfgFor(current);
+  const a=Math.min(c.introStart,c.introEnd), b=Math.max(c.introStart,c.introEnd);
+  if(b-a < MIN_SCOPE_SEC) return whole();
+  const r=rmsRange(a,b);
+  if(!(r>MIN_USABLE_RMS)) return whole();
+  return {rms:r, scope:'intro'};
+}
+function applyGain(){
+  if(!current) return;
+  const c=cfgFor(current);
+  const trim=dbToGain(c.trimDb||0);
+  const m=measuredRms();
+  let auto=1;
+  if(normalizeEnabled && m.rms>0) auto=clamp(TARGET_RMS/m.rms, 0.25, 4.0);
+  const final=auto*trim;
+  if(graphReady){ gainNode.gain.cancelScheduledValues(audioCtx.currentTime); gainNode.gain.value=final; }
+  const ro=$('gainReadout');
+  if(ro) ro.textContent=(normalizeEnabled?'auto ':'')+(20*Math.log10(final)).toFixed(1)+' dB';
+  const sn=$('scopeNote');
+  if(sn){
+    sn.textContent = !normalizeEnabled ? 'ปิดการเกลี่ยอยู่'
+      : m.scope==='intro' ? 'วัดจากช่วง Intro จริง'
+      : m.scope==='song'  ? (loudnessScope==='intro' ? 'ช่วง Intro สั้น/เงียบเกิน — ใช้ทั้งเพลงแทน' : 'วัดจากทั้งเพลง')
+      : 'กำลังวิเคราะห์…';
+  }
+}
+function setLoudnessScope(v){
+  loudnessScope=v;
+  if(!config._settings) config._settings={};
+  config._settings.loudnessScope=v;
+  document.querySelectorAll('.scopebtn').forEach(b=>b.classList.toggle('on', b.dataset.scope===v));
+  applyGain(); saveConfig();
+}
+
+// ---------- "another window is open" guard ----------
+// The .app refuses to launch twice, but a plain browser tab on localhost:8000 can still sneak in.
+// Both windows POST the whole config object, so the loser silently loses its markers.
+const CLIENT_ID=Math.random().toString(36).slice(2)+Date.now().toString(36);
+async function heartbeat(){
+  try{
+    const r=await fetch('/api/hello',{method:'POST',headers:{'Content-Type':'application/json'},
+                                      body:JSON.stringify({id:CLIENT_ID})});
+    const d=await r.json();
+    $('dupWarn').hidden = !(d && d.clients>1);
+  }catch(e){ /* server down — the status dot already covers that */ }
+}
+setInterval(heartbeat,4000); heartbeat();
+
+// ---------- log panel ----------
+let logOpen=false;
+function updateLogBtn(){
+  const n=logEvents.filter(e=>(logAllRounds()||e.playlist===currentPlaylist)&&isCurrentSession(e)).length;
+  $('btnLog').textContent='📋 Log'+(n?' ('+n+')':'');
+}
+function logAllRounds(){ return $('logAll') && $('logAll').checked; }
+function shownEvents(){
+  const all=logAllRounds();
+  return logEvents.filter(e=>all||e.playlist===currentPlaylist);
+}
+function hhmm(iso){ const d=new Date(iso); return isNaN(d)?'--:--':
+  String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')+':'+String(d.getSeconds()).padStart(2,'0'); }
+function dayOf(iso){ const d=new Date(iso); return isNaN(d)?'':d.toLocaleDateString('th-TH',{weekday:'short',day:'numeric',month:'short',year:'numeric'}); }
+// One row per song, decided by its outcome — the thing the edit team actually needs.
+function summarise(evs){
+  const seen=new Map();
+  for(const e of evs){
+    const cur=seen.get(e.path)||{path:e.path, playlist:e.playlist, first:e.t, correct:false, wrongs:0};
+    if(e.event==='correct') cur.correct=true; else cur.wrongs++;
+    cur.last=e.t; seen.set(e.path,cur);
+  }
+  return [...seen.values()];
+}
+function isCurrentSession(e){
+  const since=resetAtFor(e.playlist);
+  return !since || new Date(e.t)>since;
+}
+function renderLog(){
+  const evs=shownEvents();
+  const cur=evs.filter(isCurrentSession);          // matches what the song list badges show
+  const older=evs.length-cur.length;
+  $('logScopeLbl').textContent = (logAllRounds() ? 'ทุกรอบ'
+    : (currentPlaylist ? 'รอบ '+currentPlaylist : 'รอบที่ยังไม่ได้จัด'))
+    + (older? ' · รอบถ่ายปัจจุบัน' : '');
+  const songs_=summarise(cur);
+  const ok=songs_.filter(s=>s.correct), no=songs_.filter(s=>!s.correct);
+  $('logSum').innerHTML=
+    `<div class="lstat ok"><div class="n">${ok.length}</div><div class="l">มีคนตอบถูก — ใช้ตัดต่อได้</div></div>`+
+    `<div class="lstat no"><div class="n">${no.length}</div><div class="l">ใช้ในกองแล้ว แต่ไม่มีคนตอบ</div></div>`+
+    `<div class="lstat"><div class="n">${songs_.length}</div><div class="l">โจทย์ที่ใช้ไปทั้งหมด</div></div>`;
+  if(!evs.length){ $('logBody').innerHTML='<div class="empty">ยังไม่มีบันทึก<br><small>กด Correct หรือ Wrong ระหว่างถ่าย แล้วจะขึ้นตรงนี้</small></div>'; return; }
+  let html='', lastDay=null, dividerDone=false;
+  evs.forEach(e=>{                       // chronological — this IS the running order
+    // make the "start of a new taping" boundary visible, so older takes read as history
+    // rather than looking like the reset failed to clear them
+    if(!dividerDone && isCurrentSession(e) && older){
+      html+=`<div class="lreset">↺ เริ่มถ่ายรอบใหม่ — ด้านบนคือรอบก่อนหน้า</div>`;
+      dividerDone=true; lastDay=null;
+    }
+    const d=dayOf(e.t);
+    if(d!==lastDay){ html+=`<div class="lgrp">${d}</div>`; lastDay=d; }
+    html+=`<div class="lrow${isCurrentSession(e)?'':' past'}"><span class="lt">${hhmm(e.t)}</span>`
+       +`<span class="ln">${titleOf(e.path)}</span>`
+       +(logAllRounds()&&e.playlist?`<span class="lpl">${e.playlist}</span>`:'')
+       +`<span class="lv ${e.event==='correct'?'c':'w'}">${e.event==='correct'?'ตอบถูก':'ตอบผิด'}</span></div>`;
+  });
+  $('logBody').innerHTML=html;
+}
+function openLog(){ logOpen=true; $('logWrap').hidden=false; renderLog(); }
+function closeLog(){ logOpen=false; $('logWrap').hidden=true; }
+function logText(){
+  const all=shownEvents();
+  const evs=all.filter(isCurrentSession);      // must match the panel and the list badges
+  const older=all.length-evs.length;
+  const s=summarise(evs);
+  const ok=s.filter(x=>x.correct), no=s.filter(x=>!x.correct);
+  const head='บันทึกการถ่ายทำ — '+(logAllRounds()?'ทุกรอบ':(currentPlaylist||'รอบที่ยังไม่ได้จัด'));
+  let t=head+'\n'+'='.repeat(head.length)+'\n\n';
+  if(older) t+='(เฉพาะรอบถ่ายปัจจุบัน — มีบันทึกของรอบก่อนหน้าอีก '+older+' รายการในไฟล์ log)\n\n';
+  t+=`ใช้ตัดต่อได้ (มีคนตอบถูก) — ${ok.length} เพลง\n`;
+  ok.forEach((x,i)=>{ t+=`  ${i+1}. [${hhmm(x.last)}] ${titleOf(x.path)}`+(x.wrongs?`  (ตอบผิดก่อน ${x.wrongs} ครั้ง)`:'')+'\n'; });
+  t+=`\nใช้ในกองแล้วแต่ไม่มีคนตอบ — ${no.length} เพลง\n`;
+  no.forEach((x,i)=>{ t+=`  ${i+1}. [${hhmm(x.last)}] ${titleOf(x.path)}  (ตอบผิด ${x.wrongs} ครั้ง)\n`; });
+  t+='\n--- ลำดับจริงตามเวลา ---\n';
+  evs.forEach(e=>{ t+=`${hhmm(e.t)}  ${e.event==='correct'?'ถูก':'ผิด'}  ${titleOf(e.path)}\n`; });
+  return t;
+}
+$('btnLog').onclick=()=>logOpen?closeLog():openLog();
+$('logClose').onclick=closeLog;
+$('logWrap').onclick=e=>{ if(e.target===$('logWrap')) closeLog(); };
+$('logAll').onchange=()=>{ renderLog(); updateLogBtn(); };
+$('logCopy').onclick=async()=>{
+  try{ await navigator.clipboard.writeText(logText()); $('logCopy').textContent='✓ คัดลอกแล้ว';
+       setTimeout(()=>$('logCopy').textContent='📄 คัดลอกเป็นข้อความ',1500); }
+  catch(e){ alert('คัดลอกไม่ได้ — ลองใช้ปุ่มดาวน์โหลด CSV แทน'); }
+};
+$('logCsv').onclick=()=>{
+  // CSV keeps every event (it is the raw record) but says which taping each belongs to
+  const rows=[['เวลา','รอบ','เพลง','ผล','รอบถ่าย']].concat(
+    shownEvents().map(e=>[e.t, e.playlist, titleOf(e.path),
+                          e.event==='correct'?'ตอบถูก':'ตอบผิด',
+                          isCurrentSession(e)?'ปัจจุบัน':'ก่อนหน้า']));
+  const csv='﻿'+rows.map(r=>r.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(',')).join('\r\n');
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+  a.download='introplayer-log-'+(currentPlaylist||'all').replace(/[^\w฀-๿-]+/g,'_')+'.csv';
+  a.click(); URL.revokeObjectURL(a.href);
+};
+$('logUndo').onclick=()=>{
+  const evs=shownEvents(); if(!evs.length){ alert('ยังไม่มีรายการให้ยกเลิก'); return; }
+  const last=evs[evs.length-1];
+  if(!confirm(`ยกเลิกรายการล่าสุด?\n\n${hhmm(last.t)}  ${titleOf(last.path)}  — ${last.event==='correct'?'ตอบถูก':'ตอบผิด'}`)) return;
+  postLog({op:'undo', playlist:logAllRounds()?null:currentPlaylist});
+};
+$('logClear').onclick=()=>{
+  const evs=shownEvents(); if(!evs.length){ alert('รอบนี้ยังไม่มีบันทึก'); return; }
+  const where=logAllRounds()?'ทุกรอบ':('รอบ "'+(currentPlaylist||'ที่ยังไม่ได้จัด')+'"');
+  if(!confirm(`ล้างบันทึกของ${where} ทั้งหมด ${evs.length} รายการ?\n\nกู้คืนไม่ได้ — ปกติควรเก็บไว้เป็นประวัติของเทป`)) return;
+  postLog({op:'clear', playlist:logAllRounds()?null:currentPlaylist});
+};
+
+// ---------- keyboard ----------
+// Flash the on-screen button a shortcut corresponds to, so a key press looks identical to a click.
+const KEY_BTN={Space:'btnPlay', KeyR:'btnReveal', KeyS:'btnRestart', KeyP:'btnPlayedMain',
+  Digit1:'btnCorrect', Numpad1:'btnCorrect', Digit2:'btnWrong', Numpad2:'btnWrong',
+  KeyL:'btnLog', Minus:'zOut', NumpadSubtract:'zOut', Equal:'zIn', NumpadAdd:'zIn',
+  Digit0:'zFit', Numpad0:'zFit', KeyZ:'zIntro'};
+function pulse(el){
+  if(!el) return;
+  el.classList.remove('pressed'); void el.offsetWidth;   // restart the animation on rapid repeats
+  el.classList.add('pressed');
+  setTimeout(()=>el.classList.remove('pressed'),340);
+}
+// the marker buttons live in the setup panel and are re-rendered, so look them up by data-k
+function pulseMark(k){ pulse(document.querySelector('.markbtn[data-k="'+k+'"]')); }
+document.addEventListener('keydown',e=>{
+  if(e.target.tagName==='INPUT') return;
+  if(e.key==='Escape' && logOpen){ closeLog(); return; }
+  if(e.metaKey||e.ctrlKey||e.altKey) return;   // let Cmd+R reload instead of firing Reveal
+  if(e.repeat) return;                          // holding a key shouldn't machine-gun the action
+  pulse(KEY_BTN[e.code] && $(KEY_BTN[e.code]));
+  // Switch on e.code (the PHYSICAL key), not e.key. With a Thai input source active the S key
+  // reports e.key='ห', so every letter shortcut here silently stopped working. e.code is
+  // 'KeyS' under any keyboard layout.
+  switch(e.code){
+    case 'KeyL': logOpen?closeLog():openLog(); return;
+    case 'Space': e.preventDefault(); toggleStart(); break;
+    case 'KeyR': reveal(); break;
+    case 'KeyS': resetSong(); break;
+    case 'Digit1': case 'Numpad1': score('correct'); break;
+    case 'Digit2': case 'Numpad2': score('wrong'); break;
+    case 'KeyI': if(current){ markAt('introStart'); pulseMark('introStart'); } break;
+    case 'KeyO': if(current){ markAt('introEnd'); pulseMark('introEnd'); } break;
+    case 'KeyH': if(current){ markAt('hook'); pulseMark('hook'); } break;
+    case 'KeyE': if(current){ setIgnoreEnd(!cfgFor(current).ignoreEnd); pulse($('ignoreRow')); } break;
+    case 'KeyP': if(current) setPlayed(!cfgFor(current).played); break;
+    case 'ArrowDown': e.preventDefault(); moveSel(1); break;
+    case 'ArrowUp': e.preventDefault(); moveSel(-1); break;
+    case 'BracketLeft': e.preventDefault(); moveCol(-1); break;
+    case 'BracketRight': e.preventDefault(); moveCol(1); break;
+    case 'Minus': case 'NumpadSubtract': zoomBy(1.6); break;
+    case 'Equal': case 'NumpadAdd': zoomBy(1/1.6); break;
+    case 'Digit0': case 'Numpad0': zoomFit(); draw(); break;
+    case 'KeyZ': zoomIntro(); break;
+    case 'ArrowLeft': e.preventDefault(); panBy(-viewSpan()*0.25); break;
+    case 'ArrowRight': e.preventDefault(); panBy(viewSpan()*0.25); break;
+  }
+});
+function moveSel(d){
+  const list=songsInCol(activeCol);         // arrows stay inside the column you're running
+  if(!list.length)return;
+  let i=current?list.indexOf(current):-1;
+  i=Math.max(0,Math.min(list.length-1,i+d)); selectSong(list[i]);
+  const el=document.querySelector('.song.active'); if(el)el.scrollIntoView({block:'nearest'});
+}
+// [ and ] hop between columns, skipping empty ones. ←/→ can't be used — they pan the waveform.
+function moveCol(d){
+  for(let step=1; step<=COLS.length; step++){
+    const i=(activeCol+d*step+COLS.length*step)%COLS.length;
+    const list=songsInCol(i);
+    if(list.length){ activeCol=i; selectSong(list[0]);
+      const el=document.querySelector('.song.active'); if(el)el.scrollIntoView({block:'nearest'});
+      return; }
+  }
+}
+window.addEventListener('resize',()=>{ sizeCanvas(); colKey=''; draw(); });
+
+init();
+</script>
+</body>
+</html>
