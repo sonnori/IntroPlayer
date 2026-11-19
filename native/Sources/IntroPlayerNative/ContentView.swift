@@ -62,7 +62,11 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 header
                 saveFailureBar
+                // Order is what the operator must act on, outward. A round waiting to be
+                // accepted is work; a new version is news. Two informational banners used to sit
+                // above it and push it furthest from the header.
                 ReceiveBanner()
+                NewsBanner()
                 HStack(spacing: 0) {
                     // The log REPLACES the song list rather than covering the app. As a sheet it
                     // hid the song it was describing, which is why `1`/`2`/`I`/`O`/`H` had to be
@@ -96,6 +100,7 @@ struct ContentView: View {
             keyMonitor = nil
         }
         .sheet(isPresented: $model.showHandover) { HandoverPanel() }
+        .sheet(isPresented: $model.showAbout) { AboutPanel() }
         .sheet(isPresented: Binding(get: { model.importPlan != nil },
                                     set: { if !$0 { model.importPlan = nil } })) { DiffPanel() }
         .onAppear { model.detectIncoming() }
@@ -222,20 +227,33 @@ struct ContentView: View {
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+            let typing = NSApp.keyWindow?.firstResponder is NSTextView
+            let sheetUp = model.showHandover || model.importPlan != nil || model.showAbout
+
             // Command shortcuts first — checked before the modifier bail below
             if e.modifierFlags.contains(.command) {
+                // A focused text field owns its own Cmd+Z, and this branch used to sit above
+                // EVERY guard — the text-view check, `sheetUp`, and `isARepeat`. So "undo my
+                // paste" in a text field ran `model.undo()` instead: it pops a MARKER snapshot,
+                // can call `select()` and change the loaded song under a full-window sheet, and
+                // re-applies gain mid-playback. Its only feedback is a toast, which a sheet
+                // covers — so nothing appeared to happen, and the natural response (hold the
+                // keys) walked the entire 40-deep undo stack in about a second.
+                if typing { return e }
+                if e.isARepeat { return nil }
                 switch e.keyCode {
                 case 15: model.rescan(); return nil                              // Cmd+R
                 case 6:  model.undo(); return nil                                // Cmd+Z
-                case 14: model.openHandover(); return nil                        // Cmd+E
+                // SwiftUI presents one sheet per view, so firing this with a sheet already up
+                // set `showHandover` true with nothing on screen — and `sheetUp` then stayed
+                // true, keeping 1/2/I/O/H blocked until the Esc cascade was walked twice.
+                case 14: if !sheetUp { model.openHandover() }; return nil         // Cmd+E
                 default: return e
                 }
             }
             if e.modifierFlags.intersection([.control, .option]).isEmpty == false { return e }
 
-            let sheetUp = model.showHandover || model.importPlan != nil
-
-            if NSApp.keyWindow?.firstResponder is NSTextView {
+            if typing {
                 // Typing. But "a text field holds focus in the MAIN window" is a state the typed
                 // marker fields introduced, and in it the take must still be driveable: nobody
                 // types a time while a question is on air, so while playback is running the
@@ -244,8 +262,16 @@ struct ContentView: View {
                 // Space, because a focus left in a field must never be why a buzz cannot be
                 // stopped. `1`/`2`, because a buzz that cannot be SCORED is the same failure —
                 // no sting, and no log event, which is the one file the edit room works from
-                // (§8d). Inside a sheet the setter-name field takes real text, so it keeps them.
-                if !sheetUp, model.player.isPlaying {
+                // (§8d).
+                //
+                // This is NOT gated on `sheetUp` any more. §11 used to exempt sheets on the
+                // grounds that the setter-name field takes real text — written when every sheet
+                // field was a name. The About sheet's feed field broke it: one click on the
+                // version label mid-take, one click into the field, and Space typed a space
+                // while a contestant buzzed. That is §12's log-pane defect restored through
+                // another door. A space character that does not arrive is recoverable; a take is
+                // not, and a stray log event has `↩ ยกเลิกรายการล่าสุด`.
+                if model.player.isPlaying {
                     switch e.keyCode {
                     case 49:
                         model.player.toggleStart(config: model.config())
@@ -262,6 +288,7 @@ struct ContentView: View {
             if e.keyCode == 53 {                                                 // Esc
                 if model.pending != nil || model.pendingPreview { model.cancelPending(); return nil }
                 if model.importPlan != nil { model.importPlan = nil; return nil }
+                if model.showAbout { model.showAbout = false; return nil }
                 if model.showHandover { model.showHandover = false; return nil }
                 if model.showLog { model.showLog = false; return nil }   // pane, not a sheet
                 return e
@@ -358,12 +385,36 @@ struct SongListView: View {
                 // identical 11pt pills in a row, one of which can wipe a taping's badges.
                 HStack(spacing: 6) {
                     smallButton("⟳ อ่านโฟลเดอร์ใหม่") { model.rescan(); model.flash("อ่าน songs/ ใหม่แล้ว") }
+                    // The version lives where support calls start: "which one are you on" is
+                    // the first question for any report from the field, and an operator has to
+                    // be able to answer it without being walked through a menu. Clickable,
+                    // because the next question is always "which folder".
+                    //
+                    // LEFT of the Spacer, not right of it: this is the string read aloud on the
+                    // phone, so it should be where the docs can describe it simply — and it puts
+                    // the whole pane width between it and the `⋯` that holds the two actions
+                    // which throw work away (they were 6 pt apart, ~2 mm at 81 PPI).
+                    Button { model.showAbout = true } label: {
+                        Text(AppVersion.display)
+                            .font(Typo.font(11, latinOnly: true))
+                            // `muted` (8.06:1) at rest, not `dim` (4.80:1). The moment somebody
+                            // squints at this number is the support call — i.e. the resting
+                            // state — so the dimmest tier in the app was exactly backwards.
+                            .foregroundStyle(model.updateInfo != nil ? Palette.cyan : Palette.muted)
+                            .padding(.horizontal, 6).padding(.vertical, 4)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(PressStyle(corner: 5))
+                    .help("เวอร์ชั่น / โฟลเดอร์ข้อมูล / อัปเดต")
+                    Spacer(minLength: 0)
                     Menu {
                         Button("↺ รีเซ็ตเล่นแล้ว — เริ่มถ่ายรอบใหม่") { resetPlayedFlow() }
                         Button("🗑 ล้างเพลงเก่า\(model.orphanCount > 0 ? " (\(model.orphanCount))" : "")") {
                             pruneFlow()
                         }
                         .disabled(model.orphanCount == 0)
+                        Divider()
+                        Button("ℹ เกี่ยวกับ / เวอร์ชั่น \(AppVersion.short)") { model.showAbout = true }
                     } label: {
                         // Sized INSIDE the label: an outer `.frame` leaves the Menu's own control
                         // at its intrinsic ~14pt glyph width, centred in a dead 38pt pill (§6c).

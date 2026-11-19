@@ -507,6 +507,84 @@ enum Diagnostics {
     }
 
     /// The typed marker field's parser. Read-only, no audio.
+    /// The version comparator and the configured feed.
+    ///
+    /// The comparator earns a test on one case alone: a string compare puts `"1.10.0"` BELOW
+    /// `"1.9.0"`, which would silently hide every release after the ninth — a bug that only
+    /// appears months after it is written, on the machine of whoever is furthest behind.
+    static func updateCheck() {
+        print("this build: \(AppVersion.full)")
+        print("schema written by this build: \(Store.schema)")
+        print("\ncompare — expected vs actual")
+        var ok = true
+        let cases: [(String, String, Int)] = [
+            ("1.0.0", "1.0.0", 0),
+            ("1.0.1", "1.0.0", 1),
+            ("1.0.0", "1.0.1", -1),
+            ("1.10.0", "1.9.0", 1),       // the whole reason this is numeric
+            ("1.9.0", "1.10.0", -1),
+            ("2.0.0", "1.99.99", 1),
+            ("1.1", "1.1.0", 0),          // missing components count as 0
+            ("1.1.1", "1.1", 1),
+            ("1.2.0-beta", "1.2.0", 0),   // suffixes compare on leading digits
+            ("", "1.0.0", -1),            // a garbled manifest must read as NOT newer
+            ("junk", "1.0.0", -1),
+        ]
+        for (a, b, want) in cases {
+            let got = AppVersion.compare(a, b)
+            if got != want { ok = false }
+            print("  \(a.debugDescription) vs \(b.debugDescription) -> \(got) want \(want) \(got == want ? "ok" : "✗")")
+        }
+
+        print("\nfeed resolution")
+        for f in ["", "https://example.com/rgf/", "https://example.com/rgf/manifest.json",
+                  "/tmp/rgf-feed", "~/Drive/rgf", "ftp://nope/x", "javascript:alert(1)", "   "] {
+            let loc = Updater.manifestLocation(f)
+            print("  \(f.debugDescription) -> \(loc.map { $0.isFileURL ? $0.path : $0.absoluteString } ?? "nil (ปิด/ใช้ไม่ได้)")")
+        }
+        // Only http/https/file may ever reach NSWorkspace — a manifest must not be able to make
+        // the app launch something.
+        // The bare-PATH form matters as much as the scheme form: that branch had no guard at
+        // all, so an .app path was openable. A list that only tested `file://` read as proof of
+        // something it was not checking.
+        for d in ["javascript:alert(1)", "ftp://x/y", "file:///etc/passwd", "mailto:a@b.c",
+                  "/Applications/Calculator.app", "~/Desktop/anything.app",
+                  "/tmp/payload.sh", "/tmp/release"] {
+            let u = UpdateInfo(version: "9.9.9", notes: "", download: d, minMacOS: "").openable
+            if u != nil { ok = false }
+            print("  download \(d.debugDescription) -> \(u == nil ? "blocked ok" : "✗ OPENABLE")")
+        }
+
+        // Hoisted out of the Task: reading it inside captured a non-Sendable Store across a
+        // concurrency boundary, which is an error under Swift 6.
+        let feed = Store().updateFeed
+        print("\nconfigured feed: \(feed.isEmpty ? "— (ปิดอยู่)" : feed)")
+        if !feed.isEmpty {
+            let sem = DispatchSemaphore(value: 0)
+            Task {
+                do {
+                    if let info = try await Updater.check(feed: feed) {
+                        print("  → มีเวอร์ชั่นใหม่ \(info.version)  download=\(info.download)")
+                        print("     ใช้กับเครื่องนี้ได้: \(info.needsNewerOS ? "ไม่ได้ — ต้อง macOS \(info.minMacOS)" : "ได้")")
+                    } else {
+                        print("  → ใช้เวอร์ชั่นล่าสุดอยู่แล้ว")
+                    }
+                } catch {
+                    print("  → เช็กไม่ได้: \(error.localizedDescription)")
+                }
+                sem.signal()
+            }
+            // A stall used to print "✓ ผ่าน" with no feed line at all, so a hung feed read as a
+            // clean pass. Say so instead.
+            if sem.wait(timeout: .now() + Updater.timeout + 3) == .timedOut {
+                print("  → ✗ ค้าง ไม่ตอบในเวลา — ถือว่าไม่ผ่าน")
+                ok = false
+            }
+        }
+        print("\nmacOS ของเครื่องนี้: \(UpdateInfo.runningOS)")
+        print(ok ? "\n✓ ผ่าน" : "\n✗ ไม่ผ่าน")
+    }
+
     static func timeFmt() {
         print("round-trip  fmtClock -> parseClock")
         var ok = true

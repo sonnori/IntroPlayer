@@ -241,6 +241,32 @@ final class Store {
     var loudnessScope: LoudnessScope = .intro
     var lastPlaylist = ""
     var resetAt: [String: String] = [:]
+    /// Where to look for a newer build. Empty = the check is off, which is the default and the
+    /// only state that needs no network at all. See §15.
+    var updateFeed = ""
+    /// The format number this build writes. Absent in a file means 1, so every config written
+    /// before this field existed reads as current and raises nothing.
+    ///
+    /// It exists for one case: once the folder is in other people's hands, two builds can open
+    /// the same `config.json`. `set(_:for:)` already merges into `raw`, so unknown keys written
+    /// by a NEWER build survive an older one — this number is how the older build can *say* that
+    /// it is the older one, instead of looking fine while writing a format it doesn't understand.
+    static let schema = 1
+    /// What was in the file when we opened it. Greater than `schema` means a newer build wrote it.
+    private(set) var schemaOnDisk = 1
+    /// Version string of the build that last saved this folder, for diagnosing a handover.
+    private(set) var openedBy = ""
+    /// Fail VISIBLE, not shut: an operator mid-taping must not be locked out of their own
+    /// questions, so this only raises a notice. The merge in `set(_:for:)` is what actually
+    /// protects the newer build's fields.
+    var schemaAhead: Bool { schemaOnDisk > Store.schema }
+    /// Dismissals persist, because the conditions do.
+    ///
+    /// Session-only dismissal meant the notice came back on every launch — and once two crew
+    /// machines are on different builds, which is the *normal* state of a rollout, `schemaAhead`
+    /// is true forever. A notice that is always there is a notice nobody reads.
+    var dismissedUpdate = ""      // version string the operator has already waved off
+    var dismissedSchema = 0       // schema number they have already seen
 
     init() { load() }
 
@@ -259,6 +285,15 @@ final class Store {
         // Per-key: one bad value used to fail the whole cast, and writeSettings would then erase
         // every reset stamp in the file.
         resetAt = ((s["resetAt"] as? [String: Any]) ?? [:]).compactMapValues { $0 as? String }
+        updateFeed = (s["updateFeed"] as? String) ?? ""
+        // A non-numeric or missing value reads as the current schema rather than 0, so a garbled
+        // field cannot make every launch claim the file is from the future.
+        schemaOnDisk = (s["schema"] as? Int) ?? Store.schema
+        // Capped: written by another machine's build, and it goes into a notice in the main
+        // window. Everything that crosses a machine boundary gets a bound.
+        openedBy = String(((s["writtenBy"] as? String) ?? "").prefix(24))
+        dismissedUpdate = String(((s["dismissedUpdate"] as? String) ?? "").prefix(24))
+        dismissedSchema = (s["dismissedSchema"] as? Int) ?? 0
     }
 
     private static func decode(_ d: [String: Any]) -> SongConfig {
@@ -342,6 +377,24 @@ final class Store {
         s["loudnessScope"] = loudnessScope.rawValue
         s["lastPlaylist"] = lastPlaylist
         if !resetAt.isEmpty { s["resetAt"] = resetAt }   // never delete stamps we merely failed to read
+        // Same rule as `resetAt`, one line above: only delete a key we successfully READ as
+        // empty. A newer build storing the feed as anything but a bare String reads as "" here,
+        // and deleting it then would be the exact failure `resetAt` was fixed for.
+        if !updateFeed.isEmpty {
+            s["updateFeed"] = updateFeed
+        } else if s["updateFeed"] is String {
+            s.removeValue(forKey: "updateFeed")
+        }
+        // Never write a number LOWER than the file already carries: that would tell the build
+        // that actually understands the format that it is the stale one. And if the value is not
+        // an Int at all, leave it entirely alone — we cannot know what it means to the build that
+        // wrote it, and overwriting it IS the downgrade this guard exists to prevent.
+        if s["schema"] == nil || s["schema"] is Int {
+            s["schema"] = max(Store.schema, schemaOnDisk)
+        }
+        s["writtenBy"] = AppVersion.short
+        if !dismissedUpdate.isEmpty { s["dismissedUpdate"] = dismissedUpdate }
+        if dismissedSchema > 0 { s["dismissedSchema"] = dismissedSchema }
         raw["_settings"] = s
     }
 

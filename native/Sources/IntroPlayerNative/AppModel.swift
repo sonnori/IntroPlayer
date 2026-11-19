@@ -43,6 +43,24 @@ final class AppModel: ObservableObject {
     /// receive banner, which must persist — the operator may not be looking when a toast fires.
     @Published var incoming: RoundPackage?
     @Published var incomingDismissed = false
+
+    // MARK: - update state (§15)
+    @Published var showAbout = false
+    /// Set only when a feed named a build NEWER than this one. nil is the ordinary state.
+    @Published var updateInfo: UpdateInfo?
+    /// What the About sheet says under the version: progress, "up to date", or why it failed.
+    @Published var updateState = ""
+    @Published var updateChecking = false
+    /// Cleared for the session when the operator waves the notice off. The durable half is
+    /// `Store.dismissedUpdate` — see `dismissUpdateNotice()`.
+    @Published var updateDismissed = false
+    /// Latest-wins token. Without it, a check still in flight against the OLD feed could land
+    /// after `setUpdateFeed` and publish a result — banner included — for a feed that is no
+    /// longer configured. Same class as the web version's `loadWaveform` token (§12).
+    private var updateTask: Task<Void, Never>?
+    /// True when this bundle was launched from an unzipped RELEASE folder rather than an install.
+    /// Computed once at startup, never from `body` — see `Updater.manifestLocation`.
+    private(set) var launchedFromRelease = false
     @Published var setterName = ""
 
     // MARK: two-press confirmation
@@ -174,6 +192,14 @@ final class AppModel: ObservableObject {
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &bag)
         if let first = songsIn(currentPlaylist).first { select(first) }
+        // Launching the bundle straight out of an unzipped release is a natural thing to do
+        // ("let me see if the new one works") and it has one cause and one fix, but it LOOKS
+        // like §8c's "the app can't find my songs". Detected once, here, never from `body`.
+        launchedFromRelease = FileManager.default.fileExists(
+            atPath: AppPaths.root.appendingPathComponent("ติดตั้ง-อัปเดต.command").path)
+        // So the installer can find this folder without asking the operator to navigate to it.
+        InstallLocation.record()
+        checkForUpdateOnLaunch()
     }
 
     // MARK: - library
@@ -844,6 +870,115 @@ final class AppModel: ObservableObject {
     /// Counted, not compared: two flashes with the SAME string made the first one's timer clear
     /// the second one early.
     private var toastSeq = 0
+    // MARK: - update (§15)
+
+    /// Checks on launch, once, and only when a feed is configured.
+    ///
+    /// Deliberately not on a timer and never while playing: the only machine this runs on is a
+    /// taping machine, and a network call is not something to be doing between a buzz and a
+    /// pause. A manual check is in the About sheet for when the operator actually wants one.
+    func checkForUpdateOnLaunch() {
+        guard !store.updateFeed.isEmpty else { return }
+        checkForUpdate(manual: false)
+    }
+
+    func checkForUpdate(manual: Bool) {
+        let feed = store.updateFeed
+        guard !feed.isEmpty else {
+            updateState = "ยังไม่ได้ตั้งที่อยู่สำหรับเช็กเวอร์ชั่นใหม่"
+            return
+        }
+        guard !updateChecking else { return }
+        updateChecking = true
+        updateState = "กำลังเช็ก…"
+        updateTask?.cancel()
+        updateTask = Task { @MainActor in
+            defer { if !Task.isCancelled { updateChecking = false } }
+            do {
+                let info = try await Updater.check(feed: feed)
+                // The feed may have been changed, or this check superseded, while we waited.
+                guard !Task.isCancelled, feed == store.updateFeed else { return }
+                if let info {
+                    // A fresh find un-dismisses: waving off 1.2.0 must not hide 1.3.0.
+                    if info.version != store.dismissedUpdate { updateDismissed = false }
+                    updateInfo = info
+                    updateState = info.needsNewerOS
+                        ? "มีเวอร์ชั่นใหม่ \(info.version) — แต่เครื่องนี้ใช้ไม่ได้"
+                        : "มีเวอร์ชั่นใหม่ \(info.version)"
+                    if manual { flash(updateState) }
+                } else {
+                    updateInfo = nil
+                    updateState = "ใช้เวอร์ชั่นล่าสุดอยู่แล้ว (\(AppVersion.short))"
+                    if manual { flash("ใช้เวอร์ชั่นล่าสุดอยู่แล้ว") }
+                }
+            } catch {
+                guard !Task.isCancelled, feed == store.updateFeed else { return }
+                // Never a modal and never a toast on the automatic pass: a crew machine is
+                // offline on set by design, so a failed check is the EXPECTED state there and
+                // must not look like something went wrong with the app.
+                updateState = "เช็กไม่ได้ — \(error.localizedDescription)"
+                if manual { flash("เช็กเวอร์ชั่นไม่ได้") }
+            }
+        }
+    }
+
+    func setUpdateFeed(_ s: String) {
+        // Cancel first: an in-flight check against the previous feed must not be able to publish
+        // its result — nor to leave `updateChecking` true, which disabled the very button the
+        // operator needs to test the feed they just saved.
+        updateTask?.cancel()
+        updateTask = nil
+        updateChecking = false
+        store.updateFeed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        store.settingsChanged()
+        updateInfo = nil
+        updateState = store.updateFeed.isEmpty ? "ปิดการเช็กเวอร์ชั่น" : ""
+        objectWillChange.send()
+    }
+
+    /// Waving off a notice has to outlive the launch, because the condition does. See
+    /// `Store.dismissedUpdate`.
+    func dismissUpdateNotice() {
+        updateDismissed = true
+        if let v = updateInfo?.version { store.dismissedUpdate = v; store.settingsChanged() }
+    }
+    func dismissSchemaNotice() {
+        store.dismissedSchema = store.schemaOnDisk
+        store.settingsChanged()
+        objectWillChange.send()
+    }
+    /// Is there anything in the news strip? Order is "what the operator must act on" first.
+    var showUpdateNotice: Bool {
+        guard let u = updateInfo else { return false }
+        return !updateDismissed && u.version != store.dismissedUpdate
+    }
+    var showSchemaNotice: Bool {
+        store.schemaAhead && store.dismissedSchema < store.schemaOnDisk
+    }
+
+    /// Opens the download in the browser, or reveals it in Finder when the feed is a synced
+    /// folder and the zip is already on disk. Restricted to http/https/file by `UpdateInfo`.
+    /// Returns nil on success, or a message to show INSIDE the sheet.
+    ///
+    /// It used to `flash()`, and the toast is an overlay on `ContentView` at `.top` — i.e. behind
+    /// a sheet. So the one report for "the synced folder hasn't got the zip yet", which is the
+    /// expected state on a crew machine, appeared nowhere and the button looked broken.
+    @discardableResult
+    func openUpdateDownload() -> String? {
+        guard let u = updateInfo?.openable else {
+            return "ที่อยู่ไฟล์ในชุดอัปเดตใช้ไม่ได้ — แจ้งคนดูแล"
+        }
+        if u.isFileURL {
+            guard FileManager.default.fileExists(atPath: u.path) else {
+                return "ยังไม่มีไฟล์ \(u.lastPathComponent) ในโฟลเดอร์นั้น — รอ Drive sync ให้เสร็จก่อน"
+            }
+            NSWorkspace.shared.activateFileViewerSelecting([u])
+        } else {
+            NSWorkspace.shared.open(u)
+        }
+        return nil
+    }
+
     func flash(_ msg: String) {
         toastSeq += 1
         let mine = toastSeq

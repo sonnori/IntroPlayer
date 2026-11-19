@@ -6,13 +6,20 @@ struct IntroPlayerApp: App {
     @StateObject private var model = AppModel()
 
     init() {
+        // Read-only, writes nothing, and the one flag someone may be asked to run while being
+        // supported over the phone — so it is answered before the diagnostics gate below.
+        if CommandLine.arguments.contains("--version") {
+            print(AppVersion.full)
+            exit(0)
+        }
         // Headless diagnostics. Some of these WRITE to the operator's real config.json and
         // log.json, so they are gated behind an env var rather than a bare flag — a stray
         // argument must not be able to reset a taping.
         let diag = ProcessInfo.processInfo.environment["INTROPLAYER_DIAG"] == "1"
         let flags = ["--analyse", "--rescantest", "--resetflow", "--resettest", "--playtest",
                      "--columns", "--handoff", "--preflight", "--titles",
-                     "--previewtest", "--timefmt", "--overview", "--remodetest", "--takes"]
+                     "--previewtest", "--timefmt", "--overview", "--remodetest", "--takes",
+                     "--updatecheck"]
         if !diag, let f = CommandLine.arguments.first(where: flags.contains) {
             FileHandle.standardError.write("\(f) needs INTROPLAYER_DIAG=1\n".data(using: .utf8)!)
             exit(2)
@@ -60,6 +67,10 @@ struct IntroPlayerApp: App {
         }
         if CommandLine.arguments.contains("--previewtest") {
             Diagnostics.previewTest()
+            exit(0)
+        }
+        if CommandLine.arguments.contains("--updatecheck") {
+            Diagnostics.updateCheck()
             exit(0)
         }
         if CommandLine.arguments.contains("--timefmt") {
