@@ -221,7 +221,7 @@ rm -rf "$STAGE"
 SIZE="$(du -h "$DIST/$NAME.zip" | cut -f1 | tr -d ' ')"
 echo
 echo "✓ dist/$NAME.zip  ($SIZE)"
-echo "✓ dist/manifest.json"
+if [ -f "$DIST/manifest.json" ]; then echo "✓ dist/manifest.json"; fi
 echo
 echo "ขั้นต่อไป:"
 if [ "$DL" = "-" ]; then
