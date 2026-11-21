@@ -1486,6 +1486,33 @@ the day it does not help.
 - `copyConfig(from:)` overwrote five signed-off fields in one click with **no undo entry**.
 - The focus-hint line was conditional, so focusing a card moved the two below it ~14 pt under the
   cursor. Reserved height. (Same family as the transport buttons that used to slide.)
+- A waveform press that moved the marker **zero** distance still called `updateConfig`, which
+  stamps `configured` and pushes an undo snapshot. Clicking a marker merely to select it
+  therefore marked an unreviewed guess as reviewed, dropping the song out of the `Return`/`Tab`
+  sweep **and** out of the pre-flight warnings. Identical in shape to the typed field writing
+  on blur (§11). A press that moves nothing must write nothing.
+- `Markers.all` coloured **Intro End green** while the waveform drew it cyan — a live §6d
+  violation (green has exactly one meaning, and §6d names this marker among the four it was
+  supposed to have given up). Two bright cool hues hid it for months; a light theme, where they
+  became dark green and dark teal, made it obvious in one screenshot.
+- The header bar's save-failure text was `Palette.amber` on `Palette.header`. Fine in dark,
+  **1.2:1 in light** — unreadable, on the one indicator that means a day of markers is being
+  lost. That bar is dark red in both themes, so anything on it must be fixed-light
+  (`onHeader` / `onHeaderWarn`), never a theme-flipping colour.
+- The playhead is a dark hairline under a white core, and the hairline was `Palette.ink` —
+  which inverts with the theme, so in light the playhead was **white-on-white**. `ink` means
+  "text on a saturated fill"; `Palette.outline` is the dark hairline. They were the same value
+  only because there was one theme.
+- `PressStyle`'s white press wash and the pulse ring went invisible on light surfaces, and the
+  `brightness` shift pointed the wrong way. §12 already records that a keypress must LOOK like
+  a click or a dead shortcut cannot be told from a working one — that applies per theme.
+- The cross-check between the fast gated-LUFS path and the file-reading reference reported a
+  0.72 LU disagreement that was **100 ms block phase**, not a defect. Snapping both to the same
+  grid is what makes the check mean anything; a cross-check that compares two slightly
+  different things trains you to tolerate a delta.
+- Chroma similarity for hook detection used a raw cosine, which scores 1.41–1.44 for **every**
+  candidate in every song — so "the most repeated section" was silently just "the loudest eight
+  seconds". Mean-centre before normalising (§7a4).
 
 **Web version:**
 - `loadWaveform` opened with `if(decoding) return;`, which dropped the **newer** request: clicking
@@ -1533,9 +1560,18 @@ Product / UX
 - Separate **audience/second-screen view** (read-only progress, big song reveal).
 - Auto-sort or hide **played** songs. (Per-episode song sets via subfolders: done, §8c.
   Setter → operator handover: done, §8e. Typed marker fields, `Shift+←/→` nudge, bounded hook
-  audition (`G`), whole-song overview strip, log-as-pane, level bar, destructive buttons behind
-  `⋯`: all done, native only. Versioning, release packaging, the update check and the
+  whole-song overview strip, log-as-pane, level bar, destructive buttons behind `⋯`,
+  light/dark themes, Intro End + Hook auto-guess, cover art: all done, native only.
+  The bounded hook audition (`G`) was done and then **removed** — see §11. Versioning, release packaging, the update check and the
   data-preserving installer: done, §15.)
+- **Validate the hook detector against real annotations.** §7a4 ships unvalidated because the
+  library has no trustworthy hook ground truth. The cheap way to get some: have the setter run
+  a round normally, then compare the hooks they confirmed against what `--autodetect` proposed.
+  Twenty confirmed hooks would say whether the detector is worth keeping, tuning or dropping.
+- **The cover-art fallback is near-useless for Thai titles** (2 clean / 5 nothing / 2 wrong out
+  of 9). It only matters for files with no embedded art, which is currently none of them — but
+  if that changes, Spotify's catalogue is the obvious better source and the blocker is the
+  credential, not the code (§8f).
 - **Port the handover UI to the web version.** The web app plays, marks and logs as before and
   round-trips `base` untouched, but export / import / diff / pre-flight exist only in the native
   app. Only matters if the setter's machine is not a Mac.
