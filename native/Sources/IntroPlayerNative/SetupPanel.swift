@@ -127,16 +127,22 @@ struct SetupPanel: View {
                 if m.key == \SongConfig.introStart {
                     Button {
                         guard let p = model.current, let a = model.analysis else { return }
+                        // All three markers, not just the start. The hook is the step the
+                        // pre-flight found was being skipped in practice (§8e: 8 of 9 songs
+                        // still sat on the 60 s default), so the button that offers to guess
+                        // has to offer to guess THAT.
                         if !model.applyAutoStart(p, analysis: a, manual: true) {
                             model.flash("หาจุดเริ่มไม่เจอ — เพลงนี้อาจดังตั้งแต่วินาทีแรก")
                         }
+                        model.flash("กำลังหา Intro End กับ Hook…")
+                        model.guessRest(p, duration: a.duration, manual: true)
                     } label: { Text("🎯").frame(width: 38, height: 38).contentShape(Rectangle()) }
                     .buttonStyle(PressStyle())
                     .background(Palette.tintCyan)
                     .overlay(RoundedRectangle(cornerRadius: 7).stroke(Palette.tintCyanLine)
                         .allowsHitTesting(false))
                     .clipShape(RoundedRectangle(cornerRadius: 7))
-                    .help("หาจุดที่เพลงเริ่มดังให้อัตโนมัติ แล้วเลื่อนทั้งช่วง Intro ตามไป")
+                    .help("เดาให้ทั้ง Intro Start / Intro End / Hook — แล้วค่อยปรับเอง")
                 }
                 Button {
                     if let f = m.field { model.requestMark(f) } else { model.mark(m.key) }

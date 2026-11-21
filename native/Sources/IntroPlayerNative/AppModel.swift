@@ -307,6 +307,11 @@ final class AppModel: ObservableObject {
                 // music actually begins, so nobody opens a song whose intro is 8 s of silence.
                 if let a, !self.store.config(for: path).isConfigured {
                     self.applyAutoStart(path, analysis: a, manual: false)
+                    // …and the rest of the guess behind it. Intro End and Hook need an FFT over
+                    // the whole file, which is far too slow to do on every selection — holding
+                    // ↓ through a round would start one per song — so it runs as its own task,
+                    // only for songs nobody has set up, and only once (`autoGuessed`).
+                    self.guessRest(path, duration: a.duration)
                 }
                 // Deliberately NOT re-zooming here: this fires after a full-file decode, so it
                 // used to wipe whatever zoom the setter had already made while waiting.
@@ -598,6 +603,52 @@ final class AppModel: ObservableObject {
     /// Seconds until playback stops by itself. nil means nothing will stop it — which is exactly
     /// what the amber strip is for.
     var secondsToStop: Double? { secondsToIntroEnd }
+
+    /// Paths a full guess has already been attempted for this session, so arrowing back and
+    /// forth does not re-run an FFT per visit.
+    private var autoGuessed = Set<String>()
+    private var guessTask: Task<Void, Never>?
+
+    /// Intro End and Hook, guessed. Everything it writes stays `auto`, so the song remains in
+    /// the `Return`/`Tab` review sweep and in the pre-flight warnings until a human confirms it.
+    ///
+    /// `manual` runs it even for a configured song and tells the operator what happened — the
+    /// automatic pass is deliberately silent, because a toast per song while arrowing through a
+    /// round is noise.
+    func guessRest(_ path: String, duration: Double, manual: Bool = false) {
+        if !manual && autoGuessed.contains(path) { return }
+        autoGuessed.insert(path)
+        guessTask?.cancel()
+        let url = Library.url(path)
+        guessTask = Task.detached(priority: .utility) { [weak self] in
+            guard let f = AutoDetect.extract(url: url), !Task.isCancelled else {
+                if manual {
+                    await MainActor.run { self?.flash("วิเคราะห์เพลงนี้ไม่ได้") }
+                }
+                return
+            }
+            await MainActor.run {
+                guard let self else { return }
+                // The song may have changed, or the setter may have started marking it while
+                // the FFT ran. Either way the guess is stale and must not overwrite them.
+                guard !self.store.config(for: path).isConfigured || manual else { return }
+                var c = self.store.config(for: path)
+                let end = AutoDetect.introEnd(features: f, from: c.introStart)
+                c.introEnd = (min(duration, max(c.introStart + 1, end)) * 100).rounded() / 100
+                var msg = String(format: "เดา Intro End = %.1fs", c.introEnd)
+                if let h = AutoDetect.hook(features: f, after: c.introEnd) {
+                    c.hook = (min(duration - 1, h.time) * 100).rounded() / 100
+                    msg += String(format: " · Hook = %.1fs", c.hook)
+                }
+                c.auto = true
+                self.store.set(c, for: path)
+                self.invalidateStatus()
+                if self.current == path { self.refreshGain() }
+                if manual { self.flash(msg + " — ตรวจดูอีกที") }
+                self.objectWillChange.send()
+            }
+        }
+    }
 
     @discardableResult
     func applyAutoStart(_ path: String, analysis a: Analysis, manual: Bool) -> Bool {

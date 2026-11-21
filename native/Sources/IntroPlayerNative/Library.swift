@@ -903,6 +903,50 @@ enum Diagnostics {
         }
     }
 
+    /// What the auto-guess proposes for every song, against whatever is configured. Read-only.
+    ///
+    /// Ground truth is thin — the real library has three hooks that differ from the 60 s default
+    /// at all — so this does NOT pass or fail on agreement with the config. It prints both and
+    /// the repetition score, so the guess can be judged by ear. What it does assert is the part
+    /// that is objectively checkable: a guess must be inside the song, after the intro, and the
+    /// chosen hook must actually repeat somewhere.
+    static func autoDetectReport() {
+        let store = Store()
+        let songs = Library.scan()
+        var pass = 0, fail = 0
+        print("เทียบค่าที่เดา กับค่าที่ตั้งไว้ใน config.json  (\(songs.count) เพลง)\n")
+        print(String(format: "   %-26@ %17@ %17@ %6@",
+                     "song" as NSString, "intro end (เดา/ตั้ง)" as NSString,
+                     "hook (เดา/ตั้ง)" as NSString, "หลักฐาน" as NSString))
+        for p in songs {
+            guard let a = try? Analysis.analyse(url: Library.url(p)),
+                  let f = AutoDetect.extract(url: Library.url(p)) else {
+                print("   \(Library.baseName(p))  — อ่านไม่ได้"); continue
+            }
+            let c = store.config(for: p)
+            let start = a.detectIntroStart() ?? c.introStart
+            let iEnd = AutoDetect.introEnd(features: f, from: start)
+            let h = AutoDetect.hook(features: f, after: iEnd)
+            let name = String(Library.baseName(p).prefix(26))
+            print(String(format: "   %-26@  %6.1f / %6.1f   %6.1f / %6.1f  ซ้ำ %4.2f ดัง %4.2f %@",
+                         name as NSString, iEnd, c.introEnd,
+                         h?.time ?? -1, c.hook, h?.repetition ?? 0, h?.loudness ?? 0,
+                         ((h?.onBoundary ?? false) ? "รอยต่อ" : "—") as NSString))
+
+            // the objectively checkable part
+            let okEnd = iEnd > start && iEnd < a.duration
+            let okHook = (h?.time).map { $0 > iEnd && $0 < a.duration - 2 } ?? false
+            let okRep = (h?.repetition ?? 0) > 0.5
+            for (label, ok) in [("intro end อยู่ในเพลง", okEnd),
+                                ("hook อยู่หลัง intro และไม่เลยท้ายเพลง", okHook),
+                                ("hook ที่เลือกซ้ำจริง (correlation > 0.5)", okRep)] {
+                if ok { pass += 1 } else { fail += 1; print("      ✗ \(label)") }
+            }
+        }
+        print("\nผ่าน \(pass)  ตก \(fail)")
+        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+    }
+
     /// Is the intro auto-gain actually levelling what the audience hears?
     ///
     /// Read-only. Measures every intro two ways — the app's gated LUFS and, independently, by

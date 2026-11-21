@@ -18,7 +18,7 @@ struct IntroPlayerApp: App {
         let diag = ProcessInfo.processInfo.environment["INTROPLAYER_DIAG"] == "1"
         let flags = ["--analyse", "--rescantest", "--resetflow", "--resettest", "--playtest",
                      "--columns", "--handoff", "--preflight", "--titles",
-                     "--revealtest", "--grabtest", "--palettetest", "--timefmt", "--overview", "--remodetest", "--takes",
+                     "--revealtest", "--grabtest", "--palettetest", "--autodetect", "--timefmt", "--overview", "--remodetest", "--takes",
                      "--updatecheck", "--updatestage", "--loudtest"]
         if !diag, let f = CommandLine.arguments.first(where: flags.contains) {
             FileHandle.standardError.write("\(f) needs INTROPLAYER_DIAG=1\n".data(using: .utf8)!)
@@ -68,6 +68,10 @@ struct IntroPlayerApp: App {
         }
         if CommandLine.arguments.contains("--remodetest") {
             Diagnostics.remodeTest()
+            exit(0)
+        }
+        if CommandLine.arguments.contains("--autodetect") {
+            Diagnostics.autoDetectReport()
             exit(0)
         }
         if CommandLine.arguments.contains("--palettetest") {
