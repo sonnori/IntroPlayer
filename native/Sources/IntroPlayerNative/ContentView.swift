@@ -82,7 +82,12 @@ struct ContentView: View {
             .onChange(of: geo.size.width) { w in model.setWide(w >= 1900) }
         }
         .background(Palette.bg)
-        .preferredColorScheme(.dark)
+        // Follows the setting rather than being nailed to dark. Both halves are needed:
+        // `NSApp.appearance` (set in `applyTheme`) resolves Palette's dynamic NSColors and the
+        // window chrome; this drives SwiftUI's own environment. Set only one and AppKit chrome
+        // and SwiftUI content can land on different themes.
+        .preferredColorScheme(model.theme == .system ? nil
+                              : (model.theme == .dark ? .dark : .light))
         // No view-owned Timer. `ContentView` is re-initialised on every model publish, so a
         // `Timer.publish` stored here was recreated and resubscribed each time — measured at 1 tick
         // in 2 s while the player published at 50 Hz, which left `followPlayhead()` dead exactly
@@ -167,7 +172,8 @@ struct ContentView: View {
             // "saved ✓" forever, so a read-only volume or a blocked folder looked perfectly fine.
             Text(model.saveState)
                 .font(.system(size: 12, weight: model.store.saveFailed ? .bold : .regular))
-                .foregroundStyle(model.store.saveFailed ? Palette.amber : .white.opacity(0.85))
+                .foregroundStyle(model.store.saveFailed ? Palette.onHeaderWarn
+                                 : Palette.onHeader.opacity(0.85))
         }
         .padding(.horizontal, 18).padding(.vertical, 11)
         .background(Palette.header)
@@ -286,7 +292,7 @@ struct ContentView: View {
                 return e
             }
             if e.keyCode == 53 {                                                 // Esc
-                if model.pending != nil || model.pendingPreview { model.cancelPending(); return nil }
+                if model.pending != nil { model.cancelPending(); return nil }
                 if model.importPlan != nil { model.importPlan = nil; return nil }
                 if model.showAbout { model.showAbout = false; return nil }
                 if model.showHandover { model.showHandover = false; return nil }
@@ -330,7 +336,6 @@ struct ContentView: View {
             case 36: model.confirmCurrent()                                      // Return
             case 48: model.nextNeedingReview()                                   // Tab
             // Audition the hook and stop. `R` stays unbounded — that one is on camera.
-            case 5:  model.requestPreview(); model.pulse(PulseID.preview)                  // G
             case 46: model.cycleFocusMarker()                                              // M
             case 6:  model.zoomIntro(); model.pulse(PulseID.zoomIntro)                     // Z
             case 27, 78: model.zoomBy(1.6); model.pulse(PulseID.zoomOut)                   // -
@@ -407,6 +412,21 @@ struct SongListView: View {
                     .buttonStyle(PressStyle(corner: 5))
                     .help("เวอร์ชั่น / โฟลเดอร์ข้อมูล / อัปเดต")
                     Spacer(minLength: 0)
+                    // One tap = the other theme. Deliberately NOT a three-way cycle through
+                    // "ตามระบบ": a display setting that can change by itself is the last thing
+                    // an operator needs mid-taping, so following the system is opt-in from
+                    // About. The glyph shows what you would GET, not what you have — the same
+                    // way every OS does it, because a button that shows the current state reads
+                    // as a status light and gets ignored.
+                    Button { model.toggleTheme() } label: {
+                        Text(model.effectiveDark ? "☀" : "☾")
+                            .font(Typo.font(13, latinOnly: true))
+                            .foregroundStyle(Palette.muted)
+                            .frame(width: 28, height: 26)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(PressStyle(corner: 5))
+                    .help(model.effectiveDark ? "สลับเป็นธีมสว่าง" : "สลับเป็นธีมมืด")
                     Menu {
                         Button("↺ รีเซ็ตเล่นแล้ว — เริ่มถ่ายรอบใหม่") { resetPlayedFlow() }
                         Button("🗑 ล้างเพลงเก่า\(model.orphanCount > 0 ? " (\(model.orphanCount))" : "")") {
@@ -525,12 +545,12 @@ struct ColumnHeader: View {
     var body: some View {
         HStack(spacing: 6) {
             Text(Library.columnLabels[index]).font(Typo.font(12, .bold))
-                .foregroundStyle(model.activeCol == index ? Color(red: 0.81, green: 0.88, blue: 1) : Palette.text)
+                .foregroundStyle(model.activeCol == index ? Palette.tintSelectText : Palette.text)
             Text("(\(count))").font(Typo.font(11)).foregroundStyle(Palette.muted)
             Spacer()
         }
         .padding(.horizontal, 10).padding(.vertical, 7)
-        .background(model.activeCol == index ? Color(red: 0.141, green: 0.188, blue: 0.286) : Palette.panel2)
+        .background(model.activeCol == index ? Palette.tintSelect : Palette.panel2)
         .overlay(alignment: .bottom) { Rectangle().fill(Palette.line).frame(height: 1) }
     }
 }
@@ -611,11 +631,11 @@ struct SongRow: View {
         .opacity(used ? 0.45 : 1)
         .padding(.horizontal, 10).padding(.vertical, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(active ? Color(red: 0.141, green: 0.188, blue: 0.286) : .clear)
+        .background(active ? Palette.tintSelect : .clear)
         .contentShape(Rectangle())
         .onTapGesture { model.select(path) }
         .help(Library.title(path))
-        Divider().overlay(Color(red: 0.125, green: 0.141, blue: 0.176))
+        Divider().overlay(Palette.hair)
     }
 
     /// Three setup states, not two. "Never opened" and "the app guessed it" used to render the

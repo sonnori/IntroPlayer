@@ -1,0 +1,235 @@
+import Foundation
+
+/// Colour measurement for `Palette`, both themes. Exists because §6d's whole argument rests on
+/// measured numbers — contrast ratios, ΔL\* ladder steps, deutan ΔE2000 — and until this file
+/// those numbers lived only in a comment. A comment cannot fail a build, so the one thing that
+/// made the palette defensible was also the one thing nothing checked.
+///
+/// `--palettetest` asserts them. Not as a style guard: the pair it protects hardest is
+/// ✓ ตอบถูก / ✗ ไม่มีคนตอบ, the two biggest buttons in a taping, which an earlier palette had at
+/// a deutan separation of effectively nothing.
+enum ColorMath {
+
+    // MARK: - sRGB
+
+    static func channels(_ hex: UInt32) -> (Double, Double, Double) {
+        (Double((hex >> 16) & 0xFF) / 255, Double((hex >> 8) & 0xFF) / 255, Double(hex & 0xFF) / 255)
+    }
+    static func toLinear(_ c: Double) -> Double {
+        c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+    }
+    static func toSRGB(_ c: Double) -> Double {
+        let v = min(1, max(0, c))
+        return v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1 / 2.4) - 0.055
+    }
+    static func pack(_ r: Double, _ g: Double, _ b: Double) -> UInt32 {
+        let q = { (v: Double) in UInt32(max(0, min(255, (toSRGB(v) * 255).rounded()))) }
+        return (q(r) << 16) | (q(g) << 8) | q(b)
+    }
+
+    /// WCAG 2.x relative luminance and contrast ratio.
+    static func luminance(_ hex: UInt32) -> Double {
+        let (r, g, b) = channels(hex)
+        return 0.2126 * toLinear(r) + 0.7152 * toLinear(g) + 0.0722 * toLinear(b)
+    }
+    static func contrast(_ a: UInt32, _ b: UInt32) -> Double {
+        let la = luminance(a), lb = luminance(b)
+        return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+    }
+
+    // MARK: - CIELAB
+
+    private static let white = (0.95047, 1.0, 1.08883)
+
+    static func lab(_ hex: UInt32) -> (L: Double, a: Double, b: Double) {
+        let (r0, g0, b0) = channels(hex)
+        let r = toLinear(r0), g = toLinear(g0), bl = toLinear(b0)
+        let x = 0.4124564 * r + 0.3575761 * g + 0.1804375 * bl
+        let y = 0.2126729 * r + 0.7151522 * g + 0.0721750 * bl
+        let z = 0.0193339 * r + 0.1191920 * g + 0.9503041 * bl
+        func f(_ t: Double) -> Double {
+            t > 216.0 / 24389.0 ? cbrt(t) : (841.0 / 108.0) * t + 4.0 / 29.0
+        }
+        let fx = f(x / white.0), fy = f(y / white.1), fz = f(z / white.2)
+        return (116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz))
+    }
+    static func lightness(_ hex: UInt32) -> Double { lab(hex).L }
+
+    /// CIEDE2000.
+    static func deltaE(_ h1: UInt32, _ h2: UInt32) -> Double {
+        let (L1, a1, b1) = lab(h1), (L2, a2, b2) = lab(h2)
+        let c1 = (a1 * a1 + b1 * b1).squareRoot(), c2 = (a2 * a2 + b2 * b2).squareRoot()
+        let cb = (c1 + c2) / 2
+        let cb7 = pow(cb, 7)
+        let g = 0.5 * (1 - (cb7 / (cb7 + pow(25, 7))).squareRoot())
+        let a1p = (1 + g) * a1, a2p = (1 + g) * a2
+        let c1p = (a1p * a1p + b1 * b1).squareRoot(), c2p = (a2p * a2p + b2 * b2).squareRoot()
+        func hue(_ a: Double, _ b: Double) -> Double {
+            if a == 0 && b == 0 { return 0 }
+            let d = atan2(b, a) * 180 / .pi
+            return d < 0 ? d + 360 : d
+        }
+        let h1p = hue(a1p, b1), h2p = hue(a2p, b2)
+        let dLp = L2 - L1, dCp = c2p - c1p
+        var dhp = 0.0
+        if c1p * c2p != 0 {
+            let d = h2p - h1p
+            if abs(d) <= 180 { dhp = d } else if d > 180 { dhp = d - 360 } else { dhp = d + 360 }
+        }
+        let dHp = 2 * (c1p * c2p).squareRoot() * sin(dhp * .pi / 360)
+        let Lbp = (L1 + L2) / 2, Cbp = (c1p + c2p) / 2
+        var hbp = h1p + h2p
+        if c1p * c2p != 0 {
+            if abs(h1p - h2p) <= 180 { hbp = (h1p + h2p) / 2 }
+            else if h1p + h2p < 360 { hbp = (h1p + h2p + 360) / 2 }
+            else { hbp = (h1p + h2p - 360) / 2 }
+        }
+        func cosd(_ d: Double) -> Double { cos(d * .pi / 180) }
+        let T = 1 - 0.17 * cosd(hbp - 30) + 0.24 * cosd(2 * hbp)
+                + 0.32 * cosd(3 * hbp + 6) - 0.20 * cosd(4 * hbp - 63)
+        let dTheta = 30 * exp(-pow((hbp - 275) / 25, 2))
+        let Cbp7 = pow(Cbp, 7)
+        let Rc = 2 * (Cbp7 / (Cbp7 + pow(25, 7))).squareRoot()
+        let Sl = 1 + (0.015 * pow(Lbp - 50, 2)) / (20 + pow(Lbp - 50, 2)).squareRoot()
+        let Sc = 1 + 0.045 * Cbp
+        let Sh = 1 + 0.015 * Cbp * T
+        let Rt = -sin(2 * dTheta * .pi / 180) * Rc
+        let kl = dLp / Sl, kc = dCp / Sc, kh = dHp / Sh
+        return (kl * kl + kc * kc + kh * kh + Rt * kc * kh).squareRoot()
+    }
+
+    // MARK: - deuteranopia
+
+    /// Viénot, Brettel & Mollon (1999), applied in linear RGB. Deutan is the common form and the
+    /// one that matters here: it collapses the red-green axis, which is why an outcome pair of
+    /// "green vs red" cannot be assumed to be two colours.
+    private static let toLMS = [[17.8824, 43.5161, 4.11935],
+                                [3.45565, 27.1554, 3.86714],
+                                [0.0299566, 0.184309, 1.46709]]
+
+    private static let fromLMS: [[Double]] = {
+        let m = toLMS
+        let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+                - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+                + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+        return [
+            [(m[1][1] * m[2][2] - m[1][2] * m[2][1]) / det,
+             (m[0][2] * m[2][1] - m[0][1] * m[2][2]) / det,
+             (m[0][1] * m[1][2] - m[0][2] * m[1][1]) / det],
+            [(m[1][2] * m[2][0] - m[1][0] * m[2][2]) / det,
+             (m[0][0] * m[2][2] - m[0][2] * m[2][0]) / det,
+             (m[0][2] * m[1][0] - m[0][0] * m[1][2]) / det],
+            [(m[1][0] * m[2][1] - m[1][1] * m[2][0]) / det,
+             (m[0][1] * m[2][0] - m[0][0] * m[2][1]) / det,
+             (m[0][0] * m[1][1] - m[0][1] * m[1][0]) / det],
+        ]
+    }()
+
+    private static func apply(_ m: [[Double]], _ v: [Double]) -> [Double] {
+        (0..<3).map { r in (0..<3).reduce(0.0) { $0 + m[r][$1] * v[$1] } }
+    }
+
+    static func deutan(_ hex: UInt32) -> UInt32 {
+        let (r, g, b) = channels(hex)
+        let lms = apply(toLMS, [toLinear(r), toLinear(g), toLinear(b)])
+        let sim = [lms[0], 0.494207 * lms[0] + 1.24827 * lms[2], lms[2]]
+        let out = apply(fromLMS, sim)
+        return pack(out[0], out[1], out[2])
+    }
+    static func deutanDeltaE(_ a: UInt32, _ b: UInt32) -> Double {
+        deltaE(deutan(a), deutan(b))
+    }
+}
+
+extension Diagnostics {
+    /// Read-only. Writes nothing and touches no audio.
+    static func paletteTest() {
+        var pass = 0, fail = 0
+        func assertThat(_ name: String, _ ok: Bool, _ detail: String) {
+            if ok { pass += 1 } else { fail += 1 }
+            print("   \(ok ? "ok " : "✗  ")\(name)  \(detail)")
+        }
+        func c(_ n: String, dark: Bool) -> UInt32 {
+            guard let e = Palette.audit.first(where: { $0.0 == n }) else { return 0 }
+            return dark ? e.1 : e.2
+        }
+
+        for dark in [true, false] {
+            let name = dark ? "มืด (dark)" : "สว่าง (light)"
+            print("\n=== ธีม\(name) ===")
+            let panel2 = c("panel2", dark: dark), panel = c("panel", dark: dark)
+
+            // 1. the surface ladder. 4.2-4.4 ΔL* read as one flat field at 81 PPI; 5.5 is floor.
+            print("  1) ชั้นพื้นผิว ต้องห่างกัน >= 5.5 ΔL*")
+            let ladder = ["bg", "panel", "panel2", "float"]
+            for (a, b) in zip(ladder, ladder.dropFirst()) {
+                let d = abs(ColorMath.lightness(c(b, dark: dark)) - ColorMath.lightness(c(a, dark: dark)))
+                assertThat("\(a) → \(b)", d >= 5.4, String(format: "ΔL* %.1f", d))
+            }
+            let dPanel3 = abs(ColorMath.lightness(c("panel3", dark: dark)) - ColorMath.lightness(panel2))
+            assertThat("panel2 ↔ panel3", dPanel3 >= 5.4, String(format: "ΔL* %.1f", dPanel3))
+
+            // 2. text. `dim` is a 3:1 tier by design — it is never body copy.
+            print("  2) ข้อความบนพื้น")
+            for (t, need) in [("text", 4.5), ("muted", 4.5), ("dim", 3.0)] {
+                let a = ColorMath.contrast(c(t, dark: dark), panel2)
+                let b = ColorMath.contrast(c(t, dark: dark), panel)
+                assertThat("\(t) >= \(need):1", min(a, b) >= need,
+                           String(format: "panel2 %.2f:1  panel %.2f:1", a, b))
+            }
+
+            // 3. a saturated fill must separate from its surface, and carry `ink` legibly.
+            print("  3) สีหลักบนพื้น และ ink บนสีหลัก")
+            let ink = c("ink", dark: dark)
+            for n in ["accent", "cyan", "green", "red", "amber", "purple", "onsite"] {
+                let v = c(n, dark: dark)
+                let onSurface = ColorMath.contrast(v, panel2)
+                let inkOn = ColorMath.contrast(ink, v)
+                assertThat("\(n)", onSurface >= 3.0 && inkOn >= 4.5,
+                           String(format: "บนพื้น %.2f:1  ink บนมัน %.2f:1", onSurface, inkOn))
+            }
+            // `header` is judged differently and deliberately: it is a full-width BAR, not a
+            // control, so it has no component boundary to earn 3:1 against — and what sits on
+            // it is fixed light (`onHeader` / `onHeaderWarn`), never theme-flipping `ink`,
+            // because the bar is dark red in both themes. Checking `ink` here reported a
+            // failure against the palette when the mistake was in the check.
+            let head = c("header", dark: dark)
+            let w = ColorMath.contrast(0xFFFFFF, head)
+            let warn = ColorMath.contrast(0xFFC53D, head)
+            assertThat("header: ขาวบนมัน >= 4.5:1", w >= 4.5, String(format: "%.2f:1", w))
+            assertThat("header: amber เตือน save fail >= 3:1", warn >= 3.0,
+                       String(format: "%.2f:1", warn))
+
+            // 4. THE pair. Everything else in this file is hygiene; this is the one that decides
+            //    whether a deutan viewer can tell ✓ ตอบถูก from ✗ ไม่มีคนตอบ.
+            print("  4) คู่ผลลัพธ์ — ตาบอดสีเขียว-แดง (deutan)")
+            let g = ColorMath.deutanDeltaE(c("green", dark: dark), c("red", dark: dark))
+            let gt = ColorMath.deutanDeltaE(c("greenText", dark: dark), c("red", dark: dark))
+            assertThat("green vs red", g >= 10.0, String(format: "ΔE %.1f", g))
+            assertThat("greenText vs red", gt >= 20.0, String(format: "ΔE %.1f", gt))
+
+            // 5. amber is the armed/disarmed carrier and must not collapse onto the transport.
+            print("  5) amber (= ไม่หยุดเอง) ต้องไม่กลืนกับ accent / purple")
+            for n in ["accent", "purple"] {
+                let d = ColorMath.deutanDeltaE(c("amber", dark: dark), c(n, dark: dark))
+                assertThat("amber vs \(n)", d >= 40.0, String(format: "ΔE %.1f", d))
+            }
+
+            // 6. PINNED, not fixed. accent vs purple are the same colour to a deutan viewer in
+            //    both themes. A future "improvement" that separated them would quietly invite
+            //    blue-vs-purple to become the only carrier of the armed bit again — which is the
+            //    bug §6d exists to prevent. If this ever fails, read §6d before changing it.
+            let collide = ColorMath.deutanDeltaE(c("accent", dark: dark), c("purple", dark: dark))
+            assertThat("accent vs purple ยังกลืนกัน (ตามที่ออกแบบ)", collide < 6.0,
+                       String(format: "ΔE %.1f — ห้ามใช้ฟ้า/ม่วงสื่อสถานะเดี่ยวๆ", collide))
+
+            // 7. the waveform's inside/outside distinction
+            let wd = abs(ColorMath.lightness(c("waveIn", dark: dark))
+                         - ColorMath.lightness(c("waveOut", dark: dark)))
+            assertThat("คลื่นใน/นอกช่วง intro", wd >= 10.0, String(format: "ΔL* %.1f", wd))
+        }
+
+        print("\nผ่าน \(pass)  ตก \(fail)")
+        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+    }
+}

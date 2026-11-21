@@ -6,13 +6,23 @@ import SwiftUI
 /// driving a live taping and needs to know the press registered.
 struct PressStyle: ButtonStyle {
     var corner: CGFloat = 8
+    /// The press wash and the brightness shift both have to reverse with the theme. A white wash
+    /// and a POSITIVE brightness on a light theme's near-white button is no feedback at all —
+    /// and in a taping the difference between "the press registered" and "nothing happened" is
+    /// the only thing telling the operator whether to press it again.
+    @Environment(\.colorScheme) private var scheme
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
+        let light = scheme == .light
+        return configuration.label
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
-            .brightness(configuration.isPressed ? 0.16 : 0)
+            .brightness(configuration.isPressed ? (light ? -0.10 : 0.16) : 0)
             .overlay(
                 RoundedRectangle(cornerRadius: corner)
-                    .fill(.white.opacity(configuration.isPressed ? 0.10 : 0))
+                    // Black in light, white in dark. Works on BOTH kinds of button in each
+                    // theme: light mode's plain buttons are near-white and its saturated fills
+                    // are mid-dark, and a 10% black wash is visible on either.
+                    .fill((light ? Color.black : Color.white)
+                        .opacity(configuration.isPressed ? 0.10 : 0))
             )
             .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
     }
@@ -23,7 +33,6 @@ struct PressStyle: ButtonStyle {
 enum PulseID {
     static let start = "start", reveal = "reveal", reset = "reset", played = "played"
     static let correct = "correct", wrong = "wrong", log = "log"
-    static let preview = "preview"
     static let zoomIn = "zin", zoomOut = "zout", zoomFit = "zfit", zoomIntro = "zintro"
     static let ignoreEnd = "ignore"
     static func mark(_ label: String) -> String { "mark:" + label }
@@ -38,17 +47,23 @@ extension View {
 
 private struct PulseTarget: ViewModifier {
     @EnvironmentObject var model: AppModel
+    @Environment(\.colorScheme) private var scheme
     let id: String
     let corner: CGFloat
 
     func body(content: Content) -> some View {
         let on = model.pulseID == id
-        content
+        let light = scheme == .light
+        return content
             .overlay(
                 RoundedRectangle(cornerRadius: corner)
-                    .stroke(.white.opacity(on ? 0.85 : 0), lineWidth: on ? 2.5 : 0)
+                    // The ring is drawn ON the button's edge, so it is seen against the fill and
+                    // the surround at once; near-black reads against both in light mode, white
+                    // against both in dark. A fixed white ring simply vanished in light.
+                    .stroke((light ? Color.black : Color.white).opacity(on ? 0.85 : 0),
+                            lineWidth: on ? 2.5 : 0)
             )
-            .brightness(on ? 0.22 : 0)
+            .brightness(on ? (light ? -0.14 : 0.22) : 0)
             .scaleEffect(on ? 0.975 : 1)
             .animation(.easeOut(duration: on ? 0.05 : 0.28), value: on)
     }

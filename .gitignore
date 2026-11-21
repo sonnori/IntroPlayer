@@ -4,6 +4,8 @@ native/.build/
 # Assembled native bundle, built by native/build.sh. The web launcher
 # IntroPlayer.app/ IS tracked: it contains no compiled code, only a bash
 # script + icns (see CLAUDE.md §6b).
+RGF Intro Player.app/
+RGF Intro Player.app.new/
 IntroPlayerNative.app/
 IntroPlayerNative.app.new/
 

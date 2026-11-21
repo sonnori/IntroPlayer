@@ -90,39 +90,21 @@ struct CenterView: View {
     /// The old status chip only rendered WHILE playing, so pausing past Intro End — or a stray
     /// `E` — left this invisible in exactly the moment the operator decides to press Space.
     ///
-    /// A hook audition (`G`) is excluded: it stops by itself, so warning about it would be crying
-    /// wolf — and a warning that fires when nothing is wrong is a warning that gets ignored on the
-    /// day it matters.
     private var disarmed: Bool {
-        model.current != nil && !model.introGuardArmed && !model.previewArmed
+        model.current != nil && !model.introGuardArmed
     }
 
     private var guardStrip: some View {
         let c = model.config()
         let pending = model.pending
         return HStack(spacing: 14) {
-            if model.pendingPreview {
-                Text("กด G อีกครั้ง").font(Typo.font(17, .bold)).foregroundStyle(Palette.purple)
-                Text("→ ฟัง Hook ที่ \(String(format: "%.2f", c.hook))s")
-                    .font(Typo.font(13, mono: true)).foregroundStyle(Palette.text)
-                Text("· Intro กำลังออกอยู่ — เสียงจะกระโดดไปท่อนเฉลย")
-                    .font(Typo.font(11)).foregroundStyle(Palette.muted)
-            } else if let pm = pending {
+            if let pm = pending {
                 // A proposal, not a change. Nothing has been written yet.
                 Text("กด \(keyHint(pm.field)) อีกครั้ง")
                     .font(Typo.font(17, .bold)).foregroundStyle(Palette.cyan)
                 Text("→ \(pm.field.label) = \(String(format: "%.2f", pm.t))s")
                     .font(Typo.font(15, mono: true)).foregroundStyle(Palette.text)
                 Text("(\(pm.field.label) เดิม \(MarkerField.text(pm.field, c)))")
-                    .font(Typo.font(11)).foregroundStyle(Palette.muted)
-            } else if model.previewArmed {
-                Text("♪ ฟัง Hook").font(Typo.font(17, .bold)).foregroundStyle(Palette.purple)
-                // From the player, not recomputed from `c.hook` — moving the hook mid-audition
-                // changes the config but not the audio, and this label sits next to a countdown
-                // that reads the real value.
-                Text(String(format: "หยุดเองที่ %.2fs", model.previewStopAt ?? 0))
-                    .font(Typo.font(13, mono: true)).foregroundStyle(Palette.text)
-                Text("· R = เล่นเฉลยจริง (ไม่หยุด)")
                     .font(Typo.font(11)).foregroundStyle(Palette.muted)
             } else if disarmed {
                 Text("⚠ ไม่หยุดเอง").font(Typo.font(20, .bold))
@@ -138,15 +120,13 @@ struct CenterView: View {
                     .font(Typo.font(13)).foregroundStyle(Palette.muted)
             }
             Spacer()
-            // Armed has to be PROVEN by a moving number, not asserted by a label. `secondsToStop`
-            // covers both bounds, so a hook audition counts down too rather than reading as "—".
-            if let left = model.secondsToStop, pending == nil, !model.pendingPreview {
+            // Armed has to be PROVEN by a moving number, not asserted by a label.
+            if let left = model.secondsToStop, pending == nil {
                 Text(String(format: "%.1f", left))
                     .font(Typo.font(28, .semibold, mono: true))
-                    .foregroundStyle(model.previewArmed ? Palette.purple
-                                     : (left < 3 ? Palette.amber : Palette.text))
+                    .foregroundStyle(left < 3 ? Palette.amber : Palette.text)
                 Text("วิ").font(Typo.font(13)).foregroundStyle(Palette.muted)
-            } else if pending == nil, !model.pendingPreview {
+            } else if pending == nil {
                 Text("—").font(Typo.font(28, .semibold))
                     .foregroundStyle(Palette.muted.opacity(0.5))
             }
@@ -154,16 +134,12 @@ struct CenterView: View {
         .padding(.horizontal, 14)
         .frame(height: 44)
         .frame(maxWidth: .infinity)
-        .background(model.pendingPreview ? Palette.purple.opacity(0.16)
-                    : pending != nil ? Palette.cyan.opacity(0.14)
-                    : disarmed ? Palette.amber.opacity(0.14)
-                    : model.previewArmed ? Palette.purple.opacity(0.12) : Palette.panel2)
+        .background(pending != nil ? Palette.cyan.opacity(0.14)
+                    : disarmed ? Palette.amber.opacity(0.14) : Palette.panel2)
         .overlay(RoundedRectangle(cornerRadius: 8)
-            .stroke(model.pendingPreview ? Palette.purple
-                    : pending != nil ? Palette.cyan
-                    : disarmed ? Palette.amber
-                    : model.previewArmed ? Palette.purple : Palette.line,
-                    lineWidth: model.pendingPreview || pending != nil || disarmed ? 2 : 1)
+            .stroke(pending != nil ? Palette.cyan
+                    : disarmed ? Palette.amber : Palette.line,
+                    lineWidth: pending != nil || disarmed ? 2 : 1)
             .allowsHitTesting(false))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
@@ -225,12 +201,6 @@ struct CenterView: View {
                 model.player.reveal(config: c)   // deliberately does not mark the song used
             }
             .pulseTarget(PulseID.reveal)
-            // Distinct from Reveal on purpose: same destination, but this one stops itself, so it
-            // is the one to use while hunting for the hook. Reveal is the on-camera verb.
-            actionButton("♪ ฟัง Hook", "G", Palette.panel3, Palette.text, width: 170) {
-                model.requestPreview()
-            }
-            .pulseTarget(PulseID.preview)
             actionButton("⟲ Reset", "S", Palette.panel2, Palette.text, width: 150) {
                 model.cancelPending()
                 model.player.reset(config: c)

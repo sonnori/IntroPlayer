@@ -226,6 +226,8 @@ struct AboutPanel: View {
                     identity
                     if let u = model.updateInfo { updateFound(u) } else { upToDate }
                     feedSetting
+                    Divider().overlay(Palette.hair)
+                    themeSetting
                     howToUpdate
                 }
                 .padding(20)
@@ -461,6 +463,35 @@ struct AboutPanel: View {
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Palette.cyan.opacity(0.45))
             .allowsHitTesting(false))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// The full three-way choice. The header button only flips between the two EXPLICIT values,
+    /// so "ตามระบบ" is reachable but never something you land on by mis-tapping.
+    private var themeSetting: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("ธีม").font(Typo.subhead).foregroundStyle(Palette.text)
+            Text("ค่าเริ่มต้นคือ **มืด** และไม่ใช่เรื่องความชอบ — ที่นั่งคนรันถ่ายอยู่มุมมืดของสตูดิโอ "
+                 + "จอขาว 2560×1080 ตรงหน้าคือไฟส่องหน้าคนที่ต้องมองเวที  ธีมสว่างมีไว้ให้คนเซ็ตโจทย์ที่โต๊ะ")
+                .font(Typo.font(11)).foregroundStyle(Palette.muted)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 6) {
+                ForEach(AppTheme.allCases, id: \.rawValue) { t in
+                    Button { model.setTheme(t) } label: {
+                        Text(t.label).font(Typo.font(12, .semibold))
+                            .frame(width: 84, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(PressStyle(corner: 6))
+                    .foregroundStyle(model.theme == t ? Palette.ink : Palette.text)
+                    .background(model.theme == t ? Palette.accent : Palette.panel3)
+                    .overlay(RoundedRectangle(cornerRadius: 6)
+                        .stroke(model.theme == t ? Palette.accent : Palette.line,
+                                lineWidth: model.theme == t ? 2 : 1)
+                        .allowsHitTesting(false))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+            }
+        }
     }
 
     private var feedSetting: some View {

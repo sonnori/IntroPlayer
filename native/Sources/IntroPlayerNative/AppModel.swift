@@ -89,8 +89,6 @@ final class AppModel: ObservableObject {
     /// `G` pressed once while the intro is on air. Same reasoning as `pending` below: the key
     /// puts the chorus through the stage PA, and keyCode 5 sits next to `H` (4), which the setter
     /// does press mid-playback.
-    @Published var pendingPreview = false
-    private var pendingPreviewTask: Task<Void, Never>?
     /// One hundredth of a second: the precision markers are actually stored at. The ± buttons
     /// deliberately stay at 0.1 s — this is the step you cannot get from them or from a drag.
     static let nudgeStep: Double = 0.01
@@ -465,38 +463,7 @@ final class AppModel: ObservableObject {
         updateConfig { $0[keyPath: k] = (min(max(0, t), ceiling) * 100).rounded() / 100 }
     }
 
-    /// `G` — audition the hook for a few seconds and stop. See `Player.previewHook`.
     ///
-    /// Confirm-on-second-press **while the intro is on air**, for the same reason as `I`/`O`/`H`
-    /// (§11): keyCode 5 sits next to `H` (4), the setter does press `H` during playback, and a
-    /// slip here does not write a number — it plays six seconds of the chorus out of the stage PA
-    /// while the question is live. Immediate in every other state, which is the whole of the
-    /// setter's hook-hunting workflow: you audition from a parked playhead.
-    func requestPreview() {
-        guard current != nil else { return }
-        let onAir = player.isPlaying && player.mode == .intro
-        guard onAir else { cancelPending(); previewHook(); return }
-        if pendingPreview {
-            pendingPreviewTask?.cancel()
-            pendingPreview = false
-            previewHook()
-            return
-        }
-        cancelPending()
-        pendingPreview = true
-        pendingPreviewTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(AppModel.pendingWindow * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-            await MainActor.run { self?.pendingPreview = false }
-        }
-    }
-
-    func previewHook() {
-        guard current != nil else { return }
-        focus(.hook)
-        player.previewHook(config: config())
-    }
-
     // MARK: - two-press confirmation while playing
 
     /// `I`/`O`/`H`/`E` are instant, silent and (until now) irreversible, and they sit on the same
@@ -534,10 +501,6 @@ final class AppModel: ObservableObject {
     }
 
     func cancelPending() {
-        if pendingPreview {
-            pendingPreviewTask?.cancel()
-            pendingPreview = false
-        }
         guard pending != nil else { return }
         pendingTask?.cancel()
         pending = nil
@@ -632,15 +595,9 @@ final class AppModel: ObservableObject {
         return max(0, config().introEnd - player.position)
     }
 
-    /// A bounded hook audition stops on its own, so the "⚠ ไม่หยุดเอง" warning must not fire
-    /// during one. Crying wolf on a state that is in fact safe is how a real warning gets ignored.
-    var previewArmed: Bool { player.previewRemaining != nil }
-
-    /// Seconds until playback stops by itself, whichever bound is in force. nil means nothing
-    /// will stop it — which is exactly what the amber strip is for.
-    var secondsToStop: Double? { player.previewRemaining ?? secondsToIntroEnd }
-    /// Absolute time a running preview stops at — read from the player, never recomputed.
-    var previewStopAt: Double? { player.previewStopAt }
+    /// Seconds until playback stops by itself. nil means nothing will stop it — which is exactly
+    /// what the amber strip is for.
+    var secondsToStop: Double? { secondsToIntroEnd }
 
     @discardableResult
     func applyAutoStart(_ path: String, analysis a: Analysis, manual: Bool) -> Bool {
@@ -1028,6 +985,48 @@ final class AppModel: ObservableObject {
             NSWorkspace.shared.open(f)
         } else {
             updateState = "ยังไม่มี log การอัปเดต"
+        }
+    }
+
+    // MARK: - theme
+
+    var theme: AppTheme { store.theme }
+
+    /// The appearance actually in force, for the header button's own glyph.
+    var effectiveDark: Bool {
+        switch store.theme {
+        case .dark:  return true
+        case .light: return false
+        case .system:
+            return NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        }
+    }
+
+    func setTheme(_ t: AppTheme) {
+        guard store.theme != t else { return }
+        store.theme = t
+        store.settingsChanged()
+        applyTheme()
+        objectWillChange.send()
+    }
+
+    /// One explicit tap: whatever is on screen now, give me the other one. The three-way choice
+    /// (including "ตามระบบ") lives in About — a studio does not want a display setting that can
+    /// change by itself behind one button.
+    func toggleTheme() {
+        setTheme(effectiveDark ? .light : .dark)
+        flash("ธีม: \(store.theme.label)")
+    }
+
+    /// `NSApp.appearance` is what resolves the dynamic colours in `Palette`, and nil hands the
+    /// decision back to the system. `ContentView` additionally sets `.preferredColorScheme` so
+    /// SwiftUI's own environment agrees — without both, AppKit chrome and SwiftUI content can
+    /// end up on different themes.
+    func applyTheme() {
+        switch store.theme {
+        case .system: NSApp.appearance = nil
+        case .light:  NSApp.appearance = NSAppearance(named: .aqua)
+        case .dark:   NSApp.appearance = NSAppearance(named: .darkAqua)
         }
     }
 

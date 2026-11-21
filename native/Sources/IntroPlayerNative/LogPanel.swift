@@ -277,9 +277,9 @@ struct LogPanel: View {
         ForEach(Array(evs.enumerated()), id: \.element.id) { i, e in
             if olderCount > 0, let f = firstCurrentIdx, i == f {
                 Text("↺ เริ่มถ่ายรอบใหม่ — ด้านบนคือรอบก่อนหน้า")
-                    .font(Typo.font(11)).foregroundStyle(Color(red: 0.81, green: 0.88, blue: 1))
+                    .font(Typo.font(11)).foregroundStyle(Palette.tintSelectText)
                     .frame(maxWidth: .infinity).padding(.vertical, 6)
-                    .background(Color(red: 0.141, green: 0.188, blue: 0.286))
+                    .background(Palette.tintSelect)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .padding(.vertical, 8)
             }
@@ -295,13 +295,13 @@ struct LogPanel: View {
                     .font(Typo.font(11, .semibold))
                     .foregroundStyle(e.isCorrect ? Palette.green : Palette.amber)
                     .padding(.horizontal, 8).padding(.vertical, 2)
-                    .background(e.isCorrect ? Color(red: 0.07, green: 0.19, blue: 0.13)
-                                            : Color(red: 0.18, green: 0.14, blue: 0.07))
+                    .background(e.isCorrect ? Palette.tintGood
+                                            : Palette.tintBad)
                     .clipShape(Capsule())
             }
             .opacity(model.isCurrentSession(e) ? 1 : 0.42)
             .padding(.vertical, 7)
-            Divider().overlay(Color(red: 0.125, green: 0.141, blue: 0.176))
+            Divider().overlay(Palette.hair)
         }
     }
 

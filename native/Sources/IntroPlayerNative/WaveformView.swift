@@ -11,49 +11,126 @@ import SwiftUI
 /// Ignore Intro End, save failure, Hook marker) and cyan four. The state that can put a whole
 /// song on camera cannot share a colour with "this song was played".
 enum Palette {
-    // surfaces
-    static let bg = Color(hex: 0x0A0C10)          // L* 3.3  — window
-    static let panel = Color(hex: 0x161A22)       // L* 9.2  — the three panes
-    static let panel2 = Color(hex: 0x222834)      // L* 16.0 — cards, waveform bed
-    static let panel3 = Color(hex: 0x2F3747)      // L* 23.0 — controls inside a card
-    static let float = Color(hex: 0x3A4358)       // L* 28.4 — sheets, popovers, toast
-    static let hair = Color(hex: 0x272E3A)        // row dividers
-    static let line = Color(hex: 0x3C4659)        // card and pane borders
-    static let lineStrong = Color(hex: 0x5A6880)  // focus ring, floating-surface edge
+    // surfaces — dark L* 3.3/9.2/16.0/23.0/28.4, light 82.1/88.6/94.1/100 (panel3 recessed)
+    static let bg         = dyn(0x0A0C10, 0xC7CDD3)
+    static let panel      = dyn(0x161A22, 0xD9DFE6)
+    static let panel2     = dyn(0x222834, 0xE8EFF5)
+    /// Controls inside a card. In dark it comes FORWARD (lighter); in light it is RECESSED
+    /// (8.0 L* below the card), which is how a light-theme control reads — the requirement is
+    /// a step of at least 5.5 L*, not a direction.
+    static let panel3     = dyn(0x2F3747, 0xD2D8DF)
+    static let float      = dyn(0x3A4358, 0xFFFFFF)
+    static let hair       = dyn(0x272E3A, 0xC1C7CE)
+    static let line       = dyn(0x3C4659, 0xABB1B8)
+    static let lineStrong = dyn(0x5A6880, 0x81878D)
 
-    // text
-    static let text = Color(hex: 0xEAECF0)        // 12.49:1 on panel2
-    static let muted = Color(hex: 0xA7B1C2)       // 6.83:1
-    static let dim = Color(hex: 0x7C8799)         // 4.07:1
-    static let ink = Color(hex: 0x0A0C10)         // on a saturated fill
+    // text — dark 12.49/6.83/4.07 on panel2, light 13.48/6.00/4.00
+    static let text  = dyn(0xEAECF0, 0x1F2429)
+    static let muted = dyn(0xA7B1C2, 0x555A60)
+    static let dim   = dyn(0x7C8799, 0x70757B)
+    /// Text ON a saturated fill. The fills invert between themes — bright in dark, dark in
+    /// light — so this has to invert with them or every button legend disappears.
+    static let ink   = dyn(0x0A0C10, 0xFFFFFF)
+    /// A DARK hairline, in both themes. Not `ink`, even though they were the same value before
+    /// there was a light theme: the playhead is a dark outline under a white core, so an `ink`
+    /// that follows the theme turned the playhead white-on-white — invisible, on the one element
+    /// every marker is placed against.
+    static let outline = Color(hex: 0x0A0C10)
+    /// The header bar is a saturated dark red in BOTH themes, so whatever sits on it sits on
+    /// dark and must not flip. Measured: the light theme's amber on the light header is 1.2:1,
+    /// and the thing drawn in it is the save-failure warning — the single condition that
+    /// silently loses a day of markers.
+    static let onHeader = Color.white
+    static let onHeaderWarn = Color(hex: 0xFFC53D)
 
-    /// Transport, and "playing the intro". Note accent vs violet collide at **deutan ΔE 1.2** —
-    /// they are the same colour to a deutan viewer — so blue-vs-violet must never be the only
-    /// carrier of the armed/disarmed state. That is why the guard uses amber plus a word.
-    static let accent = Color(hex: 0x4A8CFF)
+    /// Transport, and "playing the intro". Note accent vs purple collide at deutan ΔE ~1 in
+    /// BOTH themes — they are the same colour to a deutan viewer — so blue-vs-purple must never
+    /// be the only carrier of the armed/disarmed state. That is why the guard uses amber plus
+    /// a word. `--palettetest` pins the collision so nobody "fixes" it by accident.
+    static let accent = dyn(0x4A8CFF, 0x0063D6)
     /// The Intro bracket: BOTH ends. They are two ends of one range, told apart by which edge
     /// their flag sits on, which also makes two markers on the same time individually grabbable.
-    static let cyan = Color(hex: 0x1FC8E8)
+    static let cyan = dyn(0x1FC8E8, 0x007A93)
     /// Only ever "a human answered correctly".
-    static let green = Color(hex: 0x2FD17A)
-    static let greenText = Color(hex: 0x7DE9AF)
-    /// Wrong / burned question, and destructive controls. Paired with `greenText` the outcome
-    /// badges separate at **deutan ΔE 35.5**; the old #2ECC71 / #FF5566 pair was ΔE 7.3.
-    static let red = Color(hex: 0xF4374E)
+    static let green = dyn(0x2FD17A, 0x1F5534)
+    static let greenText = dyn(0x7DE9AF, 0x0A4C2F)
+    /// Wrong / burned question, and destructive controls. The outcome pair is the one separation
+    /// that must never be traded away: measured deutan ΔE 11.9 dark / 23.9 light for the fills,
+    /// 21.3 / 27.5 for the badge text. The light values came out BETTER because the light fills
+    /// have more lightness spread available under a white ground.
+    static let red = dyn(0xF4374E, 0xE1123E)
     /// Only ever "the intro-end stop is not armed, or something is wrong".
-    static let amber = Color(hex: 0xFFC53D)
+    ///
+    /// The light value could not satisfy §6d's "~24 ΔL* from accent and purple" — on a white
+    /// ground the usable range is too narrow, and the search came back empty. That rule was a
+    /// bonus property, not the mechanism: amber is YELLOW against a BLUE accent, and deutan
+    /// leaves the blue-yellow axis intact, so the real separation is ΔE 67 in light (74 in dark)
+    /// and the carrier of last resort is still the word next to it.
+    static let amber = dyn(0xFFC53D, 0x926800)
     /// Reveal, and the Hook marker it jumps to — one meaning, two places.
-    static let purple = Color(hex: 0xA06BFF)
-    static let hook = Color(hex: 0xA06BFF)
+    static let purple = dyn(0xA06BFF, 0x6E3FCD)
+    static let hook = dyn(0xA06BFF, 0x6E3FCD)
     /// Only ever "changed after the handover".
-    static let onsite = Color(hex: 0xF763B8)
-    /// White on the old #E25232 was **3.83:1** at 15px bold — below 4.5 and too small for the
-    /// large-text exemption. This is 4.97:1.
-    static let header = Color(hex: 0xC8402A)
+    static let onsite = dyn(0xF763B8, 0xC82C8D)
+    /// White on it: 4.97:1 dark, 6.22:1 light. The old #E25232 was 3.83:1 at 15px bold — below
+    /// 4.5 and too small for the large-text exemption.
+    static let header = dyn(0xC8402A, 0xBA2616)
 
-    // waveform envelope: inside vs outside the intro, 14.5 ΔL* apart
-    static let waveOut = Color(hex: 0x3E4A61)
-    static let waveIn = Color(hex: 0x5C6D8C)
+    // ---- tinted chips -------------------------------------------------------------------
+    // These were hardcoded `Color(red:...)` darks scattered through SetupPanel, LogPanel and the
+    // column headers. Under a light theme `Palette.text` goes near-black and lands on them: dark
+    // cyan on dark teal measured 1.6:1. A chip whose own label is unreadable is worse than no
+    // theme at all, so each tint is named by ROLE and resolved per theme.
+    /// "automatic / this control is on" — the 🎯 and the toggles.
+    static let tintCyan = dyn(0x12303F, 0xBDE3EE)
+    static let tintCyanLine = dyn(0x2A6B80, 0x6AAABB)
+    /// "played / Ignore Intro End" — amber's meaning, as a background wash.
+    static let tintWarn = dyn(0x2A2418, 0xF3D9B0)
+    static let tintWarnLine = dyn(0x6B5A33, 0xBB9C64)
+    /// "this is the active column / the row you are on".
+    static let tintSelect = dyn(0x243049, 0xD3D9F7)
+    static let tintSelectText = dyn(0xCFE0FF, 0x214583)
+    /// Log rows: answered vs burned. The row text is `Palette.text`, so these carry it.
+    static let tintGood = dyn(0x121F22, 0xC0E6CA)
+    static let tintBad = dyn(0x2E2412, 0xFFD2CF)
+    static let tintGoodLine = dyn(0x2F5B41, 0x78AC88)
+    /// The level bar's fill.
+    static let levelBar = dyn(0x5BD6FF, 0x0190A9)
+
+    // waveform envelope: inside vs outside the intro, 14.5 ΔL* apart in dark, 14.4 in light
+    static let waveOut = dyn(0x3E4A61, 0xA2ACB9)
+    static let waveIn = dyn(0x5C6D8C, 0x7C8693)
+
+    /// One definition, two themes. A dynamic `NSColor` is resolved by AppKit against whatever
+    /// appearance is current, so nothing in the app has to know which theme is on and no view
+    /// needs to observe the setting to repaint.
+    private static func dyn(_ dark: UInt32, _ light: UInt32) -> Color {
+        Color(nsColor: NSColor(name: nil) { ap in
+            ap.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? ns(dark) : ns(light)
+        })
+    }
+    private static func ns(_ hex: UInt32) -> NSColor {
+        NSColor(srgbRed: Double((hex >> 16) & 0xFF) / 255,
+                green: Double((hex >> 8) & 0xFF) / 255,
+                blue: Double(hex & 0xFF) / 255, alpha: 1)
+    }
+
+    /// Every value above, by name, so `--palettetest` can measure the real thing rather than a
+    /// copy of it that drifts.
+    static let audit: [(String, UInt32, UInt32)] = [
+        ("bg", 0x0A0C10, 0xC7CDD3), ("panel", 0x161A22, 0xD9DFE6),
+        ("panel2", 0x222834, 0xE8EFF5), ("panel3", 0x2F3747, 0xD2D8DF),
+        ("float", 0x3A4358, 0xFFFFFF), ("hair", 0x272E3A, 0xC1C7CE),
+        ("line", 0x3C4659, 0xABB1B8), ("lineStrong", 0x5A6880, 0x81878D),
+        ("text", 0xEAECF0, 0x1F2429), ("muted", 0xA7B1C2, 0x555A60),
+        ("dim", 0x7C8799, 0x70757B), ("ink", 0x0A0C10, 0xFFFFFF),
+        ("accent", 0x4A8CFF, 0x0063D6), ("cyan", 0x1FC8E8, 0x007A93),
+        ("green", 0x2FD17A, 0x1F5534), ("greenText", 0x7DE9AF, 0x0A4C2F),
+        ("red", 0xF4374E, 0xE1123E), ("amber", 0xFFC53D, 0x926800),
+        ("purple", 0xA06BFF, 0x6E3FCD), ("onsite", 0xF763B8, 0xC82C8D),
+        ("header", 0xC8402A, 0xBA2616),
+        ("waveOut", 0x3E4A61, 0xA2ACB9), ("waveIn", 0x5C6D8C, 0x7C8693),
+    ]
 }
 
 extension Color {
@@ -121,13 +198,53 @@ struct WheelCatcher: NSViewRepresentable {
     }
 }
 
+/// What a press on the waveform means for the markers. Pure on purpose: the rule has two
+/// load-bearing details that are invisible in a screenshot and silently breakable, so
+/// `--grabtest` proves them without driving the UI.
+///
+///  1. **Two stages.** A marker must already be the active one before a press can drag it.
+///     Otherwise the press only activates it. These are values the setter signed off, on the same
+///     surface the operator pans and seeks on, and the old one-stage grab moved whichever line a
+///     press happened to land within 8pt of.
+///  2. **`<=`, not `<`, on the distance tie-break.** With two markers on the same time the later
+///     one could never win, so Intro End was unreachable — which is exactly song 102's real state
+///     in `config.json` (`introStart == introEnd`).
+enum MarkerGrab {
+    enum Outcome: Equatable {
+        case drag(MarkerField)      // it was already active — move it
+        case activate(MarkerField)  // make it active and consume the gesture
+        case away                   // no marker near the press: pan or seek as before
+    }
+
+    static func decide(pressX: CGFloat,
+                       positions: [(field: MarkerField, x: CGFloat)],
+                       active: MarkerField,
+                       slop: CGFloat = 8) -> Outcome {
+        var best: MarkerField?
+        var bd = slop
+        for m in positions {
+            let d = abs(m.x - pressX)
+            if d <= bd { bd = d; best = m.field }
+        }
+        guard let best else { return .away }
+        return best == active ? .drag(best) : .activate(best)
+    }
+}
+
 struct WaveformView: View {
     @EnvironmentObject var model: AppModel
 
     /// Which marker a drag grabbed, if any. Away from a marker a drag pans and a click seeks.
     @State private var dragKey: WritableKeyPath<SongConfig, Double>?
+    /// Set when a press landed on a marker that was NOT the active one. That press only ACTIVATES
+    /// it — see the two-stage rule in the gesture below — and the rest of the gesture is consumed
+    /// so it can neither move the marker, pan the view, nor seek.
+    @State private var arming = false
+    @State private var armedExplained = false
     @State private var panning = false
     @State private var panLast: CGFloat = 0
+    /// The marker's value when the drag grabbed it, so a press that moves nothing writes nothing.
+    @State private var dragFrom: Double = 0
     private let panSlop: CGFloat = 4
 
     private func timeToX(_ t: Double, _ w: CGFloat) -> CGFloat {
@@ -176,30 +293,47 @@ struct WaveformView: View {
                 DragGesture(minimumDistance: 0)
                     .onChanged { g in
                         guard model.player.duration > 0 else { return }
-                        if dragKey == nil && !panning {
-                            // grab a marker if the press landed within 8pt of one
-                            var best: WritableKeyPath<SongConfig, Double>?
-                            var bd: CGFloat = 8
-                            for m in Markers.all {
-                                let mx = timeToX(c[keyPath: m.key], w)
-                                // `<=`, not `<`: with two markers on the same time the later one
-                                // could never win, so Intro End was unreachable on the waveform.
-                                // config.json has song 102 in exactly that state.
-                                if abs(mx - g.startLocation.x) <= bd { bd = abs(mx - g.startLocation.x); best = m.key }
+                        if arming {
+                            // Explain the no-op, but only once the hand actually tried to drag —
+                            // a plain select-click needs no toast, a drag that did nothing does.
+                            if abs(g.translation.width) >= panSlop && !armedExplained {
+                                armedExplained = true
+                                model.flash("เลือก \(model.focusMarker.label) แล้ว — ลากอีกครั้งเพื่อเลื่อน")
                             }
-                            if let best {
-                                dragKey = best
-                                // The nudge target follows the hand: whatever was just dragged is
-                                // what Shift+arrow should refine.
-                                if let f = MarkerField.times.first(where: { $0.timeKey == best }) {
-                                    model.focus(f)
-                                }
-                            } else { panLast = g.startLocation.x }
+                            return
+                        }
+                        if dragKey == nil && !panning {
+                            let pos = MarkerField.times.compactMap { f -> (field: MarkerField, x: CGFloat)? in
+                                guard let k = f.timeKey else { return nil }
+                                return (f, timeToX(c[keyPath: k], w))
+                            }
+                            switch MarkerGrab.decide(pressX: g.startLocation.x, positions: pos,
+                                                     active: model.focusMarker) {
+                            case .activate(let f):
+                                model.focus(f)
+                                arming = true
+                                armedExplained = false
+                                return
+                            case .drag(let f):
+                                guard let k = f.timeKey else { return }
+                                dragKey = k
+                                dragFrom = model.config()[keyPath: k]
+                            case .away:
+                                panLast = g.startLocation.x
+                            }
                         }
                         if let k = dragKey {
                             let t = max(0, min(model.player.duration, xToTime(g.location.x, w)))
-                            // commit:false — re-levelling the gain per frame steps and clicks.
-                            model.updateConfig(commit: false) { $0[keyPath: k] = (t * 100).rounded() / 100 }
+                            let v = (t * 100).rounded() / 100
+                            // A press that moves nothing must WRITE nothing. `updateConfig` stamps
+                            // `configured` and pushes an undo snapshot, so a click merely to
+                            // select the active marker used to mark an unreviewed guess as
+                            // reviewed — dropping the song out of the Return/Tab sweep and out of
+                            // the pre-flight warnings. Same defect the typed field has in §11.
+                            if v != model.config()[keyPath: k] {
+                                // commit:false — re-levelling the gain per frame steps and clicks.
+                                model.updateConfig(commit: false) { $0[keyPath: k] = v }
+                            }
                         } else {
                             let dx = g.location.x - panLast
                             if !panning && abs(g.translation.width) < panSlop { return }
@@ -209,11 +343,17 @@ struct WaveformView: View {
                         }
                     }
                     .onEnded { g in
+                        let moved = dragKey.map { model.config()[keyPath: $0] != dragFrom } ?? false
                         let wasMarker = dragKey != nil
-                        defer { dragKey = nil; panning = false }
+                        let wasArming = arming
+                        defer { dragKey = nil; panning = false; arming = false }
                         guard model.player.duration > 0 else { return }
-                        if wasMarker {
-                            model.commitConfig()      // re-level and re-schedule now the drag is over
+                        if wasArming {
+                            return                    // the press only activated a marker
+                        } else if wasMarker {
+                            // Only when the value actually moved: `commitConfig` re-levels,
+                            // re-schedules the node and ends the undo coalescing window.
+                            if moved { model.commitConfig() }
                         } else if !panning {
                             model.player.seek(to: xToTime(g.location.x, w), config: c)
                         }
@@ -266,15 +406,6 @@ struct WaveformView: View {
             onsiteGhost(ctx, b.hook, c.hook, w, h)
         }
 
-        // The window a hook audition will play, while one is running. Drawn under the markers so
-        // the HOOK flag stays on top of its own band.
-        if model.previewArmed {
-            let s0 = timeToX(c.hook, w)
-            let s1 = timeToX(min(model.player.duration, c.hook + Player.previewSec), w)
-            ctx.fill(Path(CGRect(x: s0, y: 0, width: max(1, s1 - s0), height: h)),
-                     with: .color(Palette.hook.opacity(0.16)))
-        }
-
         // Opposite edges, so two markers on the same time can never occlude each other — which
         // is exactly song 102's real state (introStart == introEnd).
         let fm = model.focusMarker
@@ -305,7 +436,7 @@ struct WaveformView: View {
 
         // Hairlines either side keep the playhead readable over both envelope shades, and the cap
         // stops it reading as a fourth marker when parked on one.
-        ctx.fill(Path(CGRect(x: px - 2, y: 0, width: 4, height: h)), with: .color(Palette.ink))
+        ctx.fill(Path(CGRect(x: px - 2, y: 0, width: 4, height: h)), with: .color(Palette.outline))
         ctx.fill(Path(CGRect(x: px - 1, y: 0, width: 2, height: h)), with: .color(.white))
         var cap = Path()
         cap.move(to: CGPoint(x: px - 5, y: mid - 6))
@@ -445,7 +576,7 @@ struct OverviewStrip: View {
         }
 
         let px = sx(model.player.position)
-        ctx.fill(Path(CGRect(x: px - 1.5, y: 0, width: 3, height: h)), with: .color(Palette.ink))
+        ctx.fill(Path(CGRect(x: px - 1.5, y: 0, width: 3, height: h)), with: .color(Palette.outline))
         ctx.fill(Path(CGRect(x: px - 0.5, y: 0, width: 1, height: h)), with: .color(.white))
     }
 }
@@ -467,7 +598,12 @@ struct Markers {
 
     static let all: [Markers] = [
         .init(key: \.introStart, label: "Intro Start", hot: "I", color: Palette.cyan),
-        .init(key: \.introEnd, label: "Intro End", hot: "O", color: Palette.green),
+        // CYAN, not green. §6d gives green exactly one meaning — "a human answered correctly" —
+        // and names "Intro End marker" among the four it was supposed to have given up. The
+        // waveform was already drawing both ends cyan, so the setup panel had been disagreeing
+        // with the waveform about what colour this marker is. Invisible while both hues were
+        // bright and cool; obvious the moment a light theme made them dark teal vs dark green.
+        .init(key: \.introEnd, label: "Intro End", hot: "O", color: Palette.cyan),
         .init(key: \.hook, label: "Hook", hot: "H", color: Palette.hook),
     ]
 }

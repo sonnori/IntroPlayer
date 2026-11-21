@@ -2,7 +2,7 @@
 # Packages a release for the crew: one zip anyone can double-click into place.
 #
 #   ./native/release.sh                      build + package the version in ./VERSION
-#   ./native/release.sh --skip-build         package whatever IntroPlayerNative.app already is
+#   ./native/release.sh --skip-build         package the app bundle as it already stands
 #   ./native/release.sh --allow-dirty        package from a tree with uncommitted edits
 #   ./native/release.sh --download <url>     put a download URL in the generated manifest.json
 #   ./native/release.sh --github             publish to GitHub Releases with `gh` (no manifest
@@ -62,8 +62,12 @@ if [ "$SKIP_BUILD" = "0" ]; then
   "$HERE/build.sh" release
 fi
 
-APP="$ROOT/IntroPlayerNative.app"
-[ -d "$APP" ] || { echo "✗ ไม่มี IntroPlayerNative.app — รัน ./native/build.sh ก่อน"; exit 1; }
+# One source of truth for the bundle name: the installer. If these two ever disagreed the zip
+# would carry a bundle the installer does not install.
+APPBUNDLE="$(sed -n 's/^APPBUNDLE="\(.*\)"$/\1/p' "$HERE/installer.command" | head -1)"
+[ -n "$APPBUNDLE" ] || { echo "✗ อ่าน APPBUNDLE จาก installer.command ไม่ได้"; exit 1; }
+APP="$ROOT/$APPBUNDLE"
+[ -d "$APP" ] || { echo "✗ ไม่มี $APPBUNDLE — รัน ./native/build.sh ก่อน"; exit 1; }
 
 # The bundle must actually carry the version we are naming the zip after. Without this the
 # release could be built from a stale app and nobody would find out until a support call.
@@ -81,16 +85,32 @@ mkdir -p "$STAGE"
 
 # The program, and only the program. config.json / log.json / songs/ are the operator's and are
 # never in a release — that split is the whole reason an update can be safe (§5b, §15).
-SHIP=(IntroPlayerNative.app IntroPlayer.app server.py index.html
-      วิธีใช้งาน-SETUP.md ตรวจสอบเครื่อง.command start.command VERSION)
+SHIP=(
+"$APPBUNDLE"
+IntroPlayer.app
+server.py
+index.html
+วิธีใช้งาน-SETUP.md
+ตรวจสอบเครื่อง.command
+start.command
+VERSION
+)
 
 # release.sh decides what SHIPS and installer.command decides what LANDS. A file in one list and
 # not the other goes stale in place — a new app next to the previous release's diagnostic script,
 # which is worse than shipping neither. This was a real miss, so it is a check, not a comment.
-PROG_DECL="$(sed -n '/^PROGRAM=(/,/)/p' "$HERE/installer.command" \
-             | tr '\n' ' ' | sed -e 's/^PROGRAM=(//' -e 's/).*$//')"
-# shellcheck disable=SC2206
-LANDS=($PROG_DECL)
+#
+# Parsed ONE ENTRY PER LINE. The previous version flattened the declaration with `tr '\n' ' '`
+# and split it on whitespace, which "RGF Intro Player.app" would have turned into three
+# filenames — and this check would then have compared nonsense to nonsense and passed.
+read_decl() {
+  sed -n "/^$1=(/,/^)/p" "$HERE/installer.command" \
+    | sed -e '1d' -e '$d' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' \
+    | grep -v '^#' | grep -v '^$'
+}
+LANDS=(); while IFS= read -r l; do LANDS+=("$l"); done < <(read_decl PROGRAM)
+if [ "${#LANDS[@]}" -eq 0 ]; then echo "✗ อ่าน PROGRAM[] จาก installer.command ไม่ได้"; exit 1; fi
 if [ "$(printf '%s\n' "${SHIP[@]}" | sort)" != "$(printf '%s\n' "${LANDS[@]}" | sort)" ]; then
   echo "✗ รายการไฟล์ของ release.sh กับ installer.command ไม่ตรงกัน"
   echo "  ships: $(printf '%s ' "${SHIP[@]}")"
@@ -102,9 +122,7 @@ fi
 
 # SEED[] too: it was hardcoded here as `cp -R "$ROOT/se"`, so adding an entry to the installer's
 # SEED[] would have shipped nothing and the seed would silently never arrive.
-SEED_DECL="$(sed -n '/^SEED=(/,/)/p' "$HERE/installer.command" \
-             | tr '\n' ' ' | sed -e 's/^SEED=(//' -e 's/).*$//')"
-read -r -a SEEDS <<< "$SEED_DECL"
+SEEDS=(); while IFS= read -r l; do SEEDS+=("$l"); done < <(read_decl SEED)
 if [ "${#SEEDS[@]}" -eq 0 ]; then echo "✗ อ่าน SEED[] จาก installer.command ไม่ได้"; exit 1; fi
 
 echo "→ staging $NAME"
@@ -197,7 +215,7 @@ fail=0
 check() { if eval "$2"; then echo "   ok   $1"; else echo "   ✗    $1"; fail=1; fi; }
 check "ติดตั้ง-อัปเดต.command ยัง executable" '[ -x "$U/ติดตั้ง-อัปเดต.command" ]'
 check "ตรวจสอบเครื่อง.command ยัง executable" '[ -x "$U/ตรวจสอบเครื่อง.command" ]'
-check "แอป executable ยังรันได้"               '[ -x "$U/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative" ]'
+check "แอป executable ยังรันได้"               '[ -x "$U/$APPBUNDLE/Contents/MacOS/IntroPlayerNative" ]'
 check "web launcher ยัง executable"            '[ -x "$U/IntroPlayer.app/Contents/MacOS/IntroPlayer" ]'
 check "ไม่มี config.json ติดไปด้วย"             '[ ! -e "$U/config.json" ]'
 check "ไม่มี log.json ติดไปด้วย"                '[ ! -e "$U/log.json" ]'
@@ -206,10 +224,10 @@ check "ไม่มี songs/ ติดไปด้วย"                  '[ !
 # .gitignore), so asserting they are present would make every release fail by design.
 check "se/ มีโฟลเดอร์ + คำอธิบาย"                '[ -f "$U/se/README.txt" ]'
 check "ไม่มีไฟล์เสียงที่ไม่รู้ licence ติดไปด้วย"  '[ ! -f "$U/se/correct.mp3" ] && [ ! -f "$U/se/wrong.mp3" ]'
-ARCHS="$(lipo -archs "$U/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative" 2>/dev/null || echo "")"
+ARCHS="$(lipo -archs "$U/$APPBUNDLE/Contents/MacOS/IntroPlayerNative" 2>/dev/null || echo "")"
 check "universal (arm64 + x86_64) — arch: $ARCHS" '[[ "$ARCHS" == *arm64* && "$ARCHS" == *x86_64* ]]'
 # The strongest check available: ask the unzipped binary what it is.
-GOT="$("$U/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 || echo "")"
+GOT="$("$U/$APPBUNDLE/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 || echo "")"
 check "แอปที่แตกออกมารายงานเวอร์ชั่น $VERSION — ได้: ${GOT:-ไม่ตอบ}" '[[ "$GOT" == "$VERSION"* ]]'
 [ "$fail" = "0" ] || { echo "✗ zip ไม่ผ่านการตรวจ"; exit 1; }
 

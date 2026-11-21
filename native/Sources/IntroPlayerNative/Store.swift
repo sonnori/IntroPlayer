@@ -229,6 +229,20 @@ enum Takes {
 
 enum LoudnessScope: String { case intro, song }
 
+/// Light / dark. Defaults to `dark`, which is not a style preference: the operator's position is
+/// a dim corner of a studio and a white 2560x1080 panel at arm's length is a light source
+/// pointed at the person who has to watch the stage. `light` is for the setter at a desk.
+enum AppTheme: String, CaseIterable {
+    case system, light, dark
+    var label: String {
+        switch self {
+        case .system: return "ตามระบบ"
+        case .light:  return "สว่าง"
+        case .dark:   return "มืด"
+        }
+    }
+}
+
 /// Reads and writes the same two files the web app uses, preserving any keys it doesn't know
 /// about. That is what lets both versions run against one folder — and lets the operator fall
 /// back to the web app mid-taping without losing a thing.
@@ -239,6 +253,7 @@ final class Store {
     // _settings
     var normalize = true
     var loudnessScope: LoudnessScope = .intro
+    var theme: AppTheme = .dark
     var lastPlaylist = ""
     var resetAt: [String: String] = [:]
     /// Where to look for a newer build. Empty = the check is off, which is the default and the
@@ -285,6 +300,9 @@ final class Store {
         let s = raw["_settings"] as? [String: Any] ?? [:]
         normalize = (s["normalize"] as? Bool) ?? true
         loudnessScope = LoudnessScope(rawValue: (s["loudnessScope"] as? String) ?? "") ?? .intro
+        // An unreadable or unknown value falls back to dark rather than to the system, so a
+        // garbled settings file can never put a white screen in front of the operator mid-taping.
+        theme = AppTheme(rawValue: (s["theme"] as? String) ?? "") ?? .dark
         lastPlaylist = (s["lastPlaylist"] as? String) ?? ""
         // Per-key: one bad value used to fail the whole cast, and writeSettings would then erase
         // every reset stamp in the file.
@@ -380,6 +398,7 @@ final class Store {
         var s = (raw["_settings"] as? [String: Any]) ?? [:]
         s["normalize"] = normalize
         s["loudnessScope"] = loudnessScope.rawValue
+        s["theme"] = theme.rawValue
         s["lastPlaylist"] = lastPlaylist
         if !resetAt.isEmpty { s["resetAt"] = resetAt }   // never delete stamps we merely failed to read
         // Same rule as `resetAt`, one line above: only delete a key we successfully READ as

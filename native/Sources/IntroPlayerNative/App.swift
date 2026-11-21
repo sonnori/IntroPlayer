@@ -18,8 +18,8 @@ struct IntroPlayerApp: App {
         let diag = ProcessInfo.processInfo.environment["INTROPLAYER_DIAG"] == "1"
         let flags = ["--analyse", "--rescantest", "--resetflow", "--resettest", "--playtest",
                      "--columns", "--handoff", "--preflight", "--titles",
-                     "--previewtest", "--timefmt", "--overview", "--remodetest", "--takes",
-                     "--updatecheck", "--updatestage"]
+                     "--revealtest", "--grabtest", "--palettetest", "--timefmt", "--overview", "--remodetest", "--takes",
+                     "--updatecheck", "--updatestage", "--loudtest"]
         if !diag, let f = CommandLine.arguments.first(where: flags.contains) {
             FileHandle.standardError.write("\(f) needs INTROPLAYER_DIAG=1\n".data(using: .utf8)!)
             exit(2)
@@ -27,6 +27,11 @@ struct IntroPlayerApp: App {
         // headless mode for verifying the ported analysis against the web version
         if CommandLine.arguments.contains("--analyse") {
             Diagnostics.analyseAll()
+            exit(0)
+        }
+        // Read-only. Is the intro auto-gain actually levelling what the audience hears?
+        if CommandLine.arguments.contains("--loudtest") {
+            Diagnostics.loudTest()
             exit(0)
         }
         if CommandLine.arguments.contains("--rescantest") {
@@ -65,8 +70,16 @@ struct IntroPlayerApp: App {
             Diagnostics.remodeTest()
             exit(0)
         }
-        if CommandLine.arguments.contains("--previewtest") {
-            Diagnostics.previewTest()
+        if CommandLine.arguments.contains("--palettetest") {
+            Diagnostics.paletteTest()
+            exit(0)
+        }
+        if CommandLine.arguments.contains("--grabtest") {
+            Diagnostics.grabTest()
+            exit(0)
+        }
+        if CommandLine.arguments.contains("--revealtest") {
+            Diagnostics.revealTest()
             exit(0)
         }
         if CommandLine.arguments.contains("--updatecheck") {
@@ -96,6 +109,9 @@ struct IntroPlayerApp: App {
             ContentView()
                 .environmentObject(model)
                 .frame(minWidth: 1100, minHeight: 640)
+                // The stored theme has to reach NSApp before the first paint, or the window
+                // chrome opens on the system appearance and snaps a frame later.
+                .onAppear { model.applyTheme() }
         }
         .defaultSize(width: 1600, height: 900)
         .commands { CommandGroup(replacing: .newItem) {} }   // no File > New

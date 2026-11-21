@@ -22,7 +22,7 @@ gen 256 icon_256x256; gen 512 icon_256x256@2x
 gen 512 icon_512x512; gen 1024 icon_512x512@2x
 iconutil -c icns "$ISET" -o "$WORK/AppIcon.icns"
 
-for APP in "$ROOT/IntroPlayerNative.app" "$ROOT/IntroPlayer.app"; do
+for APP in "$ROOT/RGF Intro Player.app" "$ROOT/IntroPlayerNative.app" "$ROOT/IntroPlayer.app"; do
   if [ -d "$APP" ]; then
     mkdir -p "$APP/Contents/Resources"
     cp "$WORK/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"

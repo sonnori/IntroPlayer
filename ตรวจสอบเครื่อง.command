@@ -15,7 +15,14 @@ echo ""
 echo "[0] เวอร์ชั่น"
 VTXT="$( { tr -d ' \n\r' < VERSION; } 2>/dev/null || echo "" )"
 [ -n "$VTXT" ] && echo "     VERSION         = $VTXT" || echo "     VERSION         = (ไม่มีไฟล์ VERSION — เป็นชุดก่อนมีระบบอัปเดต)"
-PLIST=IntroPlayerNative.app/Contents/Info.plist
+# The bundle was renamed in 1.3.0. A crew machine may still be on the old one, and this script
+# is the thing we ask them to run BEFORE the update — so it has to find either.
+APPBUNDLE=""
+for b in "RGF Intro Player.app" "IntroPlayerNative.app"; do
+  [ -d "$b" ] && { APPBUNDLE="$b"; break; }
+done
+APPEXE="$APPBUNDLE/Contents/MacOS/IntroPlayerNative"
+PLIST="$APPBUNDLE/Contents/Info.plist"
 if [ -f "$PLIST" ]; then
   PV="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST" 2>/dev/null || echo "?")"
   PC="$(/usr/libexec/PlistBuddy -c 'Print :RGFGitCommit' "$PLIST" 2>/dev/null || echo "")"
@@ -27,7 +34,10 @@ if [ -f "$PLIST" ]; then
     echo "     ⚠ เลขไม่ตรงกัน — โฟลเดอร์นี้อัปเดตไม่ครบ ให้รัน ติดตั้ง-อัปเดต.command อีกครั้ง"
   fi
 else
-  echo "     แอป (native)    = ไม่พบ IntroPlayerNative.app"
+  echo "     แอป (native)    = ไม่พบ RGF Intro Player.app"
+fi
+if [ "$APPBUNDLE" = "IntroPlayerNative.app" ]; then
+  echo "     หมายเหตุ: ชื่อแอปเก่า — รัน ติดตั้ง-อัปเดต.command แล้วจะเปลี่ยนเป็น RGF Intro Player"
 fi
 # What wrote config.json last. Two people on two builds sharing a folder shows up here.
 # `-I` because the cwd is the install folder, which holds files we did not write — a planted
@@ -133,13 +143,13 @@ echo ""
 echo "[4] ไฟล์ที่ต้องมีครบ"
 # The EXECUTABLE, not the bundle folder: a partial copy leaves Info.plist and the icon in place,
 # so testing the directory reported OK for an app macOS calls damaged.
-for f in IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative \
+for f in "$APPEXE" \
          server.py index.html se/correct.mp3 se/wrong.mp3; do
   [ -e "$f" ] && echo "     OK — $f" || echo "     ✗ ขาด $f"
 done
 # And ask it what it is. This is the check that catches an app that copied but cannot run.
-if [ -x IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative ]; then
-  RV="$(IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative --version 2>&1 | head -1)"
+if [ -n "$APPBUNDLE" ] && [ -x "$APPEXE" ]; then
+  RV="$("$APPEXE" --version 2>&1 | head -1)"
   if [ -n "$RV" ]; then echo "     OK — แอปรันได้ ตอบว่า: $RV"
   else echo "     ✗ แอปรันไม่ได้ (ไม่ตอบอะไรเลย) — ให้รัน ติดตั้ง-อัปเดต.command ใหม่"; fi
 fi
@@ -156,7 +166,7 @@ echo ""
 # 5) quarantine — ของที่โหลด/ก๊อปข้ามเครื่องมักติดธงนี้
 echo "[5] Gatekeeper / quarantine"
 QFLAG=0
-for b in IntroPlayerNative.app IntroPlayer.app; do
+for b in "RGF Intro Player.app" IntroPlayerNative.app IntroPlayer.app; do
   [ -e "$b" ] || continue
   # -lr: recursive. Checking only the bundle directory reported "not quarantined" when the flag
   # was on Contents/MacOS/<exe> — a false OK on the one condition this section exists to find.

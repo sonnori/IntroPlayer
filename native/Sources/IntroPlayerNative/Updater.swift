@@ -398,6 +398,12 @@ enum InstallLocation {
 /// installed one opens with no right-click → Open and no trip to System Settings.
 extension Updater {
     enum Install: LocalizedError {
+        /// The app bundle's own filename. Must match `APPBUNDLE` in `native/installer.command`
+        /// and therefore `SHIP[]` in `release.sh`, which reads it from the installer — this is
+        /// the one copy that lives in Swift, and `--updatestage` is what proves it still agrees
+        /// with a real release.
+        static let bundleName = "RGF Intro Player.app"
+
         case noDownload
         case unpack(String)
         case wrongVersion(got: String, want: String)
@@ -518,17 +524,17 @@ extension Updater {
         // rather than by rebuilding the name, so a renamed zip still works.
         let fm = FileManager.default
         var root = out
-        if !fm.fileExists(atPath: root.appendingPathComponent("IntroPlayerNative.app").path) {
+        if !fm.fileExists(atPath: root.appendingPathComponent(Install.bundleName).path) {
             let kids = (try? fm.contentsOfDirectory(at: out, includingPropertiesForKeys: nil)) ?? []
             guard let hit = kids.first(where: {
-                fm.fileExists(atPath: $0.appendingPathComponent("IntroPlayerNative.app").path)
-            }) else { throw Install.unpack("ในไฟล์ไม่มี IntroPlayerNative.app") }
+                fm.fileExists(atPath: $0.appendingPathComponent(Install.bundleName).path)
+            }) else { throw Install.unpack("ในไฟล์ไม่มี \(Install.bundleName)") }
             root = hit
         }
         guard fm.isExecutableFile(atPath: root.appendingPathComponent(installerName).path) else {
             throw Install.missingInstaller
         }
-        let exe = root.appendingPathComponent("IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative")
+        let exe = root.appendingPathComponent("\(Install.bundleName)/Contents/MacOS/IntroPlayerNative")
         guard fm.isExecutableFile(atPath: exe.path) else {
             throw Install.unpack("ในไฟล์ไม่มีตัวโปรแกรม")
         }

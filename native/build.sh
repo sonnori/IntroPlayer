@@ -1,5 +1,7 @@
 #!/bin/bash
-# Builds the native app and assembles IntroPlayerNative.app next to the web version.
+# Builds the native app and assembles "RGF Intro Player.app" next to the web version.
+# The bundle name carries a space; the EXECUTABLE inside stays `IntroPlayerNative`,
+# which is what pgrep matches on and what every documented diagnostic invokes.
 #   ./native/build.sh          release build, universal (arm64 + x86_64)
 #   ./native/build.sh debug    faster build while iterating, this machine's arch only
 set -euo pipefail
@@ -7,7 +9,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
 CONF="${1:-release}"
-APP="$ROOT/IntroPlayerNative.app"
+APP="$ROOT/RGF Intro Player.app"
 NEW="$APP.new"
 OLD="$APP.old"
 
@@ -50,8 +52,12 @@ rm -rf "$NEW" "$OLD"
 mkdir -p "$NEW/Contents/MacOS" "$NEW/Contents/Resources"
 cp "$BIN" "$NEW/Contents/MacOS/IntroPlayerNative"
 # reuse the icon already generated for the web launcher
-[ -f "$ROOT/IntroPlayer.app/Contents/Resources/AppIcon.icns" ] \
-  && cp "$ROOT/IntroPlayer.app/Contents/Resources/AppIcon.icns" "$NEW/Contents/Resources/"
+# The master lives at native/AppIcon.icns — that is where change-icon.sh keeps it. Reading the
+# web launcher's copy first meant deleting IntroPlayer.app lost the icon on the next rebuild even
+# though the master was right there.
+for ICNS in "$HERE/AppIcon.icns" "$ROOT/IntroPlayer.app/Contents/Resources/AppIcon.icns"; do
+  [ -f "$ICNS" ] && { cp "$ICNS" "$NEW/Contents/Resources/AppIcon.icns"; break; }
+done
 cp "$HERE/Info.plist" "$NEW/Contents/Info.plist"
 printf 'APPL????' > "$NEW/Contents/PkgInfo"
 

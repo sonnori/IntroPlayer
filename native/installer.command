@@ -22,14 +22,42 @@ set -uo pipefail
 SRC="$(cd "$(dirname "$0")" && pwd)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BREADCRUMB="$HOME/Library/Application Support/IntroPlayer/location"
-APPEXE="IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative"
+# The bundle carries a SPACE, so every list below is declared ONE ENTRY PER LINE and parsed that
+# way by release.sh. The old form was space-separated and read with `read -r -a`, which would have
+# split "RGF Intro Player.app" into three filenames — and the cross-check that proves release.sh
+# and this script agree would then have compared nonsense and passed.
+APPBUNDLE="RGF Intro Player.app"
+APPEXE="$APPBUNDLE/Contents/MacOS/IntroPlayerNative"
+# The executable inside is still `IntroPlayerNative`: it is what `pgrep -f` matches on, what every
+# documented diagnostic invokes, and renaming it buys nothing the bundle name has not already got.
 # What the installer owns. Everything NOT in this list is the operator's and is left alone.
 # Must match SHIP[] in release.sh — release.sh asserts it, because a file in one list and not
 # the other goes stale in place.
-PROGRAM=(IntroPlayerNative.app IntroPlayer.app server.py index.html
-         วิธีใช้งาน-SETUP.md ตรวจสอบเครื่อง.command start.command VERSION)
+PROGRAM=(
+"RGF Intro Player.app"
+IntroPlayer.app
+server.py
+index.html
+วิธีใช้งาน-SETUP.md
+ตรวจสอบเครื่อง.command
+start.command
+VERSION
+)
+# Bundles an EARLIER release installed under a different name. Moved aside into backups/ like any
+# replaced program file, and restored by `rollback` — but never re-installed, because the release
+# no longer ships them.
+#
+# This is not housekeeping. A leftover `IntroPlayerNative.app` still launches, and it reads the
+# SAME config.json and log.json as the new bundle (§15), so an operator who opens the familiar
+# icon is running the old build with no sign that anything is wrong — which is precisely what
+# "I installed the new one but nothing changed" looks like.
+LEGACY=(
+IntroPlayerNative.app
+)
 # Seeded on a fresh install, never overwritten — an operator may have swapped in their own stings.
-SEED=(se)
+SEED=(
+se
+)
 # Copied aside before the swap but never replaced. The questions and the taping record.
 DATA=(config.json log.json)
 # Files that exist only in an unzipped RELEASE. Their presence means "this is the source, not an
@@ -122,7 +150,7 @@ die() {
 }
 cancelled() { printf '\nยกเลิก — ไม่มีอะไรถูกเปลี่ยน\n\n' >&2; exit 0; }
 
-[ -d "$SRC/IntroPlayerNative.app" ] || die "ไม่พบ IntroPlayerNative.app ข้างไฟล์นี้ — แตก zip ให้ครบก่อน แล้วรันไฟล์นี้จากในโฟลเดอร์ที่แตกออกมา"
+[ -d "$SRC/$APPBUNDLE" ] || die "ไม่พบ $APPBUNDLE ข้างไฟล์นี้ — แตก zip ให้ครบก่อน แล้วรันไฟล์นี้จากในโฟลเดอร์ที่แตกออกมา"
 [ -x "$SRC/$APPEXE" ] || die "ไฟล์แอปในชุดนี้ไม่ครบ (ขาดตัวโปรแกรมข้างใน) — แตก zip ใหม่ หรือขอไฟล์ใหม่"
 
 # ---------- 1. the app must not be running ----------
@@ -137,8 +165,26 @@ cancelled() { printf '\nยกเลิก — ไม่มีอะไรถู
 # are about to be replaced, and a different install elsewhere on the disk is none of our
 # business. Using the broad check for the swap made the unattended path refuse whenever any
 # other copy was open.
-running_anywhere() { pgrep -f "$APPEXE" 2>/dev/null | grep -vx -e "$$" -e "$PPID" | head -1; }
-running_in_target() { pgrep -f "$1/$APPEXE" 2>/dev/null | grep -vx -e "$$" -e "$PPID" | head -1; }
+# Both the current bundle and any LEGACY one: a leftover old bundle running in the target holds
+# the same config.json open, so swapping under it is §12's clobber with extra steps.
+_exe_paths() {
+  printf '%s\n' "$APPEXE"
+  local l; for l in "${LEGACY[@]}"; do printf '%s\n' "$l/Contents/MacOS/IntroPlayerNative"; done
+}
+running_anywhere() {
+  local e pid
+  while IFS= read -r e; do
+    pid="$(pgrep -f "$e" 2>/dev/null | grep -vx -e "$$" -e "$PPID" | head -1)"
+    [ -n "$pid" ] && { printf '%s' "$pid"; return; }
+  done < <(_exe_paths)
+}
+running_in_target() {
+  local e pid
+  while IFS= read -r e; do
+    pid="$(pgrep -f "$1/$e" 2>/dev/null | grep -vx -e "$$" -e "$PPID" | head -1)"
+    [ -n "$pid" ] && { printf '%s' "$pid"; return; }
+  done < <(_exe_paths)
+}
 # Unattended, the app that launched us is still finishing its quit, so waiting is the whole
 # point — refusing would make the feature impossible. It still refuses if something is STILL
 # running after the wait, which covers a second window or a quit the user cancelled.
@@ -287,7 +333,11 @@ done
 # only the app bundle meant a failure part-way restored the bundle, announced "คืนแอปตัวเดิมให้
 # แล้ว", and left index.html / server.py / the diagnostic DELETED with no copy anywhere — i.e.
 # the mid-taping web fallback (§6c) and the tool you would ask them to run next.
-for item in "${PROGRAM[@]}"; do
+# LEGACY is in here too, so a bundle from an earlier release under a different name is set aside
+# with everything else — and is therefore restorable by `rollback`, which matters: on a failed
+# update the old bundle may be the ONLY working app on the machine.
+RESTORE=("${PROGRAM[@]}" "${LEGACY[@]}")
+for item in "${RESTORE[@]}"; do
   if [ -e "$TARGET/$item" ]; then
     mv "$TARGET/$item" "$BK/$item" || die "ย้าย $item ไปที่สำรองไม่ได้ — ไม่มีอะไรถูกเปลี่ยน"
   fi
@@ -299,7 +349,7 @@ done
 # failed copy, and the operator was shown "เรียบร้อย" over an app bundle with no executable in it.
 rollback() {
   local why="$1" item
-  for item in "${PROGRAM[@]}"; do
+  for item in "${RESTORE[@]}"; do
     [ -e "$BK/$item" ] || continue
     rm -rf "${TARGET:?}/${item:?}" 2>/dev/null
     mv "$BK/$item" "$TARGET/$item" 2>/dev/null
@@ -369,7 +419,7 @@ if [ "$UNATTENDED" = "1" ]; then
   log "✓ อัปเดตเป็น $NEWVER เรียบร้อย — สำรองไว้ที่ backups/$STAMP"
   if [ "$RELAUNCH" = "1" ]; then
     log "เปิดแอปใหม่"
-    open "$TARGET/IntroPlayerNative.app" 2>/dev/null
+    open "$TARGET/$APPBUNDLE" 2>/dev/null
   fi
   # The staged copy lives under the system temp dir and is the parent of this script, so clean it
   # up on the way out — but only when it IS a temp path, never a folder the operator unzipped.
@@ -383,7 +433,7 @@ fi
 
 ans="$(say "อัปเดตเป็น $NEWVER เรียบร้อย\n\nโฟลเดอร์: $TARGET\nโจทย์ · log · เพลง: ไม่ถูกแตะ\nไฟล์ชุดเดิม + สำเนาข้อมูล: backups/$STAMP\n\nลบโฟลเดอร์ที่แตก zip ทิ้งได้เลย" "ปิด" "เปิดโฟลเดอร์" "เปิดแอป")"
 case "$ans" in
-  "เปิดแอป") open "$TARGET/IntroPlayerNative.app" ;;
+  "เปิดแอป") open "$TARGET/$APPBUNDLE" ;;
   "เปิดโฟลเดอร์") open "$TARGET" ;;
 esac
 exit 0

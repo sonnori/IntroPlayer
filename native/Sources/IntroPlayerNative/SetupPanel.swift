@@ -29,7 +29,7 @@ struct SetupPanel: View {
     @ViewBuilder
     private func body(for c: SongConfig) -> some View {
         wideButton(c.played ? "✓ เล่นแล้ว — กดเพื่อยกเลิก" : "ทำเครื่องหมายว่าเล่นแล้ว",
-                   bg: c.played ? Color(red: 0.165, green: 0.141, blue: 0.094) : Palette.panel2,
+                   bg: c.played ? Palette.tintWarn : Palette.panel2,
                    fg: c.played ? Palette.amber : Palette.text,
                    border: c.played ? Palette.amber : Palette.line) {
             model.updateConfigQuiet { $0.played.toggle() }
@@ -37,8 +37,8 @@ struct SetupPanel: View {
 
         if let d = model.current.flatMap({ model.donor(for: $0) }), !c.isConfigured {
             wideButton("⤵ ดึงค่าจากรอบ \"\(Library.playlist(of: d).isEmpty ? Library.rootLabel : Library.playlist(of: d))\"",
-                       bg: Color(red: 0.071, green: 0.188, blue: 0.251),
-                       fg: Palette.cyan, border: Color(red: 0.165, green: 0.42, blue: 0.502)) {
+                       bg: Palette.tintCyan,
+                       fg: Palette.cyan, border: Palette.tintCyanLine) {
                 model.copyConfig(from: d)
             }
         }
@@ -65,7 +65,7 @@ struct SetupPanel: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(PressStyle()).foregroundStyle(Palette.text)
-        .background(c.ignoreEnd ? Color(red: 0.165, green: 0.141, blue: 0.094) : Palette.panel2)
+        .background(c.ignoreEnd ? Palette.tintWarn : Palette.panel2)
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(c.ignoreEnd ? Palette.amber : Palette.line))
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .pulseTarget(PulseID.ignoreEnd)
@@ -132,37 +132,24 @@ struct SetupPanel: View {
                         }
                     } label: { Text("🎯").frame(width: 38, height: 38).contentShape(Rectangle()) }
                     .buttonStyle(PressStyle())
-                    .background(Color(red: 0.071, green: 0.188, blue: 0.251))
-                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color(red: 0.165, green: 0.42, blue: 0.502))
+                    .background(Palette.tintCyan)
+                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(Palette.tintCyanLine)
                         .allowsHitTesting(false))
                     .clipShape(RoundedRectangle(cornerRadius: 7))
                     .help("หาจุดที่เพลงเริ่มดังให้อัตโนมัติ แล้วเลื่อนทั้งช่วง Intro ตามไป")
-                }
-                if m.key == \SongConfig.hook {
-                    Button { model.previewHook() } label: {
-                        Text("♪").frame(width: 38, height: 38).contentShape(Rectangle())
-                    }
-                    .buttonStyle(PressStyle())
-                    .foregroundStyle(Palette.purple)
-                    .background(Palette.panel)
-                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(Palette.purple.opacity(0.55))
-                        .allowsHitTesting(false))
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
-                    .pulseTarget(PulseID.preview, corner: 7)
-                    .help("ฟัง Hook \(Int(Player.previewSec)) วิแล้วหยุดเอง (G) — ไม่เหมือน Reveal ที่เล่นต่อ")
                 }
                 Button {
                     if let f = m.field { model.requestMark(f) } else { model.mark(m.key) }
                 } label: {
                     HStack(spacing: 4) {
                         Text("Mark ตรงนี้").font(Typo.font(13, .semibold))
-                        Text(m.hot).font(Typo.font(11)).opacity(0.6)
+                        Text(m.hot).font(Typo.font(11, latinOnly: true)).opacity(0.78)
                     }
                     .frame(maxWidth: .infinity).padding(.vertical, 10)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(PressStyle())
-                .foregroundStyle(Color(red: 0.05, green: 0.05, blue: 0.05))
+                .foregroundStyle(Palette.ink)
                 .background(m.color).clipShape(RoundedRectangle(cornerRadius: 7))
                 .pulseTarget(PulseID.mark(m.label), corner: 7)
             }
@@ -200,7 +187,7 @@ struct SetupPanel: View {
     private func loudnessBlock(_ c: SongConfig) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                RoundedRectangle(cornerRadius: 3).fill(Color(red: 0.357, green: 0.839, blue: 1))
+                RoundedRectangle(cornerRadius: 3).fill(Palette.levelBar)
                     .frame(width: 12, height: 12)
                 Text("Loudness").font(Typo.font(13, .semibold))
                 Spacer()
@@ -309,7 +296,7 @@ struct SetupPanel: View {
         }
         .buttonStyle(PressStyle())
         .foregroundStyle(on ? Palette.cyan : Palette.muted)
-        .background(on ? Color(red: 0.071, green: 0.188, blue: 0.251) : Palette.panel)
+        .background(on ? Palette.tintCyan : Palette.panel)
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(on ? Palette.cyan : Palette.line))
         .clipShape(RoundedRectangle(cornerRadius: 6))
     }

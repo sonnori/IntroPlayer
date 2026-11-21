@@ -15,6 +15,11 @@ BASE="$(mktemp -d)"; trap 'chmod -R u+rwX "$BASE" 2>/dev/null; rm -rf "$BASE"' E
 VER="$(tr -d ' \n\r' < "$PROJ/VERSION")"
 ZIP="$PROJ/dist/IntroPlayer-$VER.zip"
 [ -f "$ZIP" ] || { echo "ไม่มี $ZIP — รัน ./native/release.sh ก่อน"; exit 2; }
+# Read from the installer so a rename there cannot leave this harness asserting the old name
+# and passing in every possible world.
+APPB="$(sed -n 's/^APPBUNDLE="\(.*\)"$/\1/p' "$PROJ/native/installer.command" | head -1)"
+[ -n "$APPB" ] || { echo "อ่าน APPBUNDLE จาก installer.command ไม่ได้"; exit 2; }
+LEGACYB="IntroPlayerNative.app"
 PASS=0; FAIL=0
 ok()   { echo "   ok   $1"; PASS=$((PASS+1)); }
 bad()  { echo "   ✗    $1"; FAIL=$((FAIL+1)); }
@@ -76,8 +81,8 @@ fresh_target() {
   printf 'not really audio\n' > "$TARGET/songs/EP09/a.mp3"
   mkdir -p "$TARGET/se"; printf 'CUSTOM STING\n' > "$TARGET/se/correct.mp3"
   # pretend it is the previous release — every program file present and OLD
-  mkdir -p "$TARGET/IntroPlayerNative.app/Contents/MacOS"
-  printf 'OLD APP\n' > "$TARGET/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative"
+  mkdir -p "$TARGET/$LEGACYB/Contents/MacOS"
+  printf 'OLD APP\n' > "$TARGET/$LEGACYB/Contents/MacOS/IntroPlayerNative"
   mkdir -p "$TARGET/IntroPlayer.app/Contents/MacOS"
   printf 'OLD LAUNCHER\n' > "$TARGET/IntroPlayer.app/Contents/MacOS/IntroPlayer"
   for f in server.py index.html start.command ตรวจสอบเครื่อง.command วิธีใช้งาน-SETUP.md; do
@@ -115,7 +120,7 @@ echo "=== 1. refuses while the app is running ==="
 fresh_target
 STUB_RUNNING=1 STUB_ANSWERS="อัปเดต" run "$BASE/log1" "$SRC"; rc=$?
 check "exit != 0 (rc=$rc)" '[ "$rc" != "0" ]'
-check "แอปตัวเก่ายังอยู่ ไม่ถูกแตะ" 'grep -q "OLD APP" "$TARGET/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative"'
+check "แอปตัวเก่ายังอยู่ ไม่ถูกแตะ" 'grep -q "OLD APP" "$TARGET/$LEGACYB/Contents/MacOS/IntroPlayerNative"'
 check "ไม่มี backups/ ถูกสร้าง" '[ ! -d "$TARGET/backups" ]'
 check "เตือนเรื่องกำลังถ่าย" 'grep -q "กำลังถ่าย" "$BASE/log1"'
 
@@ -123,7 +128,7 @@ echo
 echo "=== 2. web version running → warns, and CANCEL is the default button ==="
 fresh_target
 STUB_WEB=1 STUB_ANSWERS="" run "$BASE/log2" "$SRC"      # empty answer = dismissed
-check "ไม่ติดตั้งเมื่อไม่ได้ยืนยัน" 'grep -q "OLD APP" "$TARGET/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative"'
+check "ไม่ติดตั้งเมื่อไม่ได้ยืนยัน" 'grep -q "OLD APP" "$TARGET/$LEGACYB/Contents/MacOS/IntroPlayerNative"'
 check "เตือนเรื่อง server.py" 'grep -q "server.py" "$BASE/log2"'
 # §12: the destructive choice must never be what Return/Space activates.
 DEF="$(grep -o 'default button "[^"]*"' "$BASE/log2" | head -1)"
@@ -133,7 +138,7 @@ echo
 echo "=== 3. cancelling changes nothing ==="
 fresh_target
 STUB_ANSWERS="ยกเลิก" run "$BASE/log3" "$SRC"
-check "แอปตัวเก่ายังอยู่" 'grep -q "OLD APP" "$TARGET/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative"'
+check "แอปตัวเก่ายังอยู่" 'grep -q "OLD APP" "$TARGET/$LEGACYB/Contents/MacOS/IntroPlayerNative"'
 check "ไม่มี backups/" '[ ! -d "$TARGET/backups" ]'
 check "ถามโฟลเดอร์ที่จะอัปเดตก่อน" 'grep -q "จะอัปเดตโฟลเดอร์นี้" "$BASE/log3"'
 
@@ -146,7 +151,11 @@ echo "   --- the promise: data byte-identical ---"
 data_intact
 check "se/ ที่ผู้ใช้เปลี่ยนเอง ไม่ถูกทับ" '[ "$(shasum -a 256 < "$TARGET/se/correct.mp3")" = "$SE_BEFORE" ]'
 echo "   --- every program file actually moved ---"
-check "แอปใหม่รันได้ และตอบเวอร์ชั่นถูก" '[ "$("$TARGET/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 | cut -d" " -f1)" = "$VER" ]'
+check "แอปใหม่รันได้ และตอบเวอร์ชั่นถูก" '[ "$("$TARGET/$APPB/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 | cut -d" " -f1)" = "$VER" ]'
+# A leftover bundle under the old name still launches and still reads the same config.json, so
+# the operator could open the familiar icon and run the OLD build with nothing saying so.
+check "แอปชื่อเก่าถูกย้ายออกไปแล้ว"      '[ ! -e "$TARGET/$LEGACYB" ]'
+check "ย้ายไปอยู่ใน backups/ ไม่ได้ลบ"   'grep -q "OLD APP" "$(ls -d "$TARGET/backups"/*/ | head -1)$LEGACYB/Contents/MacOS/IntroPlayerNative"'
 check "VERSION เป็น $VER" '[ "$(tr -d " \n\r" < "$TARGET/VERSION")" = "$VER" ]'
 for f in server.py index.html start.command ตรวจสอบเครื่อง.command วิธีใช้งาน-SETUP.md; do
   check "$f ถูกแทนที่ด้วยตัวใหม่" '! grep -q "^OLD " "$TARGET/'"$f"'"'
@@ -159,7 +168,7 @@ BK="$(ls -d "$TARGET/backups"/*/ 2>/dev/null | head -1)"
 check "มี backups/<วันเวลา>/" '[ -n "$BK" ]'
 check "สำรอง config.json ไว้ครบ" '[ "$(shasum -a 256 < "$BK/config.json")" = "$CFG_BEFORE" ]'
 check "สำรอง log.json ไว้ครบ"    '[ "$(shasum -a 256 < "$BK/log.json")" = "$LOG_BEFORE" ]'
-check "เก็บแอปตัวเก่าไว้"         'grep -q "OLD APP" "$BK/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative"'
+check "เก็บแอปตัวเก่าไว้"         'grep -q "OLD APP" "$BK/$LEGACYB/Contents/MacOS/IntroPlayerNative"'
 # This is what a partial rollback used to destroy with no copy anywhere.
 check "เก็บ server.py ตัวเก่าไว้ด้วย"  'grep -q "OLD server.py" "$BK/server.py"'
 check "เก็บ index.html ตัวเก่าไว้ด้วย" 'grep -q "OLD index.html" "$BK/index.html"'
@@ -174,7 +183,7 @@ chmod 000 "$BASE/src-broken/VERSION"      # last item in PROGRAM: earlier ones h
 STUB_ANSWERS="อัปเดต" run "$BASE/log5" "$BASE/src-broken"; rc=$?
 chmod 644 "$BASE/src-broken/VERSION" 2>/dev/null
 check "exit != 0 (rc=$rc)" '[ "$rc" != "0" ]'
-check "คืนแอปตัวเดิม" 'grep -q "OLD APP" "$TARGET/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative" 2>/dev/null'
+check "คืนแอปตัวเดิม" 'grep -q "OLD APP" "$TARGET/$LEGACYB/Contents/MacOS/IntroPlayerNative" 2>/dev/null'
 check "คืน web launcher ตัวเดิม (ทางหนีตอนถ่าย)" 'grep -q "OLD LAUNCHER" "$TARGET/IntroPlayer.app/Contents/MacOS/IntroPlayer" 2>/dev/null'
 for f in server.py index.html start.command ตรวจสอบเครื่อง.command วิธีใช้งาน-SETUP.md; do
   check "คืน $f ตัวเดิม" 'grep -q "^OLD " "$TARGET/'"$f"'" 2>/dev/null'
@@ -233,7 +242,7 @@ STUB_ANSWERS="ติดตั้งใหม่|ติดตั้ง|ปิด"
 N="$BASE/newplace/IntroPlayer"
 check "exit 0 (rc=$rc)" '[ "$rc" = "0" ]'
 check "บอกว่าเรียบร้อย" 'grep -q "เรียบร้อย" "$BASE/log9"'
-check "แอปรันได้ และตอบเวอร์ชั่นถูก" '[ "$("$N/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 | cut -d" " -f1)" = "$VER" ]'
+check "แอปรันได้ และตอบเวอร์ชั่นถูก" '[ "$("$N/$APPB/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 | cut -d" " -f1)" = "$VER" ]'
 check "สร้าง songs/ ให้" '[ -d "$N/songs" ]'
 # The folder and its instructions — not the audio. The stings are not redistributed, so a
 # fresh install starts silent on purpose and se/README.txt is what tells the operator why.
@@ -248,12 +257,12 @@ echo "=== 10. fresh install where a source file is unreadable — must NOT repor
 rm -rf "$BASE/newplace2" "$BASE/home" "$BASE/src-broken2"
 mkdir -p "$BASE/newplace2" "$BASE/home/Library/Application Support/IntroPlayer"
 cp -R "$SRC" "$BASE/src-broken2"
-chmod 000 "$BASE/src-broken2/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative"
+chmod 000 "$BASE/src-broken2/$APPB/Contents/MacOS/IntroPlayerNative"
 STUB_ANSWERS="ติดตั้งใหม่|ติดตั้ง|ปิด" STUB_FOLDER="$BASE/newplace2/" run "$BASE/log10" "$BASE/src-broken2"; rc=$?
-chmod 755 "$BASE/src-broken2/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative" 2>/dev/null
+chmod 755 "$BASE/src-broken2/$APPB/Contents/MacOS/IntroPlayerNative" 2>/dev/null
 check "exit != 0 (rc=$rc)" '[ "$rc" != "0" ]'
 check "ไม่บอกว่าเรียบร้อย" '! grep -q "เรียบร้อย" "$BASE/log10"'
-check "ไม่ทิ้งแอปที่รันไม่ได้ไว้" '[ ! -x "$BASE/newplace2/IntroPlayer/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative" ]'
+check "ไม่ทิ้งแอปที่รันไม่ได้ไว้" '[ ! -x "$BASE/newplace2/IntroPlayer/$APPB/Contents/MacOS/IntroPlayerNative" ]'
 
 echo
 echo "=== 11. a target path with spaces, Thai and a quote ==="
@@ -265,7 +274,7 @@ STUB_ANSWERS="อัปเดต|ปิด" run "$BASE/log11" "$SRC"; rc=$?
 # data must survive and it must never silently half-install.
 data_intact
 check "ถ้าไม่สำเร็จก็ต้องไม่บอกว่าเรียบร้อย" \
-  '[ "$("$TARGET/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 | cut -d" " -f1)" = "$VER" ] || ! grep -q "เรียบร้อย" "$BASE/log11"'
+  '[ "$("$TARGET/$APPB/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 | cut -d" " -f1)" = "$VER" ] || ! grep -q "เรียบร้อย" "$BASE/log11"'
 check "dialog ยัง render ได้ (escape ถูก)" 'grep -q "จะอัปเดตโฟลเดอร์นี้" "$BASE/log11"'
 
 echo
@@ -274,7 +283,7 @@ fresh_target
 mkdir -p "$TARGET/.installing"          # simulate an in-flight run
 STUB_ANSWERS="อัปเดต" run "$BASE/log12" "$SRC"; rc=$?
 check "exit != 0 (rc=$rc)" '[ "$rc" != "0" ]'
-check "แอปตัวเก่ายังอยู่" 'grep -q "OLD APP" "$TARGET/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative"'
+check "แอปตัวเก่ายังอยู่" 'grep -q "OLD APP" "$TARGET/$LEGACYB/Contents/MacOS/IntroPlayerNative"'
 check "อธิบายเรื่องติดตั้งค้าง" 'grep -q "ติดตั้งค้างอยู่" "$BASE/log12"'
 rmdir "$TARGET/.installing"
 
@@ -288,7 +297,7 @@ exit 1
 EOS
 chmod +x "$BASE/bin/osascript"
 STUB_ANSWERS="อัปเดต" run "$BASE/log13" "$SRC"
-check "ไม่ติดตั้งอะไรเลย" 'grep -q "OLD APP" "$TARGET/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative"'
+check "ไม่ติดตั้งอะไรเลย" 'grep -q "OLD APP" "$TARGET/$LEGACYB/Contents/MacOS/IntroPlayerNative"'
 data_intact
 
 echo
@@ -329,11 +338,11 @@ run_unattended "$BASE/log15" "$SRC" --target "$TARGET" --wait-pid "$WP" --relaun
 rc=$?; EL=$(( $(date +%s) - T0 ))
 check "exit 0 (rc=$rc)" '[ "$rc" = "0" ]'
 check "รอ --wait-pid จริง (${EL}s ควร >= 2)" '[ "$EL" -ge 2 ]'
-check "แอปใหม่เข้าที่ และตอบเวอร์ชั่นถูก" '[ "$("$TARGET/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 | cut -d" " -f1)" = "$VER" ]'
+check "แอปใหม่เข้าที่ และตอบเวอร์ชั่นถูก" '[ "$("$TARGET/$APPB/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 | cut -d" " -f1)" = "$VER" ]'
 data_intact
 check "se/ ที่เปลี่ยนเองไม่ถูกทับ" '[ "$(shasum -a 256 < "$TARGET/se/correct.mp3")" = "$SE_BEFORE" ]'
 check "สำรองไฟล์ชุดเดิมไว้ครบ" '[ -f "$(ls -d "$TARGET/backups"/*/ | head -1)/server.py" ]'
-check "สั่งเปิดแอปใหม่" 'grep -q "IntroPlayerNative.app" "$BASE/openlog"'
+check "สั่งเปิดแอปใหม่" 'grep -q "$APPB" "$BASE/openlog"'
 check "ไม่เปิด dialog เลย" '[ ! -s "$BASE/log15" ] || ! grep -q "display dialog" "$BASE/log15"'
 check "เขียน log การอัปเดต" 'grep -q "เรียบร้อย" "$BASE/home/Library/Logs/IntroPlayer-update.log"'
 check "ไม่ทิ้ง lock ค้างไว้" '[ ! -d "$TARGET/.installing" ]'
@@ -344,7 +353,7 @@ fresh_target
 run_unattended "$BASE/log16" "$SRC"
 rc=$?
 check "exit != 0 (rc=$rc)" '[ "$rc" != "0" ]'
-check "แอปตัวเก่ายังอยู่" 'grep -q "OLD APP" "$TARGET/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative"'
+check "แอปตัวเก่ายังอยู่" 'grep -q "OLD APP" "$TARGET/$LEGACYB/Contents/MacOS/IntroPlayerNative"'
 data_intact
 
 echo
@@ -364,7 +373,7 @@ fresh_target
 STUB_RUNNING=1 run_unattended "$BASE/log18" "$SRC" --target "$TARGET"
 rc=$?
 check "exit != 0 (rc=$rc)" '[ "$rc" != "0" ]'
-check "แอปตัวเก่ายังอยู่" 'grep -q "OLD APP" "$TARGET/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative"'
+check "แอปตัวเก่ายังอยู่" 'grep -q "OLD APP" "$TARGET/$LEGACYB/Contents/MacOS/IntroPlayerNative"'
 data_intact
 check "บอกเหตุผลใน log" 'grep -q "ยังมีแอปเปิดอยู่" "$BASE/home/Library/Logs/IntroPlayer-update.log"'
 
@@ -379,7 +388,7 @@ T0=$(date +%s)
 run_unattended "$BASE/log19" "$SRC" --target "$TARGET" --wait-pid "$DEADPID"
 EL=$(( $(date +%s) - T0 ))
 check "pid ที่ตายแล้วไม่ถูกรอ (${EL}s ควร < 3)" '[ "$EL" -lt 3 ]'
-check "ยังอัปเดตสำเร็จ" '[ "$("$TARGET/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 | cut -d" " -f1)" = "$VER" ]'
+check "ยังอัปเดตสำเร็จ" '[ "$("$TARGET/$APPB/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 | cut -d" " -f1)" = "$VER" ]'
 data_intact
 
 echo

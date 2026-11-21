@@ -281,10 +281,76 @@ enum Diagnostics {
         p.pause()
     }
 
-    /// The bounded hook audition (`G`). Must stop ON `hook + previewSec` with zero overshoot, the
-    /// same structural guarantee `--playtest` proves for the intro — and must leave the player in a
-    /// state where the ordinary intro stop still arms. Read-only.
-    static func previewTest() {
+    /// The waveform's two-stage marker rule. Read-only, and pure — `MarkerGrab.decide` exists as
+    /// a free function precisely so this can prove it without driving a SwiftUI gesture.
+    static func grabTest() {
+        var pass = 0, fail = 0
+        func check(_ name: String, _ got: MarkerGrab.Outcome, _ want: MarkerGrab.Outcome) {
+            let ok = got == want
+            if ok { pass += 1 } else { fail += 1 }
+            print("   \(ok ? "ok " : "✗  ")\(name)")
+            if !ok { print("        got \(got)  want \(want)") }
+        }
+        let layout: [(field: MarkerField, x: CGFloat)] =
+            [(.introStart, 100), (.introEnd, 300), (.hook, 700)]
+
+        print("1) ต้องกดให้ active ก่อน แล้วค่อยลากได้")
+        check("กดบน Intro End ตอน Intro Start active → แค่เลือก",
+              MarkerGrab.decide(pressX: 300, positions: layout, active: .introStart),
+              .activate(.introEnd))
+        check("กดบน Intro End ตอนมัน active อยู่แล้ว → ลากได้",
+              MarkerGrab.decide(pressX: 300, positions: layout, active: .introEnd),
+              .drag(.introEnd))
+        check("กดห่างจากทุก marker → pan/seek ตามเดิม",
+              MarkerGrab.decide(pressX: 500, positions: layout, active: .introEnd),
+              .away)
+
+        print("\n2) ขอบเขต 8pt")
+        check("ห่าง 8pt พอดี → ยังจับได้",
+              MarkerGrab.decide(pressX: 308, positions: layout, active: .introEnd),
+              .drag(.introEnd))
+        check("ห่าง 9pt → ไม่จับ",
+              MarkerGrab.decide(pressX: 309, positions: layout, active: .introEnd),
+              .away)
+
+        print("\n3) marker ทับกัน — เพลง 102 มี introStart == introEnd จริงใน config.json")
+        let stacked: [(field: MarkerField, x: CGFloat)] =
+            [(.introStart, 420), (.introEnd, 420), (.hook, 900)]
+        // `<=` on the tie-break is what makes the LATER marker win a tie. With `<` the first one
+        // always won and Intro End could never be grabbed at all.
+        check("ทับกันเป๊ะ → ตัวหลัง (Intro End) ชนะ",
+              MarkerGrab.decide(pressX: 420, positions: stacked, active: .introEnd),
+              .drag(.introEnd))
+        check("ทับกันเป๊ะ ตอน Intro End ยัง active → เลือก Intro End",
+              MarkerGrab.decide(pressX: 420, positions: stacked, active: .hook),
+              .activate(.introEnd))
+
+        print("\n4) ตัวที่ใกล้ที่สุดชนะ ไม่ใช่ตัวแรกที่เจอ")
+        let near: [(field: MarkerField, x: CGFloat)] =
+            [(.introStart, 200), (.introEnd, 205), (.hook, 900)]
+        check("กดที่ 201 → Intro Start ใกล้กว่า",
+              MarkerGrab.decide(pressX: 201, positions: near, active: .introStart),
+              .drag(.introStart))
+        check("กดที่ 204 → Intro End ใกล้กว่า",
+              MarkerGrab.decide(pressX: 204, positions: near, active: .introStart),
+              .activate(.introEnd))
+
+        print("\n5) ไม่มี marker เลย (ยังไม่เลือกเพลง)")
+        check("ไม่มีอะไรให้จับ", MarkerGrab.decide(pressX: 100, positions: [], active: .introStart),
+              .away)
+
+        print("\nผ่าน \(pass)  ตก \(fail)")
+        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+    }
+
+    /// Reveal is UNBOUNDED by design — it is the on-camera verb and must never stop itself. The
+    /// thing that has to hold afterwards is that the intro guard RE-ARMS: §10 records a shipped
+    /// bug where `mode` stayed `.reveal`, so the next Space played straight past Intro End and
+    /// looked exactly like "Ignore Intro End" was ticked when it was not.
+    ///
+    /// This replaced `--previewtest` when the bounded hook audition (`G`) was removed. The
+    /// audition's own assertions went with it; this half had no other coverage. Read-only.
+    static func revealTest() {
         let songs = Library.scan()
         guard let s = songs.first else { print("no songs"); return }
         let p = Player()
@@ -292,40 +358,26 @@ enum Diagnostics {
         p.muteForTest()
         var c = SongConfig(); c.introStart = 2; c.introEnd = 8; c.hook = 20
         p.configProvider = { c }
-        let want = min(p.duration, c.hook + Player.previewSec)
-        print(String(format: "song: %@  dur=%.2f  hook=%.2f  previewSec=%.1f  expect stop at %.2f",
-                     Library.baseName(s), p.duration, c.hook, Player.previewSec, want))
-        guard p.duration > want + 1 else { print("  — song too short to test"); return }
+        print(String(format: "song: %@  dur=%.2f  intro=%.2f-%.2f  hook=%.2f",
+                     Library.baseName(s), p.duration, c.introStart, c.introEnd, c.hook))
+        guard p.duration > c.hook + 4 else { print("  — song too short to test"); return }
 
-        var maxSeen = 0.0
+        // 1) Reveal must play on. If anything stops it inside 3 s the on-camera reveal is broken.
         var stopped: Double?
         p.onAutoStop = { stopped = p.position }
-        p.previewHook(config: c)
-        print("  mode after previewHook: \(p.mode)  (must be preview)")
-        let deadline = Date().addingTimeInterval(Player.previewSec + 6)
-        while Date() < deadline {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-            if p.position > maxSeen { maxSeen = p.position }
-            if stopped != nil { break }
-        }
-        let overshoot = max(0, maxSeen - want)
-        print(String(format: "  stoppedAt=%@ maxReached=%.3f overshoot=%.3f  playing=%@ mode=%@",
-                     stopped.map { String(format: "%.3f", $0) } ?? "— NEVER STOPPED",
-                     maxSeen, overshoot, p.isPlaying ? "yes" : "no", "\(p.mode)"))
-        // A bounded audition must leave NO TRACE. `H` with playback stopped marks the hook at
-        // the playhead immediately, and G (keyCode 5) / H (4) are adjacent keys pressed by the
-        // same person in the same task — so a playhead parked at hook+previewSec meant G-then-H
-        // walked the hook 6 s further into the song, silently, every time.
-        let parked = p.position
-        let okPark = abs(parked - c.hook) < 0.05
-        print(String(format: "  playhead parked at %.3f — must be back on the hook (%.2f)  %@",
-                     parked, c.hook,
-                     okPark ? "ok" : "✗ ค้างที่อื่น: กด H ต่อจะย้ายฮุคเงียบๆ"))
-        let okPreview = stopped != nil && overshoot < 0.02 && !p.isPlaying && okPark
+        p.reveal(config: c)
+        print("  mode after reveal: \(p.mode)  (must be reveal)")
+        let d1 = Date().addingTimeInterval(3)
+        while Date() < d1 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        let keptGoing = stopped == nil && p.isPlaying && p.position > c.hook
+        print(String(format: "  after 3s: pos=%.2f playing=%@ autoStop=%@  %@",
+                     p.position, p.isPlaying ? "yes" : "no",
+                     stopped == nil ? "no" : "YES", keptGoing ? "ok" : "✗ Reveal หยุดเอง"))
+        p.pause()
 
-        // The intro stop must still work right after a preview — the preview bound is set on the
-        // same scheduling path, so a leaked previewEnd would cut the next intro short.
-        stopped = nil; maxSeen = 0
+        // 2) …and the intro guard must re-arm on the next deliberate Space from inside the range.
+        stopped = nil
+        var maxSeen = 0.0
         p.seek(to: c.introStart, config: c)
         p.toggleStart(config: c)
         print("  mode after Space from introStart: \(p.mode)  (must be intro)")
@@ -335,13 +387,12 @@ enum Diagnostics {
             if p.position > maxSeen { maxSeen = p.position }
             if stopped != nil { break }
         }
-        let introOvershoot = max(0, maxSeen - c.introEnd)
+        let overshoot = max(0, maxSeen - c.introEnd)
         print(String(format: "  intro afterwards: stoppedAt=%@ overshoot=%.3f",
-                     stopped.map { String(format: "%.3f", $0) } ?? "— NEVER STOPPED",
-                     introOvershoot))
-        let okIntro = stopped != nil && introOvershoot < 0.02
+                     stopped.map { String(format: "%.3f", $0) } ?? "— NEVER STOPPED", overshoot))
+        let okIntro = stopped != nil && overshoot < 0.02
         p.pause()
-        print(okPreview && okIntro ? "\n✓ ผ่าน" : "\n✗ ไม่ผ่าน")
+        print(keptGoing && okIntro ? "\n✓ ผ่าน" : "\n✗ ไม่ผ่าน")
     }
 
     /// The running order built from the REAL log. Read-only — opens a LogStore and a Store but
@@ -849,6 +900,154 @@ enum Diagnostics {
                          name as NSString, a.duration,
                          (det.map { String(format: "%.2f", $0) } ?? "—") as NSString,
                          whole, intro))
+        }
+    }
+
+    /// Is the intro auto-gain actually levelling what the audience hears?
+    ///
+    /// Read-only. Measures every song's intro window two ways — the app's un-weighted RMS and
+    /// BS.1770-4 gated LUFS — and then reports the thing that matters: the SPREAD of on-air
+    /// loudness that each method leaves behind. A normaliser is only as good as that spread.
+    /// It also reports how often the ±12 dB clamp and the output limiter bite, because a gain
+    /// the limiter eats is not a gain the audience hears.
+    static func loudTest() {
+        // The coefficients are derived for each file's own rate, so prove the derivation against
+        // the one rate BS.1770-4 publishes a table for. Getting this wrong is silent.
+        print("1) K-weighting coefficients at 48 kHz vs the BS.1770-4 table")
+        let (shelf, hp) = Loudness.kWeighting(rate: 48000)
+        let want: [(String, Double, Double)] = [
+            ("shelf b0", shelf.b0,  1.53512485958697),
+            ("shelf b1", shelf.b1, -2.69169618940638),
+            ("shelf b2", shelf.b2,  1.19839281085285),
+            ("shelf a1", shelf.a1, -1.69065929318241),
+            ("shelf a2", shelf.a2,  0.73248077421585),
+            ("hp a1",    hp.a1,    -1.99004745483398),
+            ("hp a2",    hp.a2,     0.99007225036621),
+        ]
+        var coefOk = true
+        for (name, got, expect) in want {
+            let d = abs(got - expect)
+            if d > 1e-10 { coefOk = false }
+            print(String(format: "   %-9@ %+.14f  want %+.14f  %@", name as NSString, got, expect,
+                         (d <= 1e-10 ? "ok" : "✗ ต่าง \(d)") as NSString))
+        }
+        print(coefOk ? "   ✓ ตรงตามมาตรฐาน" : "   ✗ สูตรเพี้ยน — ตัวเลขข้างล่างเชื่อไม่ได้")
+
+        let store = Store()
+        let songs = Library.scan()
+        let scope = store.loudnessScope
+        print("\n2) วัดช่วง intro ของทุกเพลง  (songs=\(songs.count) scope=\(scope.rawValue))")
+
+        struct Row {
+            let name: String
+            let a: Double, b: Double
+            let rms: Double, rmsAll: Double
+            let lufs: Double
+            let lufsUngated: Double
+            let peakDb: Double
+            let gainRms: Double
+            let clamped: Bool
+            let gated: Bool
+        }
+        var rows: [Row] = []
+
+        for s in songs {
+            guard let a = try? Analysis.analyse(url: Library.url(s)) else {
+                print("   \(Library.baseName(s))  FAILED to analyse"); continue
+            }
+            let c = store.config(for: s)
+            let m = a.measuredRms(config: c, scope: scope)
+            // the window the gain was measured over, so both methods see the same audio
+            var lo = min(c.introStart, c.introEnd), hi = max(c.introStart, c.introEnd)
+            if m.usedScope == .song { lo = 0; hi = a.duration }
+            guard let L = Loudness.measure(url: Library.url(s), from: lo, to: hi) else {
+                print("   \(Library.baseName(s))  FAILED to measure"); continue
+            }
+            let raw = Analysis.targetRms / max(m.rms, 1e-12)
+            let g = min(max(raw, 0.25), 4.0)
+            rows.append(Row(name: String(Library.baseName(s).prefix(26)),
+                            a: lo, b: hi,
+                            rms: m.rms, rmsAll: L.rmsPower,
+                            lufs: L.lufs, lufsUngated: L.lufsUngated, peakDb: L.peakDbfs,
+                            gainRms: 20 * log10(g),
+                            clamped: abs(raw - g) > 1e-9,
+                            gated: L.gated))
+        }
+        guard !rows.isEmpty else { print("   ไม่มีเพลงที่วัดได้"); return }
+
+        print(String(format: "   %-26@ %11@ %8@ %8@ %8@ %8@ %8@",
+                     "song" as NSString, "intro" as NSString, "rmsCh0" as NSString,
+                     "rmsL+R" as NSString, "LUFS" as NSString, "peak" as NSString,
+                     "gain" as NSString))
+        for r in rows {
+            print(String(format: "   %-26@ %5.1f-%5.1f %8.4f %8.4f %8.2f %8.1f %+8.2f%@",
+                         r.name as NSString, r.a, r.b, r.rms, r.rmsAll, r.lufs, r.peakDb,
+                         r.gainRms, (r.clamped ? " CLAMP" : "") as NSString))
+        }
+
+        // --- the number the whole feature rests on -----------------------------------------
+        func spread(_ v: [Double]) -> (lo: Double, hi: Double, span: Double, sd: Double) {
+            let lo = v.min() ?? 0, hi = v.max() ?? 0
+            let mean = v.reduce(0, +) / Double(v.count)
+            let sd = (v.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Double(v.count)).squareRoot()
+            return (lo, hi, hi - lo, sd)
+        }
+
+        // What the audience hears today: the intro's own loudness plus the gain the app applies.
+        let onAirNow = rows.map { $0.lufs + $0.gainRms }
+        let before = spread(rows.map { $0.lufs })
+        let now = spread(onAirNow)
+
+        // A LUFS-targeted alternative, same ±12 dB clamp, target = the library's median so the
+        // average gain stays near 0 and the clamp stays out of the way.
+        let sorted = rows.map { $0.lufs }.sorted()
+        let targetLufs = sorted.count % 2 == 1
+            ? sorted[sorted.count / 2]
+            : (sorted[sorted.count / 2 - 1] + sorted[sorted.count / 2]) / 2
+        var lufsClamped = 0
+        let onAirLufs = rows.map { r -> Double in
+            let raw = targetLufs - r.lufs
+            let g = min(max(raw, -12), 12)
+            if abs(raw - g) > 1e-9 { lufsClamped += 1 }
+            return r.lufs + g
+        }
+        let proposed = spread(onAirLufs)
+
+        print("\n3) ความต่างของความดังที่ออกอากาศ  (LU — ยิ่งน้อยยิ่งเท่ากัน)")
+        print(String(format: "   ไม่ปรับอะไรเลย        %6.2f .. %6.2f   กว้าง %5.2f   sd %4.2f",
+                     before.lo, before.hi, before.span, before.sd))
+        print(String(format: "   RMS (ที่ใช้อยู่)       %6.2f .. %6.2f   กว้าง %5.2f   sd %4.2f   clamp %d/%d",
+                     now.lo, now.hi, now.span, now.sd, rows.filter { $0.clamped }.count, rows.count))
+        print(String(format: "   LUFS (เป้า %.2f)    %6.2f .. %6.2f   กว้าง %5.2f   sd %4.2f   clamp %d/%d",
+                     targetLufs, proposed.lo, proposed.hi, proposed.span, proposed.sd,
+                     lufsClamped, rows.count))
+
+        // --- how much of the gain survives the limiter ------------------------------------
+        print("\n4) ลิมิตเตอร์กินไปเท่าไหร่  (ขอ gain เท่าไหร่ vs หัวเพลงเหลือที่ให้กี่ dB)")
+        var eaten = 0
+        for r in rows {
+            let headroom = -1.0 - r.peakDb          // what fits under the -1 dB brick wall
+            let over = r.gainRms - headroom
+            if over > 0.1 {
+                eaten += 1
+                print(String(format: "   %-26@ ขอ %+.2f  มีที่ %+.2f  เกิน %.2f dB",
+                             r.name as NSString, r.gainRms, headroom, over))
+            }
+        }
+        if eaten == 0 { print("   ไม่มีเพลงที่เกิน — ลิมิตเตอร์ไม่ทำงานในช่วง intro") }
+
+        // --- channel 0 vs a real downmix ---------------------------------------------------
+        print("\n5) วัดแค่ channel ซ้าย ต่างจากวัดสองข้างแค่ไหน")
+        var worst = 0.0; var worstName = ""
+        for r in rows where r.rms > 0 && r.rmsAll > 0 {
+            let d = abs(20 * log10(r.rmsAll / r.rms))
+            if d > worst { worst = d; worstName = r.name }
+        }
+        print(String(format: "   มากสุด %.2f dB  (%@)", worst, worstName as NSString))
+        let ungated = rows.filter { !$0.gated }
+        if !ungated.isEmpty {
+            print("\n   หมายเหตุ: \(ungated.count) เพลงสั้นเกินกว่าจะ gate ได้ (ใช้ค่าเฉลี่ยตรงๆ): "
+                  + ungated.map { $0.name }.joined(separator: ", "))
         }
     }
 }
