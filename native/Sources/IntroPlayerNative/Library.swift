@@ -903,6 +903,48 @@ enum Diagnostics {
         }
     }
 
+    /// Where each song's cover comes from. Read-only and OFFLINE — it never makes a request,
+    /// which is the point: if this says every song has embedded art, the online fallback is
+    /// dead code for this library and nothing will ever go to the network.
+    static func artworkReport() {
+        let songs = Library.scan()
+        var embedded = 0, cachedN = 0, none = 0
+        print("ที่มาของปกเพลง (ไม่ต่อเน็ต)\n")
+        for p in songs {
+            let hasCache = FileManager.default.fileExists(atPath: Artwork.cacheURL(for: p).path)
+            let hasEmbedded = Artwork.embedded(for: p) != nil
+            let src: String
+            if hasCache { src = "ไฟล์ที่โหลดมา (.covers/)"; cachedN += 1 }
+            else if hasEmbedded { src = "ฝังมาในไฟล์เพลง"; embedded += 1 }
+            else { src = "— ไม่มี"; none += 1 }
+            print(String(format: "   %-44@ %@",
+                         String(Library.baseName(p).prefix(42)) as NSString, src as NSString))
+        }
+        print("\nฝังมาในไฟล์ \(embedded) · โหลดเก็บไว้ \(cachedN) · ไม่มี \(none)")
+        if none > 0 {
+            print("เพลงที่ไม่มี ใช้เมนู ⋯ → ดึงปกเพลงของรอบนี้ (ต้องต่อเน็ต)")
+        } else {
+            print("ครบทุกเพลงโดยไม่ต้องต่อเน็ตเลย")
+        }
+        print("\nตรวจตัวกันจับผิดเพลง (ปฏิเสธผลที่ชื่อไม่เกี่ยวกัน):")
+        let cases: [(String, String, Bool)] = [
+            ("BOWKYLION วาดไว้", "สัมผัสรัก (Touch my heart)", false),
+            ("PROXIE ขี้แง", "ขี้แง (Boys Don’t Cry) [feat. 2Ectasy]", true),
+            ("Palmy Ooh!", "Ooh!", true),
+            ("THE TOYS ลาลาลอย", "Just Being Friendly", false),
+            // "the" alone must not be a match, or every English title matches every other
+            ("THE TOYS ลาลาลอย", "The Weekend", false),
+            ("Morvasu Melbourne", "Melbourne", true),
+        ]
+        var bad = 0
+        for (q, t, want) in cases {
+            let got = Artwork.plausible(query: q, track: t)
+            if got != want { bad += 1 }
+            print("   \(got == want ? "ok " : "✗  ")\(q)  →  \(t)  = \(got ? "รับ" : "ปฏิเสธ")")
+        }
+        print(bad == 0 ? "\n✓ ผ่าน" : "\n✗ ไม่ผ่าน")
+    }
+
     /// What the auto-guess proposes for every song, against whatever is configured. Read-only.
     ///
     /// Ground truth is thin — the real library has three hooks that differ from the 60 s default

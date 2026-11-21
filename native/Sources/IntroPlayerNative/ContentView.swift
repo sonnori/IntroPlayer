@@ -434,6 +434,16 @@ struct SongListView: View {
                         }
                         .disabled(model.orphanCount == 0)
                         Divider()
+                        // Needs the internet, so it lives with the other deliberate actions
+                        // rather than on the toolbar: on a show day nothing in this app should
+                        // touch the network by accident (§1).
+                        Button(model.coverFetching
+                               ? "กำลังดึงปกเพลง… \(model.coverProgress)"
+                               : "🖼 ดึงปกเพลงของรอบนี้ (ต้องต่อเน็ต)") {
+                            model.fetchCoversForRound()
+                        }
+                        .disabled(model.coverFetching)
+                        Divider()
                         Button("ℹ เกี่ยวกับ / เวอร์ชั่น \(AppVersion.short)") { model.showAbout = true }
                     } label: {
                         // Sized INSIDE the label: an outer `.frame` leaves the Menu's own control

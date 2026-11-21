@@ -5,11 +5,18 @@ struct CenterView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(model.current.map(Library.displayTitle) ?? "No song selected")
-                    .font(Typo.display)
-                    .lineLimit(1).foregroundStyle(Palette.text)
-                Text(subtitle).font(Typo.font(13)).foregroundStyle(Palette.muted)
+            HStack(spacing: 12) {
+                // Always rendered, even with no art. A frame that appears and disappears moves
+                // the title and everything under it sideways — the same defect §12 records for
+                // the focus hint and the transport buttons.
+                coverFrame
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(model.current.map(Library.displayTitle) ?? "No song selected")
+                        .font(Typo.display)
+                        .lineLimit(1).foregroundStyle(Palette.text)
+                    Text(subtitle).font(Typo.font(13)).foregroundStyle(Palette.muted)
+                }
+                Spacer(minLength: 0)
             }
 
             guardStrip
@@ -92,6 +99,25 @@ struct CenterView: View {
     ///
     private var disarmed: Bool {
         model.current != nil && !model.introGuardArmed
+    }
+
+    /// 52pt of reserved space for the cover. Empty is a faint outline, never nothing: see the
+    /// note at the call site about layout shift.
+    private var coverFrame: some View {
+        let img = model.current.flatMap { model.cover(for: $0) }
+        return Group {
+            if let img {
+                Image(nsImage: img).resizable().interpolation(.high).scaledToFill()
+            } else {
+                Rectangle().fill(Palette.panel2)
+                    .overlay(Text("♪").font(Typo.font(17, latinOnly: true))
+                        .foregroundStyle(Palette.dim.opacity(0.7)))
+            }
+        }
+        .frame(width: 52, height: 52)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.line)
+            .allowsHitTesting(false))
     }
 
     private var guardStrip: some View {

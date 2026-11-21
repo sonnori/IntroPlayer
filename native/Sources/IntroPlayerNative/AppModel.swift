@@ -1045,6 +1045,78 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - cover art
+
+    @Published var coverFetching = false
+    @Published var coverProgress = ""
+    /// Memoised disk reads. A `NSImage(contentsOf:)` per render would hit the filesystem at the
+    /// player's tick rate; `.some(nil)` records "looked, not there" so a missing cover is not
+    /// re-probed every frame either.
+    private var coverCache: [String: NSImage?] = [:]
+
+    private var coverLoading = Set<String>()
+
+    /// Non-blocking. Reading embedded artwork opens an `AVURLAsset`, which is cheap but not
+    /// free, and this is called from `body` — which re-renders at the player's tick rate. So a
+    /// miss starts a background resolve and publishes when it lands; `.some(nil)` then records
+    /// "looked, not there" so a song with no art is not re-probed every frame either.
+    func cover(for path: String) -> NSImage? {
+        if let hit = coverCache[path] { return hit }
+        guard !coverLoading.contains(path) else { return nil }
+        coverLoading.insert(path)
+        Task.detached(priority: .utility) { [weak self] in
+            let img = Artwork.resolve(for: path)
+            await MainActor.run {
+                guard let self else { return }
+                self.coverLoading.remove(path)
+                self.coverCache[path] = img
+                if img != nil { self.objectWillChange.send() }
+            }
+        }
+        return nil
+    }
+
+    private func forgetCover(_ path: String) {
+        coverCache.removeValue(forKey: path)
+    }
+
+    /// Fetch covers for everything in the current round that has none.
+    ///
+    /// Explicitly a setter's action, never automatic: §1 says the app needs no internet, and a
+    /// background fetch would make that false without anybody choosing it. Songs that already
+    /// have a cover are skipped, so pressing it again after adding a few songs costs only those.
+    func fetchCoversForRound() {
+        guard !coverFetching else { return }
+        let paths = songsIn(currentPlaylist).filter { !Artwork.hasCover($0) }
+        guard !paths.isEmpty else { flash("มีปกครบทุกเพลงในรอบนี้แล้ว"); return }
+        coverFetching = true
+        coverProgress = "0/\(paths.count)"
+        Task { [weak self] in
+            var done = 0, failed = 0
+            for p in paths {
+                if Task.isCancelled { break }
+                do { _ = try await Artwork.fetch(for: p); done += 1 }
+                catch { failed += 1 }
+                await MainActor.run {
+                    guard let self else { return }
+                    self.forgetCover(p)
+                    self.coverProgress = "\(done + failed)/\(paths.count)"
+                    self.objectWillChange.send()
+                }
+                // Spaced out on purpose — see `Artwork.gapSeconds`.
+                try? await Task.sleep(nanoseconds: UInt64(Artwork.gapSeconds * 1_000_000_000))
+            }
+            await MainActor.run {
+                guard let self else { return }
+                self.coverFetching = false
+                self.coverProgress = ""
+                self.flash(failed == 0 ? "ได้ปกเพลงครบ \(done) เพลง"
+                                       : "ได้ปก \(done) เพลง · หาไม่เจอ \(failed) เพลง")
+                self.objectWillChange.send()
+            }
+        }
+    }
+
     // MARK: - theme
 
     var theme: AppTheme { store.theme }
