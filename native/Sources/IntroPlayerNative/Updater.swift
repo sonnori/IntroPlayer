@@ -87,14 +87,80 @@ enum Updater {
         case noFeed
         case unreadable(String)
         case badManifest(String)
+        case noRelease(String)
 
         var errorDescription: String? {
             switch self {
             case .noFeed: return "ยังไม่ได้ตั้งที่อยู่สำหรับเช็กเวอร์ชั่น"
             case .unreadable(let s): return "อ่านไม่ได้: \(s)"
             case .badManifest(let s): return "ไฟล์เวอร์ชั่นผิดรูปแบบ: \(s)"
+            case .noRelease(let s): return "GitHub: \(s)"
             }
         }
+    }
+
+    /// What the feed string points at.
+    ///
+    /// GitHub Releases is its own kind rather than a `manifest.json` URL because the shape of the
+    /// answer is different — a release object, not our schema — and because it removes the step
+    /// that is easiest to get wrong by hand: there is no manifest to keep in step with the zip.
+    /// `gh release create` publishes both at once (see `release.sh --github`).
+    enum Feed {
+        case manifest(URL)
+        case github(owner: String, repo: String)
+
+        /// What to show the operator under the field.
+        var describe: String {
+            switch self {
+            case .manifest(let u): return u.isFileURL ? u.path : u.absoluteString
+            case .github(let o, let r): return "GitHub Releases ของ \(o)/\(r)"
+            }
+        }
+    }
+
+    /// Accepts `owner/repo`, `github.com/owner/repo`, or a full
+    /// `https://github.com/owner/repo[/releases...]` URL.
+    ///
+    /// Two components exactly for the bare shorthand, and only a `github.com` URL may carry
+    /// more. Without that rule a Drive path pasted without its leading slash —
+    /// `Users/someone/Library/CloudStorage/…` — parsed as the repo `Users/someone`, which is a
+    /// plausible typo that would have sent every version check to a stranger's repository.
+    static func githubRepo(_ feed: String) -> (owner: String, repo: String)? {
+        var t = feed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, !t.hasPrefix("/"), !t.hasPrefix("~") else { return nil }
+
+        var sawHost = false
+        for p in ["https://", "http://"] where t.lowercased().hasPrefix(p) {
+            t = String(t.dropFirst(p.count))
+        }
+        for p in ["www.github.com/", "github.com/"] where t.lowercased().hasPrefix(p) {
+            t = String(t.dropFirst(p.count))
+            sawHost = true
+            break
+        }
+        // Any other scheme or host is not a GitHub shorthand — let the manifest forms have it.
+        if !sawHost && (t.contains("://") || t.split(separator: "/").first?.contains(".") == true) {
+            return nil
+        }
+
+        let parts = t.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard parts.count >= 2, sawHost || parts.count == 2 else { return nil }
+        var owner = parts[0], repo = parts[1]
+        if repo.lowercased().hasSuffix(".git") { repo = String(repo.dropLast(4)) }
+        owner = owner.trimmingCharacters(in: .whitespaces)
+        repo = repo.trimmingCharacters(in: .whitespaces)
+        guard !owner.isEmpty, !repo.isEmpty, !owner.contains(".") else { return nil }
+        let allowed = CharacterSet(charactersIn:
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._")
+        guard owner.unicodeScalars.allSatisfy({ allowed.contains($0) }),
+              repo.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return nil }
+        return (owner, repo)
+    }
+
+    static func feedKind(_ feed: String) -> Feed? {
+        if let gh = githubRepo(feed) { return .github(owner: gh.owner, repo: gh.repo) }
+        if let u = manifestLocation(feed) { return .manifest(u) }
+        return nil
     }
 
     /// Resolves a feed string to the manifest's location.
@@ -137,7 +203,80 @@ enum Updater {
     /// Fetches the manifest and returns it only when it names a build newer than this one.
     /// `nil` means "already up to date" — a quiet, expected result, not an error.
     static func check(feed: String) async throws -> UpdateInfo? {
-        guard let loc = manifestLocation(feed) else { throw Failure.noFeed }
+        switch feedKind(feed) {
+        case .none: throw Failure.noFeed
+        case .github(let owner, let repo): return try await checkGitHub(owner: owner, repo: repo)
+        case .manifest(let loc): return try await checkManifest(at: loc)
+        }
+    }
+
+    /// GitHub Releases. Public repos only — a private one would need a token, and a token on a
+    /// crew machine is a credential nobody is managing.
+    static func checkGitHub(owner: String, repo: String) async throws -> UpdateInfo? {
+        let api = "https://api.github.com/repos/\(owner)/\(repo)/releases/latest"
+        guard let u = URL(string: api) else { throw Failure.noFeed }
+        var r = URLRequest(url: u)
+        r.cachePolicy = .reloadIgnoringLocalCacheData
+        // GitHub rejects requests with no User-Agent. Deliberately just the app and its version:
+        // no machine name, no account, nothing about who is running it.
+        r.setValue("IntroPlayer/\(AppVersion.short)", forHTTPHeaderField: "User-Agent")
+        r.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        let data: Data
+        do {
+            let (d, resp) = try await session.data(for: r)
+            if let h = resp as? HTTPURLResponse {
+                switch h.statusCode {
+                case 200...299: break
+                case 404: throw Failure.noRelease("ไม่พบ repo \(owner)/\(repo) หรือยังไม่มี release")
+                case 403, 429:
+                    throw Failure.noRelease("ถูกจำกัดจำนวนครั้ง (GitHub rate limit) — ลองใหม่อีกชั่วโมง")
+                default: throw Failure.unreadable("HTTP \(h.statusCode)")
+                }
+            }
+            data = d
+        } catch let e as Failure { throw e }
+        catch { throw Failure.unreadable(error_message(error)) }
+
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw Failure.badManifest("GitHub ตอบมาไม่ใช่ JSON")
+        }
+        guard let tag = (obj["tag_name"] as? String)?.trimmingCharacters(in: .whitespaces),
+              !tag.isEmpty else {
+            throw Failure.noRelease("release ล่าสุดไม่มี tag")
+        }
+        // `v1.2.0` and `1.2.0` are both normal ways to tag a release.
+        var v = tag
+        if v.lowercased().hasPrefix("v") { v = String(v.dropFirst()) }
+        v = String(v.prefix(24))
+        guard AppVersion.isNewer(v) else { return nil }
+
+        // The .zip asset. A release may also carry SHA256SUMS or other files, and asset order
+        // is whatever the API feels like — so prefer one that names this app before falling back
+        // to "the first zip".
+        let assets = (obj["assets"] as? [[String: Any]]) ?? []
+        let zips = assets.filter {
+            (($0["name"] as? String) ?? "").lowercased().hasSuffix(".zip")
+        }
+        let zip = zips.first {
+            (($0["name"] as? String) ?? "").lowercased().contains("introplayer")
+        } ?? zips.first
+        guard let dl = (zip?["browser_download_url"] as? String), !dl.isEmpty else {
+            throw Failure.noRelease("release \(tag) ไม่มีไฟล์ .zip แนบมา")
+        }
+        // GitHub reports asset digests as "sha256:<hex>" where available. Optional either way.
+        var sha = ""
+        if let d = zip?["digest"] as? String, d.lowercased().hasPrefix("sha256:") {
+            sha = String(d.dropFirst("sha256:".count))
+        }
+        return UpdateInfo(version: v,
+                          notes: String(((obj["body"] as? String) ?? "")
+                              .trimmingCharacters(in: .whitespacesAndNewlines).prefix(1200)),
+                          download: String(dl.prefix(500)),
+                          minMacOS: "13.0",
+                          sha256: sha.trimmingCharacters(in: .whitespaces))
+    }
+
+    private static func checkManifest(at loc: URL) async throws -> UpdateInfo? {
         let data: Data
         if loc.isFileURL {
             // Missing and unreadable need different answers from the operator — one is "the feed

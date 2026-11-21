@@ -17,6 +17,17 @@ log.json
 # Export artifact, written into a round folder by "ส่งต่อ"
 songs/*/round.json
 
+# ── sound effects ────────────────────────────────────────────────────────
+# The two stings are NOT tracked and NOT shipped in a release, because their
+# licence is unrecorded (se/README.txt says what to name them, not where they
+# came from) and this repo is public. Redistributing licensed audio is not
+# something to do on a guess, and the risk is asymmetric: excluding them costs
+# one drag-and-drop on a fresh install, including them wrongly cannot be undone.
+# se/README.txt IS tracked, so the folder and its instructions always exist.
+# If they turn out to be free to redistribute, drop these two lines.
+se/correct.mp3
+se/wrong.mp3
+
 # ── audio ────────────────────────────────────────────────────────────────
 # The song library (~29 MB of commercial music). The app scans whatever is
 # in songs/ at runtime; nothing here is needed to build.

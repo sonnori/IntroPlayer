@@ -542,6 +542,37 @@ enum Diagnostics {
             let loc = Updater.manifestLocation(f)
             print("  \(f.debugDescription) -> \(loc.map { $0.isFileURL ? $0.path : $0.absoluteString } ?? "nil (ปิด/ใช้ไม่ได้)")")
         }
+
+        print("\nGitHub shorthand — the key case is that a path pasted WITHOUT its leading")
+        print("slash must not parse as somebody else's repo")
+        let ghCases: [(String, String?)] = [
+            ("sonnori/IntroPlayer", "sonnori/IntroPlayer"),
+            ("github.com/sonnori/IntroPlayer", "sonnori/IntroPlayer"),
+            ("https://github.com/sonnori/IntroPlayer", "sonnori/IntroPlayer"),
+            ("https://github.com/sonnori/IntroPlayer/releases", "sonnori/IntroPlayer"),
+            ("https://github.com/sonnori/IntroPlayer/releases/latest", "sonnori/IntroPlayer"),
+            ("https://www.github.com/sonnori/IntroPlayer.git", "sonnori/IntroPlayer"),
+            ("  sonnori/IntroPlayer  ", "sonnori/IntroPlayer"),
+            // must NOT be read as a repo
+            ("Users/someone/Library/CloudStorage/Drive/RGF", nil),
+            ("/Users/someone/Drive/RGF", nil),
+            ("~/Drive/RGF", nil),
+            ("https://example.com/rgf/manifest.json", nil),
+            ("example.com/a/b", nil),
+            ("sonnori", nil),
+            ("", nil),
+            ("ftp://github.com/a/b", nil),
+            ("a/b c", nil),
+        ]
+        for (inp, want) in ghCases {
+            let got = Updater.githubRepo(inp).map { "\($0.owner)/\($0.repo)" }
+            if got != want { ok = false }
+            print("  \(inp.debugDescription) -> \(got ?? "nil")  want \(want ?? "nil") \(got == want ? "ok" : "✗")")
+        }
+        print("\nfeedKind")
+        for f in ["sonnori/IntroPlayer", "/tmp/rgf", "https://example.com/rgf/", ""] {
+            print("  \(f.debugDescription) -> \(Updater.feedKind(f)?.describe ?? "nil (ปิด)")")
+        }
         // Only http/https/file may ever reach NSWorkspace — a manifest must not be able to make
         // the app launch something.
         // The bare-PATH form matters as much as the scheme form: that branch had no guard at

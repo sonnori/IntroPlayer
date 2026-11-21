@@ -5,6 +5,8 @@
 #   ./native/release.sh --skip-build         package whatever IntroPlayerNative.app already is
 #   ./native/release.sh --allow-dirty        package from a tree with uncommitted edits
 #   ./native/release.sh --download <url>     put a download URL in the generated manifest.json
+#   ./native/release.sh --github             publish to GitHub Releases with `gh` (no manifest
+#                                            needed — the app reads the release itself)
 #
 # Output in dist/:
 #   IntroPlayer-<ver>.zip   what you hand over / upload
@@ -19,6 +21,7 @@ cd "$ROOT"
 SKIP_BUILD=0
 ALLOW_DIRTY=0
 DL=""
+GH=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --skip-build) SKIP_BUILD=1 ;;
@@ -29,6 +32,7 @@ while [ $# -gt 0 ]; do
       DL="$1"
       ;;
     --no-download) DL="-" ;;
+    --github) GH=1 ;;
     *) echo "unknown argument: $1"; exit 2 ;;
   esac
   shift
@@ -112,6 +116,14 @@ for item in "${SEEDS[@]}"; do
   [ -e "$ROOT/$item" ] || { echo "✗ SEED '$item' ไม่มีในโปรเจกต์"; exit 1; }
   cp -R "$ROOT/$item" "$STAGE/$item"
 done
+# The stings are untracked and deliberately not redistributed (see .gitignore), so a release
+# built from a fresh clone ships se/ with only its README. Say so rather than shipping a silent
+# gap — an operator whose Correct button makes no sound has no way to guess why.
+if [ ! -f "$STAGE/se/correct.mp3" ] || [ ! -f "$STAGE/se/wrong.mp3" ]; then
+  echo "  ⚠ se/ ไม่มีไฟล์เสียง — ชุดนี้จะไม่มีเสียงตอบถูก/ผิด"
+  echo "    (ปกติ ถ้า build จาก clone ใหม่ — ไฟล์เสียงไม่ได้อยู่ใน repo)"
+  echo "    คนที่ลงใหม่ต้องวาง correct.mp3 / wrong.mp3 ใน se/ เอง (มีวิธีใน se/README.txt)"
+fi
 cp "$HERE/installer.command" "$STAGE/ติดตั้ง-อัปเดต.command"
 chmod +x "$STAGE/ติดตั้ง-อัปเดต.command" "$STAGE/ตรวจสอบเครื่อง.command" 2>/dev/null || true
 
@@ -195,6 +207,38 @@ check "universal (arm64 + x86_64) — arch: $ARCHS" '[[ "$ARCHS" == *arm64* && "
 GOT="$("$U/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 || echo "")"
 check "แอปที่แตกออกมารายงานเวอร์ชั่น $VERSION — ได้: ${GOT:-ไม่ตอบ}" '[[ "$GOT" == "$VERSION"* ]]'
 [ "$fail" = "0" ] || { echo "✗ zip ไม่ผ่านการตรวจ"; exit 1; }
+
+# ---- publish to GitHub Releases ----
+# This is the channel with the fewest moving parts: `gh release create` puts the tag, the notes
+# and the zip in one place, and the app reads the release directly — so there is no manifest.json
+# to keep in step with the zip, which is the step most likely to be got wrong by hand.
+if [ "$GH" = "1" ]; then
+  command -v gh >/dev/null 2>&1 || { echo "✗ ไม่มีคำสั่ง gh — ติดตั้ง GitHub CLI ก่อน"; exit 1; }
+  gh auth status >/dev/null 2>&1 || { echo "✗ gh ยังไม่ได้ login — รัน: gh auth login"; exit 1; }
+  SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo "")"
+  [ -n "$SLUG" ] || { echo "✗ โฟลเดอร์นี้ยังไม่ได้ผูกกับ repo บน GitHub"; exit 1; }
+  if gh release view "v$VERSION" >/dev/null 2>&1; then
+    echo "✗ มี release v$VERSION อยู่แล้วบน $SLUG"
+    echo "  ถ้าจะปล่อยซ้ำ ให้ลบอันเก่าก่อน: gh release delete v$VERSION"
+    exit 1
+  fi
+  echo "→ gh release create v$VERSION  ($SLUG)"
+  gh release create "v$VERSION" "$DIST/$NAME.zip" \
+    --title "IntroPlayer $VERSION" \
+    --notes "บิลด์ $COMMIT · $(date +%Y-%m-%d)
+
+แก้อะไรไปบ้าง — เขียนที่นี่ ข้อความนี้จะไปโผล่ในแถบแจ้งเตือนของทุกเครื่อง" \
+    || { echo "✗ gh release create ไม่สำเร็จ"; exit 1; }
+  echo "✓ ปล่อยแล้ว: https://github.com/$SLUG/releases/tag/v$VERSION"
+  echo
+  echo "ขั้นต่อไป:"
+  echo "  1. แก้ release notes บน GitHub ให้บอกว่าเวอร์ชั่นนี้เปลี่ยนอะไร"
+  echo "     gh release edit v$VERSION --notes '...'"
+  echo "  2. ตั้งช่องเช็กเวอร์ชั่นในแอปแต่ละเครื่องเป็น:  $SLUG"
+  echo "     (ทำครั้งเดียว หลังจากนั้นทุกเครื่องกด 'อัปเดตเลย' ได้เอง)"
+  rm -rf "$STAGE"
+  exit 0
+fi
 
 # ---- manifest + checksums ----
 # Computed BEFORE the manifest that quotes it. The in-app installer checks this before it

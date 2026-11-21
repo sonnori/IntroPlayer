@@ -466,8 +466,9 @@ struct AboutPanel: View {
     private var feedSetting: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("ที่อยู่สำหรับเช็กเวอร์ชั่น").font(Typo.subhead).foregroundStyle(Palette.text)
-            Text("ใส่ลิงก์ https:// หรือ path ของโฟลเดอร์ที่ sync ไว้ (Drive / Dropbox) ก็ได้ — "
-                 + "แบบโฟลเดอร์ไม่ต้องใช้เน็ตเลย เว้นว่าง = ปิดการเช็ก")
+            Text("ใส่ได้ 3 แบบ — **GitHub**: `owner/repo` · **โฟลเดอร์ที่ sync ไว้**: path ที่เริ่มด้วย / "
+                 + "(ไม่ต้องใช้เน็ตตอนเช็ก) · **เว็บ**: ลิงก์ https:// ที่มี manifest.json\n"
+                 + "เว้นว่าง = ปิดการเช็ก")
                 .font(Typo.font(11)).foregroundStyle(Palette.muted)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
@@ -495,13 +496,18 @@ struct AboutPanel: View {
                 Text("ยังไม่ได้บันทึก — กด Enter หรือปุ่มบันทึก (ปิดหน้านี้ไปเลยจะไม่ถูกบันทึก)")
                     .font(Typo.font(11)).foregroundStyle(Palette.amber)
             }
-            if let loc = Updater.manifestLocation(feed), !feed.isEmpty {
-                Text("จะอ่านจาก: \(loc.isFileURL ? loc.path : loc.absoluteString)")
+            // `feedKind`, not `manifestLocation`: a GitHub feed does not resolve to a
+            // manifest URL, and showing one would describe something the app will not read.
+            // Still purely syntactic, so it is safe to call from `body` (§15).
+            if let kind = Updater.feedKind(feed), !feed.isEmpty {
+                Text("จะอ่านจาก: \(kind.describe)")
                     .font(Typo.font(11, mono: true)).foregroundStyle(Palette.dim)
                     .lineLimit(2)
             } else if !feed.trimmingCharacters(in: .whitespaces).isEmpty {
-                Text("⚠ ที่อยู่นี้ใช้ไม่ได้ — ต้องเป็น https:// หรือ path ที่เริ่มด้วย / หรือ ~")
+                Text("⚠ ที่อยู่นี้ใช้ไม่ได้ — ต้องเป็น owner/repo (GitHub), "
+                     + "path ที่เริ่มด้วย / หรือ ~, หรือลิงก์ https://")
                     .font(Typo.font(11)).foregroundStyle(Palette.amber)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
