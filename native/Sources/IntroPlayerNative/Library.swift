@@ -312,7 +312,16 @@ enum Diagnostics {
         print(String(format: "  stoppedAt=%@ maxReached=%.3f overshoot=%.3f  playing=%@ mode=%@",
                      stopped.map { String(format: "%.3f", $0) } ?? "— NEVER STOPPED",
                      maxSeen, overshoot, p.isPlaying ? "yes" : "no", "\(p.mode)"))
-        let okPreview = stopped != nil && overshoot < 0.02 && !p.isPlaying
+        // A bounded audition must leave NO TRACE. `H` with playback stopped marks the hook at
+        // the playhead immediately, and G (keyCode 5) / H (4) are adjacent keys pressed by the
+        // same person in the same task — so a playhead parked at hook+previewSec meant G-then-H
+        // walked the hook 6 s further into the song, silently, every time.
+        let parked = p.position
+        let okPark = abs(parked - c.hook) < 0.05
+        print(String(format: "  playhead parked at %.3f — must be back on the hook (%.2f)  %@",
+                     parked, c.hook,
+                     okPark ? "ok" : "✗ ค้างที่อื่น: กด H ต่อจะย้ายฮุคเงียบๆ"))
+        let okPreview = stopped != nil && overshoot < 0.02 && !p.isPlaying && okPark
 
         // The intro stop must still work right after a preview — the preview bound is set on the
         // same scheduling path, so a leaked previewEnd would cut the next intro short.

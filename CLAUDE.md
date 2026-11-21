@@ -877,8 +877,19 @@ reverting the single line makes it report `NEVER STOPPED  mode=free  playing=yes
 - `preview` — a *bounded* audition of the hook (`G`), stopping at `hook + previewSec`. Bounded in
   `play(from:)` the same structural way the intro is — the node has nothing to render past it —
   so it does not depend on the guard timer either. `remode` ignores it, so a hook nudge mid-preview
-  cannot silently re-arm or extend it. Verify with `--previewtest`: overshoot must be 0.000 **and**
-  the ordinary intro stop must still fire afterwards (a leaked `previewEnd` would cut it short).
+  cannot silently re-arm or extend it. **When it ends it parks the playhead back on the hook**,
+  not where the audio ran out — see below. Verify with `--previewtest`: overshoot must be 0.000,
+  the playhead must be back on the hook, **and** the ordinary intro stop must still fire
+  afterwards (a leaked `previewEnd` would cut it short).
+
+> **An audition must leave no trace.** `finishFadeNow` parks at the fade's end point, which for
+> an intro stop is right (`introEnd` is where playback legitimately ended). For a preview it left
+> the playhead at `hook + previewSec` — and `H` with playback stopped marks the hook **at the
+> playhead, immediately**. `G` is keyCode 5 and `H` is 4: adjacent keys, pressed by the same
+> person in the same task. So `G` then `H` moved the hook 6 s further into the song, silently,
+> and repeating it walked the marker down the track. The fix is three lines, but the shape of the
+> bug is the point: a *read-only* verb that moves state the next keystroke reads is not read-only.
+> `--previewtest` fails against the unfixed line (`parked at 26.000`, hook 20.00).
 - `free` — playing from a point already past `introEnd`; **no** auto-stop.
 
 `modeForPosition(t,c)` is the single rule — `(t < introEnd-0.02 || ignoreEnd) ? 'intro' : 'free'` —
@@ -1028,6 +1039,34 @@ and `G` jumps to the chorus and plays it. Its guard is narrower: confirm only wh
 immediate, which is the whole of the hook-hunting workflow (you audition from a parked playhead).
 `R` is not guarded and should not be: §10 calls Reveal the on-camera verb, something the GM means
 to press.
+
+### Why `R` and `G` are both needed
+
+Asked directly, and worth writing down because the honest answer is narrower than it looks.
+
+| | `R` Reveal | `G` ฟัง Hook |
+|---|---|---|
+| after jumping to the hook | **plays on, never stops** | plays `previewSec`, **stops** |
+| leaves the playhead | wherever you paused it | **back on the hook** |
+| whose verb | the operator's, on camera | the setter's, at a desk |
+| confirmed while playing | no | yes |
+
+The functional difference is only *bounded vs unbounded*, so the obvious simplification is one
+key whose behaviour depends on state. **It does not work**, and the reason is specific: the
+discriminator would have to be `isPlaying`, and the commonest on-camera reveal happens from a
+**paused** state — paused on a buzz, the contestant answers, reveal. A key that was bounded when
+stopped would cut the reveal off after six seconds in exactly the situation it exists for. The
+mirror version (unbounded while playing) fails the same way.
+
+So two keys is the price of not having a mode, which §1 rejects on its own grounds. What makes
+them genuinely different rather than one-with-a-leash is the **parking** behaviour above: `G`
+is now non-destructive and idempotent — audition, and you are where you started — which is
+something `R` cannot be without ceasing to be a reveal.
+
+The inverted guard is deliberate and worth stating since it reads wrong: the *safer* key (`G`,
+six bounded seconds) is confirmed while the *more dangerous* one (`R`, the whole song on camera)
+is not. The reason is adjacency, not consequence — `H` next to `G` is pressed during playback by
+design, while nothing next to `R` is, and `E` (the other neighbour) is itself guarded.
 
 Why keyed on `isPlaying` rather than a mode toggle: a mode has to be remembered, and the day
 somebody forgets to switch it is the day it does not help.

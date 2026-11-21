@@ -44,6 +44,9 @@ final class Player: ObservableObject {
     /// Where a `.preview` is allowed to run to. Bounded in `play(from:)` the same way the intro is,
     /// so the stop is structural and not merely timer-driven.
     private var previewEnd: Double = 0
+    /// Where a finished audition parks the playhead: the hook itself, not where the audition
+    /// ran out. See `finishFadeNow`.
+    private var previewReturnTo: Double = 0
 
     /// Fade state. The fade is offset so silence lands exactly on Intro End — it starts at
     /// `introEnd - fadeSec`, never after, so audio never plays past the intro range.
@@ -107,6 +110,7 @@ final class Player: ObservableObject {
         engineReady = true
         seekOffset = 0; pausedAt = 0; position = 0
         previewEnd = 0
+        previewReturnTo = 0
         mode = .idle
         node.volume = 1
         // Never carry the previous song's gain into this one — a +12 dB track followed by a loud
@@ -185,6 +189,7 @@ final class Player: ObservableObject {
         cancelFade()
         let h = min(max(0, c.hook), max(0, duration - 0.5))   // same clamp as reveal
         previewEnd = min(duration, h + Player.previewSec)
+        previewReturnTo = h
         mode = .preview
         play(from: h)
     }
@@ -392,9 +397,17 @@ final class Player: ObservableObject {
         fading = false
         node.pause()
         isPlaying = false
-        pausedAt = endAt
-        position = endAt
-        seekOffset = endAt
+        // A bounded audition must leave NO TRACE — park back on the hook, not `previewSec` past
+        // it. `G` (keyCode 5) and `H` (4) are adjacent, and both are pressed by the same person
+        // in the same task, so G-then-H used to move the hook forward 6 s **silently**: `H` with
+        // playback stopped marks at the playhead immediately, and the playhead was wherever the
+        // audition ran out. Repeated, it walked the marker down the song.
+        //
+        // Read `mode` here, before the assignment below clears it to `.idle`.
+        let park = (mode == .preview && previewReturnTo > 0) ? previewReturnTo : endAt
+        pausedAt = park
+        position = park
+        seekOffset = park
         node.stop()                                 // so the next play schedules cleanly
         node.volume = 1
         mode = .idle
