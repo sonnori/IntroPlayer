@@ -267,6 +267,10 @@ final class Store {
     /// is true forever. A notice that is always there is a notice nobody reads.
     var dismissedUpdate = ""      // version string the operator has already waved off
     var dismissedSchema = 0       // schema number they have already seen
+    /// The version that last ran in this folder. If it differs from this build on launch, the
+    /// update worked — and saying so is the other half of the loop: without it the only evidence
+    /// is a number that did NOT appear, which is not something an operator can check.
+    var lastRanVersion = ""
 
     init() { load() }
 
@@ -294,6 +298,7 @@ final class Store {
         openedBy = String(((s["writtenBy"] as? String) ?? "").prefix(24))
         dismissedUpdate = String(((s["dismissedUpdate"] as? String) ?? "").prefix(24))
         dismissedSchema = (s["dismissedSchema"] as? Int) ?? 0
+        lastRanVersion = String(((s["lastRanVersion"] as? String) ?? "").prefix(24))
     }
 
     private static func decode(_ d: [String: Any]) -> SongConfig {
@@ -395,6 +400,7 @@ final class Store {
         s["writtenBy"] = AppVersion.short
         if !dismissedUpdate.isEmpty { s["dismissedUpdate"] = dismissedUpdate }
         if dismissedSchema > 0 { s["dismissedSchema"] = dismissedSchema }
+        s["lastRanVersion"] = AppVersion.short
         raw["_settings"] = s
     }
 

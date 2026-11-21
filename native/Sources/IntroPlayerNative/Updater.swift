@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// What a feed told us about a newer build.
@@ -8,6 +9,10 @@ struct UpdateInfo: Equatable {
     var download: String
     /// Minimum macOS the new build needs, or "" if the manifest didn't say.
     var minMacOS: String
+    /// Optional SHA-256 of the zip. Checked before anything is unpacked — it catches the
+    /// realistic failure, which is a truncated download or a half-synced Drive file, not an
+    /// attacker (whoever can replace the zip can replace the manifest beside it).
+    var sha256: String = ""
 
     /// This machine's macOS as a comparable dotted string.
     static var runningOS: String {
@@ -175,7 +180,9 @@ enum Updater {
         return UpdateInfo(version: v,
                           notes: notes,
                           download: String((obj["download"] as? String ?? "").prefix(500)),
-                          minMacOS: String((obj["minMacOS"] as? String ?? "").prefix(16)))
+                          minMacOS: String((obj["minMacOS"] as? String ?? "").prefix(16)),
+                          sha256: String((obj["sha256"] as? String ?? "").prefix(64))
+                              .trimmingCharacters(in: .whitespaces))
     }
 
     private static func error_message(_ e: Error) -> String {
@@ -233,5 +240,202 @@ enum InstallLocation {
             // depends on this file existing, so a sandboxed or read-only home is not an error
             // worth putting in front of the operator.
         }
+    }
+}
+
+// MARK: - installing from inside the app (§15)
+
+/// Download → verify → hand the swap to the installer → quit → it relaunches us.
+///
+/// The app cannot replace its own running bundle, so the last step has to be another process.
+/// That process is the SAME `ติดตั้ง-อัปเดต.command` the manual path uses, run with
+/// `--unattended`: the backups, the checked `rm`, the full rollback and the
+/// "ask the installed binary its version before claiming success" check are all reused rather
+/// than reimplemented, and they are what the 79 assertions cover.
+///
+/// One happy side effect worth knowing: this path **has no Gatekeeper step at all**. Quarantine
+/// is applied by whatever downloads a file — a browser, Drive's client — not by the kernel. A zip
+/// that this app's own `URLSession` writes carries no flag, so the staged bundle runs and the
+/// installed one opens with no right-click → Open and no trip to System Settings.
+extension Updater {
+    enum Install: LocalizedError {
+        case noDownload
+        case unpack(String)
+        case wrongVersion(got: String, want: String)
+        case badChecksum
+        case missingInstaller
+        case launch(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .noDownload:   return "ชุดอัปเดตนี้ไม่ได้บอกที่อยู่ไฟล์"
+            case .unpack(let s): return "แตกไฟล์ไม่ได้ — \(s)"
+            case .wrongVersion(let g, let w):
+                return "ไฟล์ที่โหลดมาเป็นเวอร์ชั่น \(g.isEmpty ? "ที่อ่านไม่ออก" : g) ไม่ใช่ \(w) — ยกเลิกแล้ว"
+            case .badChecksum:  return "ไฟล์ที่โหลดมาไม่ครบ (checksum ไม่ตรง) — โหลดใหม่"
+            case .missingInstaller: return "ในชุดอัปเดตไม่มีตัวติดตั้ง"
+            case .launch(let s): return "เรียกตัวติดตั้งไม่ได้ — \(s)"
+            }
+        }
+    }
+
+    static let installerName = "ติดตั้ง-อัปเดต.command"
+    /// Where the installer writes what it did, so a failed unattended run is not silent.
+    static var installLog: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/IntroPlayer-update.log")
+    }
+
+    /// A fresh scratch directory for one attempt. Under the system temp dir, so a crash mid-way
+    /// leaves nothing in the operator's folder.
+    static func scratch() throws -> URL {
+        let d = FileManager.default.temporaryDirectory
+            .appendingPathComponent("IntroPlayerUpdate-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+
+    /// Gets the zip into `dir`. A feed in a synced folder is already on disk, so that case is a
+    /// copy and needs no network — the same reason the folder form is the recommended channel.
+    /// `onProgress` is deliberately **not** `@MainActor`. `fetchZip` is a non-isolated async
+    /// func, so it runs on the generic executor — and a main-actor callback from here would
+    /// deadlock any caller that is blocking the main thread waiting for the download, which is
+    /// exactly what a headless diagnostic does. The UI caller hops to main itself.
+    static func fetchZip(_ info: UpdateInfo, into dir: URL,
+                         onProgress: @escaping (Double) -> Void) async throws -> URL {
+        guard let src = info.openable else { throw Install.noDownload }
+        let dest = dir.appendingPathComponent("release.zip")
+
+        if src.isFileURL {
+            onProgress(-1)
+            guard FileManager.default.fileExists(atPath: src.path) else {
+                throw Install.unpack("ยังไม่มีไฟล์ในโฟลเดอร์นั้น — รอ sync ให้เสร็จ")
+            }
+            try FileManager.default.copyItem(at: src, to: dest)
+            onProgress(1)
+            return dest
+        }
+
+        var r = URLRequest(url: src)
+        r.cachePolicy = .reloadIgnoringLocalCacheData
+        // A download is minutes, not seconds, so it does NOT use the 5 s check session.
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 60
+        cfg.timeoutIntervalForResource = 900
+        let session = URLSession(configuration: cfg)
+        defer { session.invalidateAndCancel() }
+
+        let (stream, resp) = try await session.bytes(for: r)
+        if let h = resp as? HTTPURLResponse, !(200...299).contains(h.statusCode) {
+            throw Install.unpack("HTTP \(h.statusCode)")
+        }
+        let total = resp.expectedContentLength
+        FileManager.default.createFile(atPath: dest.path, contents: nil)
+        guard let fh = try? FileHandle(forWritingTo: dest) else {
+            throw Install.unpack("เขียนไฟล์ชั่วคราวไม่ได้")
+        }
+        defer { try? fh.close() }
+
+        var buf = Data(capacity: 1 << 16)
+        var got: Int64 = 0
+        var lastReport = Date.distantPast
+        for try await byte in stream {
+            buf.append(byte)
+            if buf.count >= 1 << 16 {
+                try fh.write(contentsOf: buf)
+                got += Int64(buf.count)
+                buf.removeAll(keepingCapacity: true)
+                // Throttled: the progress bar is in a sheet whose body is already re-evaluated by
+                // every model publish, and reporting per 64 KB chunk of a 2 MB file is plenty.
+                if Date().timeIntervalSince(lastReport) > 0.1 {
+                    lastReport = Date()
+                    let f = total > 0 ? Double(got) / Double(total) : -1
+                    onProgress(f)
+                }
+            }
+            try Task.checkCancellation()
+        }
+        if !buf.isEmpty { try fh.write(contentsOf: buf); got += Int64(buf.count) }
+        onProgress(1)
+        return dest
+    }
+
+    /// Unpacks, then **proves the thing we are about to install is what the manifest promised**.
+    ///
+    /// This is the check that makes a one-click update defensible: a truncated download, a stale
+    /// zip left in a Drive folder, or a manifest pointing at the wrong file all end here with the
+    /// operator's working app untouched, rather than at the swap.
+    static func stage(zip: URL, in dir: URL, expecting info: UpdateInfo) throws -> URL {
+        if !info.sha256.isEmpty {
+            guard let data = try? Data(contentsOf: zip) else { throw Install.unpack("อ่านไฟล์ไม่ได้") }
+            guard sha256Hex(data) == info.sha256.lowercased() else { throw Install.badChecksum }
+        }
+        let out = dir.appendingPathComponent("unpacked")
+        // ditto, not unzip: it is what macOS itself uses and it preserves the bundle's modes.
+        let (code, err) = try run("/usr/bin/ditto", ["-x", "-k", zip.path, out.path])
+        guard code == 0 else { throw Install.unpack(err.isEmpty ? "ditto \(code)" : err) }
+
+        // The zip holds one top folder, `IntroPlayer-<ver>/`. Find it by looking for the bundle
+        // rather than by rebuilding the name, so a renamed zip still works.
+        let fm = FileManager.default
+        var root = out
+        if !fm.fileExists(atPath: root.appendingPathComponent("IntroPlayerNative.app").path) {
+            let kids = (try? fm.contentsOfDirectory(at: out, includingPropertiesForKeys: nil)) ?? []
+            guard let hit = kids.first(where: {
+                fm.fileExists(atPath: $0.appendingPathComponent("IntroPlayerNative.app").path)
+            }) else { throw Install.unpack("ในไฟล์ไม่มี IntroPlayerNative.app") }
+            root = hit
+        }
+        guard fm.isExecutableFile(atPath: root.appendingPathComponent(installerName).path) else {
+            throw Install.missingInstaller
+        }
+        let exe = root.appendingPathComponent("IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative")
+        guard fm.isExecutableFile(atPath: exe.path) else {
+            throw Install.unpack("ในไฟล์ไม่มีตัวโปรแกรม")
+        }
+        let (vc, vout) = try run(exe.path, ["--version"])
+        let got = vc == 0 ? String(vout.split(separator: " ").first ?? "") : ""
+        guard got == info.version else { throw Install.wrongVersion(got: got, want: info.version) }
+        return root
+    }
+
+    /// Launches the staged installer and returns at once. The caller must then quit: the script
+    /// waits for `waitPid` to disappear before it touches anything, so the swap never races a
+    /// running app.
+    static func apply(staged: URL, target: URL, waitPid: Int32) throws {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = [staged.appendingPathComponent(installerName).path,
+                       "--unattended",
+                       "--target", target.path,
+                       "--wait-pid", String(waitPid),
+                       "--relaunch"]
+        // Detached: no pipes to fill and nothing for the dying parent to hold open.
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        p.standardInput = FileHandle.nullDevice
+        do { try p.run() } catch { throw Install.launch(error.localizedDescription) }
+    }
+
+    // MARK: helpers
+
+    private static func sha256Hex(_ d: Data) -> String {
+        SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Runs a command and returns (status, trimmed output). Reads the pipe BEFORE waiting, or a
+    /// child that outruns the 64 KB pipe buffer deadlocks us.
+    private static func run(_ exe: String, _ args: [String]) throws -> (Int32, String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: exe)
+        p.arguments = args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        try p.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        let s = String(data: data, encoding: .utf8) ?? ""
+        return (p.terminationStatus, s.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 }

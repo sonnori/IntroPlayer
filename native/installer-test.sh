@@ -41,6 +41,12 @@ if [ -n "$Q" ]; then
 fi
 exit 0
 EOS
+cat > "$BASE/bin/open" <<'EOS'
+#!/bin/bash
+# --relaunch must not actually launch anything during a test run.
+echo "OPEN: $*" >> "${STUB_OPEN_LOG:-/dev/null}"
+exit 0
+EOS
 cat > "$BASE/bin/pgrep" <<'EOS'
 #!/bin/bash
 # STUB_RUNNING=1 pretends the app is open; STUB_WEB=1 pretends server.py is.
@@ -50,7 +56,7 @@ case "$*" in
 esac
 exit 1
 EOS
-chmod +x "$BASE/bin/osascript" "$BASE/bin/pgrep"
+chmod +x "$BASE/bin/osascript" "$BASE/bin/pgrep" "$BASE/bin/open"
 export PATH="$BASE/bin:$PATH"
 
 # ---- the new release, unzipped like the operator would ----
@@ -89,6 +95,14 @@ run() {  # run <log> <src> [env assignments via globals]
   rm -f "$BASE/q"
   STUB_QUEUE_FILE="$BASE/q" STUB_LOG="$1" HOME="$BASE/home" \
     bash "$2/ติดตั้ง-อัปเดต.command" >/dev/null 2>&1
+}
+
+# The in-app path: no dialogs, target given, waits for a pid, then swaps.
+run_unattended() {  # run_unattended <log> <src> [extra args...]
+  local lg="$1" src="$2"; shift 2
+  rm -f "$BASE/q"
+  STUB_QUEUE_FILE="$BASE/q" STUB_LOG="$lg" STUB_OPEN_LOG="$BASE/openlog" HOME="$BASE/home" \
+    bash "$src/ติดตั้ง-อัปเดต.command" --unattended "$@" >/dev/null 2>&1
 }
 
 data_intact() {
@@ -302,6 +316,69 @@ STUB_ANSWERS="อัปเดต|ปิด" run "$BASE/log14" "$SRC"
 NBK="$(ls -1d "$TARGET/backups"/*/ 2>/dev/null | wc -l | tr -d ' ')"
 check "เหลือ 3 ชุด (ได้ $NBK)" '[ "$NBK" = "3" ]'
 check "ชุดล่าสุดยังอยู่" '[ -n "$(ls -1d "$TARGET/backups"/*/ | tail -1)" ] && [ -f "$(ls -1d "$TARGET/backups"/*/ | tail -1)/config.json" ]'
+
+echo
+echo "=== 15. unattended (the in-app path): swaps, keeps the data, relaunches ==="
+fresh_target
+rm -f "$BASE/openlog"
+( sleep 2 ) & WP=$!
+T0=$(date +%s)
+run_unattended "$BASE/log15" "$SRC" --target "$TARGET" --wait-pid "$WP" --relaunch
+rc=$?; EL=$(( $(date +%s) - T0 ))
+check "exit 0 (rc=$rc)" '[ "$rc" = "0" ]'
+check "รอ --wait-pid จริง (${EL}s ควร >= 2)" '[ "$EL" -ge 2 ]'
+check "แอปใหม่เข้าที่ และตอบเวอร์ชั่นถูก" '[ "$("$TARGET/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 | cut -d" " -f1)" = "$VER" ]'
+data_intact
+check "se/ ที่เปลี่ยนเองไม่ถูกทับ" '[ "$(shasum -a 256 < "$TARGET/se/correct.mp3")" = "$SE_BEFORE" ]'
+check "สำรองไฟล์ชุดเดิมไว้ครบ" '[ -f "$(ls -d "$TARGET/backups"/*/ | head -1)/server.py" ]'
+check "สั่งเปิดแอปใหม่" 'grep -q "IntroPlayerNative.app" "$BASE/openlog"'
+check "ไม่เปิด dialog เลย" '[ ! -s "$BASE/log15" ] || ! grep -q "display dialog" "$BASE/log15"'
+check "เขียน log การอัปเดต" 'grep -q "เรียบร้อย" "$BASE/home/Library/Logs/IntroPlayer-update.log"'
+check "ไม่ทิ้ง lock ค้างไว้" '[ ! -d "$TARGET/.installing" ]'
+
+echo
+echo "=== 16. unattended with no --target is refused ==="
+fresh_target
+run_unattended "$BASE/log16" "$SRC"
+rc=$?
+check "exit != 0 (rc=$rc)" '[ "$rc" != "0" ]'
+check "แอปตัวเก่ายังอยู่" 'grep -q "OLD APP" "$TARGET/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative"'
+data_intact
+
+echo
+echo "=== 17. unattended with a --target that is not an install is refused ==="
+fresh_target
+rm -rf "$BASE/notaninstall"; mkdir -p "$BASE/notaninstall"
+printf 'MY OWN FILE\n' > "$BASE/notaninstall/index.html"
+run_unattended "$BASE/log17" "$SRC" --target "$BASE/notaninstall"
+rc=$?
+check "exit != 0 (rc=$rc)" '[ "$rc" != "0" ]'
+check "ไฟล์ของผู้ใช้ไม่ถูกทับ" 'grep -q "MY OWN FILE" "$BASE/notaninstall/index.html"'
+check "ไม่สร้าง backups ที่นั่น" '[ ! -d "$BASE/notaninstall/backups" ]'
+
+echo
+echo "=== 18. unattended refuses while an app is still running IN THE TARGET ==="
+fresh_target
+STUB_RUNNING=1 run_unattended "$BASE/log18" "$SRC" --target "$TARGET"
+rc=$?
+check "exit != 0 (rc=$rc)" '[ "$rc" != "0" ]'
+check "แอปตัวเก่ายังอยู่" 'grep -q "OLD APP" "$TARGET/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative"'
+data_intact
+check "บอกเหตุผลใน log" 'grep -q "ยังมีแอปเปิดอยู่" "$BASE/home/Library/Logs/IntroPlayer-update.log"'
+
+echo
+echo "=== 19. unattended gives up if the app never quits ==="
+fresh_target
+# A pid that outlives the 30 s wait would make the suite take 30 s, so assert the shape instead:
+# a pid that is already gone must NOT be waited on.
+( true ) & DEADPID=$!
+wait "$DEADPID" 2>/dev/null
+T0=$(date +%s)
+run_unattended "$BASE/log19" "$SRC" --target "$TARGET" --wait-pid "$DEADPID"
+EL=$(( $(date +%s) - T0 ))
+check "pid ที่ตายแล้วไม่ถูกรอ (${EL}s ควร < 3)" '[ "$EL" -lt 3 ]'
+check "ยังอัปเดตสำเร็จ" '[ "$("$TARGET/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 | cut -d" " -f1)" = "$VER" ]'
+data_intact
 
 echo
 echo "================================"

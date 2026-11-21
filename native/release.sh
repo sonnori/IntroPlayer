@@ -129,8 +129,16 @@ cat > "$STAGE/อ่านก่อน.txt" <<EOF
 RGF Intro Player $VERSION   ($COMMIT, $(date +%Y-%m-%d))
 =========================================================
 
-ติดตั้ง / อัปเดต
-----------------
+วิธีที่ง่ายที่สุด: ไม่ต้องใช้ไฟล์นี้เลย
+--------------------------------------
+ถ้าเครื่องนั้นตั้งที่อยู่สำหรับเช็กเวอร์ชั่นไว้แล้ว ให้เปิดแอปแล้วกด "อัปเดตเลย"
+บนแถบฟ้าด้านบน แอปจะโหลด ตรวจไฟล์ ปิดตัวเอง สลับตัวโปรแกรม แล้วเปิดใหม่ให้เอง
+-- และทางนั้นไม่ติด Gatekeeper ไม่ต้องคลิกขวา Open
+
+ด้านล่างคือวิธีทำมือ ใช้เมื่อกดปุ่มในแอปไม่ได้ หรือได้ไฟล์มาทางอื่น
+
+ติดตั้ง / อัปเดต (ทำมือ)
+------------------------
 1. ปิดแอปก่อน ถ้ากำลังเปิดอยู่ (Cmd+Q)   ** ห้ามอัปเดตตอนกำลังถ่าย **
 2. ดับเบิลคลิก   ติดตั้ง-อัปเดต.command
 3. ถ้า macOS เตือนว่า "เปิดไม่ได้ / ไม่รู้จักผู้พัฒนา"
@@ -189,6 +197,11 @@ check "แอปที่แตกออกมารายงานเวอร�
 [ "$fail" = "0" ] || { echo "✗ zip ไม่ผ่านการตรวจ"; exit 1; }
 
 # ---- manifest + checksums ----
+# Computed BEFORE the manifest that quotes it. The in-app installer checks this before it
+# unpacks anything, which is what catches the realistic failure: a truncated download or a
+# half-synced Drive file.
+( cd "$DIST" && shasum -a 256 "$NAME.zip" > SHA256SUMS )
+ZIPSHA="$(shasum -a 256 "$DIST/$NAME.zip" | awk '{print $1}')"
 # An empty `download` produces a dead-end banner: the operator is told there is a new version
 # and then told to "unzip the file you were given" — a file they have no way to get. Refuse it
 # rather than publish it, unless explicitly told there is no URL yet.
@@ -210,12 +223,12 @@ cat > "$DIST/manifest.json" <<EOF
   "notes": "",
   "download": "$DL",
   "minMacOS": "13.0",
+  "sha256": "$ZIPSHA",
   "commit": "$COMMIT",
   "released": "$(date +%Y-%m-%d)"
 }
 EOF
 fi
-( cd "$DIST" && shasum -a 256 "$NAME.zip" > SHA256SUMS )
 
 rm -rf "$STAGE"
 SIZE="$(du -h "$DIST/$NAME.zip" | cut -f1 | tr -d ' ')"

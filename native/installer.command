@@ -37,6 +37,33 @@ DATA=(config.json log.json)
 RELEASE_MARKERS=(ติดตั้ง-อัปเดต.command อ่านก่อน.txt)
 KEEP_BACKUPS=3
 
+# ---------- unattended mode (driven by the app itself, §15) ----------
+# The app cannot replace its own running bundle, so "อัปเดตเลย" in the UI stages the release,
+# launches THIS script with --unattended, and quits. Everything below the target-resolution
+# branch is shared with the double-click path, so the backups, the checked rm, the full rollback
+# and the "ask the installed binary its version" check are the same code under test.
+UNATTENDED=0
+ARG_TARGET=""
+WAIT_PID=""
+RELAUNCH=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --unattended) UNATTENDED=1 ;;
+    --target)   shift; ARG_TARGET="${1:-}" ;;
+    --wait-pid) shift; WAIT_PID="${1:-}" ;;
+    --relaunch) RELAUNCH=1 ;;
+    *) ;;   # ignore anything else: Finder may pass its own arguments on a double-click
+  esac
+  shift
+done
+LOGF="$HOME/Library/Logs/IntroPlayer-update.log"
+mkdir -p "$(dirname "$LOGF")" 2>/dev/null
+# Trimmed, not unbounded — this file is only ever read when something went wrong.
+if [ -f "$LOGF" ] && [ "$(wc -l < "$LOGF" 2>/dev/null || echo 0)" -gt 400 ]; then
+  tail -200 "$LOGF" > "$LOGF.tmp" 2>/dev/null && mv "$LOGF.tmp" "$LOGF" 2>/dev/null
+fi
+log() { printf '%s  %b\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOGF" 2>/dev/null; }
+
 NEWVER="$(( tr -d ' \n\r' < "$SRC/VERSION" ) 2>/dev/null || echo "?")"
 
 # ---------- dialogs ----------
@@ -62,6 +89,17 @@ say() {  # say <text> [buttons...]  -> prints the chosen button; LAST button is 
   # every comparison against a button label fail — the dialogs rendered, the operator pressed
   # "อัปเดต", and the script took the cancel branch every time.
   printf '\n%b\n' "$txt" >&2
+  # Unattended there is nobody to answer, and a modal would hang a process the user cannot see.
+  # Nothing in the shared path below calls `say` with buttons, so logging and returning the
+  # affirmative is only ever reached by the final "done" message.
+  if [ "$UNATTENDED" = "1" ]; then
+    log "$txt"
+    # The LAST argument: `say` makes the last button the default, so this is what Return would
+    # have done. Returning the first would have answered every dialog with the cancel slot —
+    # which is exactly how the unattended run used to cancel itself.
+    [ $# -gt 0 ] && printf '%s' "${!#}"
+    return 0
+  fi
   local e; e="$(esc "$txt")"
   if [ $# -gt 0 ]; then
     local btns="" last="${!#}"
@@ -73,7 +111,13 @@ say() {  # say <text> [buttons...]  -> prints the chosen button; LAST button is 
 }
 die() {
   printf '\n✗ %b\n\n' "$1" >&2
-  osascript -e "display alert \"ติดตั้งไม่สำเร็จ\" message \"$(esc "$1")\" as critical" >/dev/null 2>&1
+  log "✗ ล้มเหลว: $1"
+  # Unattended, the app is already gone — a critical alert from a process with no windows is a
+  # bouncing Dock icon nobody connects to the update. The log plus the unchanged version number
+  # is the report; the app shows the log on the next launch.
+  if [ "$UNATTENDED" != "1" ]; then
+    osascript -e "display alert \"ติดตั้งไม่สำเร็จ\" message \"$(esc "$1")\" as critical" >/dev/null 2>&1
+  fi
   exit 1
 }
 cancelled() { printf '\nยกเลิก — ไม่มีอะไรถูกเปลี่ยน\n\n' >&2; exit 0; }
@@ -84,11 +128,41 @@ cancelled() { printf '\nยกเลิก — ไม่มีอะไรถู
 # ---------- 1. the app must not be running ----------
 # Matched on the executable path, not the word "IntroPlayer", so this script's own argv (which
 # contains the app name in its folder) cannot look like a running app.
-running() { pgrep -f "$APPEXE" 2>/dev/null | grep -vx -e "$$" -e "$PPID" | head -1; }
-if [ -n "$(running)" ]; then
+# Matched on the executable path, not the word "IntroPlayer", so this script's own argv (which
+# contains the app name in its folder) cannot look like a running app.
+#
+# Two scopes, on purpose. `running_anywhere` is a courtesy refusal before the attended flow asks
+# the operator anything — on a real machine there is one install, so it is the same answer.
+# `running_in_target` is the load-bearing one: the only app that matters is the one whose files
+# are about to be replaced, and a different install elsewhere on the disk is none of our
+# business. Using the broad check for the swap made the unattended path refuse whenever any
+# other copy was open.
+running_anywhere() { pgrep -f "$APPEXE" 2>/dev/null | grep -vx -e "$$" -e "$PPID" | head -1; }
+running_in_target() { pgrep -f "$1/$APPEXE" 2>/dev/null | grep -vx -e "$$" -e "$PPID" | head -1; }
+# Unattended, the app that launched us is still finishing its quit, so waiting is the whole
+# point — refusing would make the feature impossible. It still refuses if something is STILL
+# running after the wait, which covers a second window or a quit the user cancelled.
+if [ "$UNATTENDED" = "1" ]; then
+  log "— เริ่มอัปเดตเป็น $NEWVER (unattended) จาก $SRC"
+  if [ -n "$WAIT_PID" ]; then
+    i=0
+    while kill -0 "$WAIT_PID" 2>/dev/null; do
+      i=$((i + 1))
+      if [ "$i" -gt 150 ]; then   # 30 s at 0.2 s
+        die "แอปยังไม่ปิดภายใน 30 วินาที — ไม่ได้แตะอะไรเลย ลองปิดแอปแล้วดับเบิลคลิก ติดตั้ง-อัปเดต.command"
+      fi
+      sleep 0.2
+    done
+    # The store flush happens on willTerminate; give the write a moment to land before we move
+    # the folder's files around.
+    sleep 0.5
+    log "แอป (pid $WAIT_PID) ปิดแล้ว"
+  fi
+fi
+if [ "$UNATTENDED" != "1" ] && [ -n "$(running_anywhere)" ]; then
   die "RGF Intro Player ยังเปิดอยู่\n\nปิดแอปก่อน (Cmd+Q) แล้วดับเบิลคลิกไฟล์นี้อีกครั้ง\n\nถ้ากำลังถ่ายอยู่ — อย่าอัปเดตตอนนี้ รอให้เสร็จรอบก่อน"
 fi
-if pgrep -f "[s]erver\.py" >/dev/null 2>&1; then
+if [ "$UNATTENDED" != "1" ] && pgrep -f "[s]erver\.py" >/dev/null 2>&1; then
   # Default is CANCEL. §12 records this lesson for `confirmDestructive`: the destructive choice
   # must never be what Return or Space activates — and this dialog's own text says the latest
   # questions may be overwritten. `say` makes the LAST button the default, so cancel goes last.
@@ -122,12 +196,23 @@ confirm_target() {  # confirm_target <path> -> 0 to proceed
 }
 
 TARGET=""
-if [ -f "$BREADCRUMB" ]; then
+if [ "$UNATTENDED" = "1" ]; then
+  # Given, not discovered — but validated exactly as a picked folder is, so an argument cannot
+  # aim the swap somewhere the dialog flow would have refused.
+  [ -n "$ARG_TARGET" ] || die "--unattended ต้องมี --target"
+  valid_target "$ARG_TARGET" \
+    || die "--target ไม่ใช่โฟลเดอร์ที่ติดตั้ง IntroPlayer: $ARG_TARGET"
+  TARGET="$ARG_TARGET"
+  log "เป้าหมาย: $TARGET"
+elif [ -f "$BREADCRUMB" ]; then
   CAND="$(head -1 "$BREADCRUMB" | tr -d '\r')"
   if valid_target "$CAND"; then TARGET="$CAND"; fi
 fi
 
-if [ -n "$TARGET" ]; then
+# Attended only: unattended already validated the target it was handed, and there is nobody to
+# answer a dialog. Without this guard the unattended run fell into the confirm and cancelled
+# itself.
+if [ "$UNATTENDED" != "1" ] && [ -n "$TARGET" ]; then
   if ! confirm_target "$TARGET"; then
     ans="$(say "ไม่อัปเดตโฟลเดอร์นั้น จะทำอะไรต่อ" "ยกเลิก" "เลือกโฟลเดอร์อื่น")"
     [ "$ans" = "เลือกโฟลเดอร์อื่น" ] || cancelled
@@ -135,7 +220,7 @@ if [ -n "$TARGET" ]; then
   fi
 fi
 
-if [ -z "$TARGET" ]; then
+if [ "$UNATTENDED" != "1" ] && [ -z "$TARGET" ]; then
   ans="$(say "หาโฟลเดอร์ที่ติดตั้งไว้ไม่เจอ\n\nถ้าเคยใช้แล้ว เลือกโฟลเดอร์เดิม (โฟลเดอร์ที่มี songs/ กับ config.json)\nถ้ายังไม่เคยใช้ ให้ติดตั้งใหม่" "ยกเลิก" "ติดตั้งใหม่" "เลือกโฟลเดอร์เดิม")"
   case "$ans" in
     "เลือกโฟลเดอร์เดิม")
@@ -172,6 +257,11 @@ if [ "$TARGET" -ef "$SRCP" ]; then
   die "นี่คือโฟลเดอร์ที่แตก zip ออกมา ไม่ใช่ที่ติดตั้ง\n\nเลือกโฟลเดอร์ที่มี songs/ กับ config.json ของคุณ"
 fi
 [ -w "$TARGET" ] || die "เขียนโฟลเดอร์นี้ไม่ได้ (สิทธิ์ไม่พอ):\n$TARGET"
+
+# The check that actually guards the swap. Scoped to the target, and after it is resolved.
+if [ -n "$(running_in_target "$TARGET")" ]; then
+  die "ยังมีแอปเปิดอยู่จากโฟลเดอร์นี้\n$TARGET\n\nปิดแอปก่อนแล้วลองใหม่"
+fi
 
 # ---------- 3. one at a time ----------
 # An operator who sees nothing happen double-clicks again. Two concurrent runs raced each other
@@ -273,6 +363,22 @@ if [ "${#BKS[@]}" -gt "$KEEP_BACKUPS" ]; then
   for ((i = 0; i < ${#BKS[@]} - KEEP_BACKUPS; i++)); do
     rm -rf "${BKS[$i]:?}"
   done
+fi
+
+if [ "$UNATTENDED" = "1" ]; then
+  log "✓ อัปเดตเป็น $NEWVER เรียบร้อย — สำรองไว้ที่ backups/$STAMP"
+  if [ "$RELAUNCH" = "1" ]; then
+    log "เปิดแอปใหม่"
+    open "$TARGET/IntroPlayerNative.app" 2>/dev/null
+  fi
+  # The staged copy lives under the system temp dir and is the parent of this script, so clean it
+  # up on the way out — but only when it IS a temp path, never a folder the operator unzipped.
+  case "$SRC" in
+    /private/var/folders/*|/var/folders/*|/private/tmp/*|/tmp/*)
+      ( sleep 2; rm -rf "${SRC:?}" ) >/dev/null 2>&1 &
+      ;;
+  esac
+  exit 0
 fi
 
 ans="$(say "อัปเดตเป็น $NEWVER เรียบร้อย\n\nโฟลเดอร์: $TARGET\nโจทย์ · log · เพลง: ไม่ถูกแตะ\nไฟล์ชุดเดิม + สำเนาข้อมูล: backups/$STAMP\n\nลบโฟลเดอร์ที่แตก zip ทิ้งได้เลย" "ปิด" "เปิดโฟลเดอร์" "เปิดแอป")"

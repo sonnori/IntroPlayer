@@ -19,7 +19,7 @@ struct IntroPlayerApp: App {
         let flags = ["--analyse", "--rescantest", "--resetflow", "--resettest", "--playtest",
                      "--columns", "--handoff", "--preflight", "--titles",
                      "--previewtest", "--timefmt", "--overview", "--remodetest", "--takes",
-                     "--updatecheck"]
+                     "--updatecheck", "--updatestage"]
         if !diag, let f = CommandLine.arguments.first(where: flags.contains) {
             FileHandle.standardError.write("\(f) needs INTROPLAYER_DIAG=1\n".data(using: .utf8)!)
             exit(2)
@@ -71,6 +71,10 @@ struct IntroPlayerApp: App {
         }
         if CommandLine.arguments.contains("--updatecheck") {
             Diagnostics.updateCheck()
+            exit(0)
+        }
+        if CommandLine.arguments.contains("--updatestage") {
+            Diagnostics.updateStage()
             exit(0)
         }
         if CommandLine.arguments.contains("--timefmt") {

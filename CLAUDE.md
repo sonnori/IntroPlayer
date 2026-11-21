@@ -236,7 +236,7 @@ native/
     ├── Handoff.swift      round.json, pre-flight checks, import plan/diff (§8e)
     ├── HandoverPanel.swift export sheet, diff/accept sheet, receive banner
     ├── Version.swift      the stamped version, and the NUMERIC semver compare (§15)
-    ├── Updater.swift      manifest fetch + the install-location breadcrumb (§15)
+    ├── Updater.swift      manifest fetch, download/verify/apply, breadcrumb (§15)
     ├── AboutPanel.swift   About sheet, update banner, schema-ahead banner (§15)
     ├── Typography.swift   the Thai font cascade and type scale (§6d). NOTE: `Palette`
     │                      itself lives in WaveformView.swift, not here.
@@ -251,7 +251,7 @@ native/
 ./native/build.sh          # release, universal (arm64 + x86_64)
 ./native/build.sh debug    # this machine's arch only, for iterating
 ./native/release.sh        # build + package dist/IntroPlayer-<ver>.zip to hand over — §15
-./native/installer-test.sh # 79 assertions on the installer; needs dist/ — §15
+./native/installer-test.sh # 110 assertions on the installer; needs dist/ — §15
 ```
 
 `build.sh` assembles into `IntroPlayerNative.app.new` and swaps at the end, so a failure part-way
@@ -277,6 +277,7 @@ INTROPLAYER_DIAG=1 $BIN --takes        # take model self-check, then the real lo
 INTROPLAYER_DIAG=1 $BIN --timefmt      # typed-field parser: round-trip, accepts, rejects (read-only)
 INTROPLAYER_DIAG=1 $BIN --overview     # overview strip: same data as columnPeaks, caches independent
 INTROPLAYER_DIAG=1 $BIN --updatecheck  # semver compare, feed resolution, blocked URL schemes (§15)
+INTROPLAYER_DIAG=1 $BIN --updatestage  # download + unpack + verify a real release, then delete (§15)
 $BIN --version                         # NOT gated: writes nothing, and is the flag a support
                                        # call asks for
 ```
@@ -801,7 +802,11 @@ Keyed by **path relative to `songs/`** (a bare filename for loose files). Exampl
     "schema": 1,              // config format; absent means 1. NEVER written lower than the
                               // value already in the file — §15
     "writtenBy": "1.1.0",     // which build last saved this folder — §15
-    "updateFeed": ""          // where to check for a newer build; empty = off — §15
+    "updateFeed": "",         // where to check for a newer build; empty = off — §15
+    "lastRanVersion": "1.1.0",// rewritten on every save; a difference on launch means the
+                              // update worked, and is the only way to SAY so — §15
+    "dismissedUpdate": "",    // version the operator waved off; survives a relaunch — §15
+    "dismissedSchema": 0      // schema number they have already been told about — §15
   },
   "EP01/SongA.m4a": {
     "introStart": 14.2,   // seconds; intro begins here
@@ -1305,11 +1310,12 @@ INTROPLAYER_DIAG=1 $BIN --timefmt     # typed-field parser
 INTROPLAYER_DIAG=1 $BIN --overview    # strip data matches columnPeaks; caches stay independent
 INTROPLAYER_DIAG=1 $BIN --preflight   # the handover checklist
 INTROPLAYER_DIAG=1 $BIN --updatecheck # semver compare + the configured feed (§15)
+INTROPLAYER_DIAG=1 $BIN --updatestage # the in-app chain minus the swap (needs a feed) (§15)
 $BIN --version                        # ungated
 
 # the release path — no project data is touched, dist/ and a temp dir only
 ./native/release.sh --allow-dirty     # 10 zip checks must all pass
-./native/installer-test.sh            # 79 assertions; data must come out byte-identical
+./native/installer-test.sh            # 110 assertions, 19 cases; data byte-identical
 
 # these WRITE — the cp above is not optional
 INTROPLAYER_DIAG=1 $BIN --resetflow   # must print "✓ ผ่าน" and keep every log event
@@ -1479,12 +1485,85 @@ release, not an executable.
   the automatic pass — it just sits in About. 5 s timeout.
 - `notes` is capped at 1200 chars and `download` at 500: they are text from outside the app going
   into a sheet, and a runaway string must not push the buttons off screen.
-- **It never downloads and never installs.** Replacing an unsigned bundle while it is running is a
-  Gatekeeper and reliability minefield, and doing it unattended on the machine that plays audio on
-  camera is unthinkable. The check raises a banner; the swap is a deliberate double-click.
+- The notice carries **อัปเดตเลย**, which installs it — see the next section. The manual
+  double-click path still exists and is the documented fallback.
 - `AppVersion.compare` is numeric per component. A string compare puts `"1.10.0"` *below*
   `"1.9.0"`, which would silently hide every release after the ninth — a bug that surfaces months
   later, on the machine of whoever is furthest behind. `--updatecheck` pins that case.
+
+### Installing from inside the app
+
+> Superseded: this used to read "it never downloads and never installs — the check raises a
+> banner; the swap is a deliberate double-click." That was a misreading of the scope, not a
+> safety finding. The constraints below are what the original caution was actually about, and
+> they are all still enforced.
+
+An app cannot replace its own running bundle, so the last step has to be another process. That
+process is the **same `ติดตั้ง-อัปเดต.command`** run with `--unattended`: the backups, the
+checked `rm`, the full rollback and the "ask the installed binary its version before claiming
+success" check are reused rather than reimplemented, which is why the 110 assertions cover the
+in-app path too.
+
+The chain, and every step of it can refuse:
+
+1. **Three refusals before anything is downloaded.** Not while `player.isPlaying` — the swap ends
+   in quitting the app, and a song may be on camera. Not when `needsNewerOS`. Not from an unzipped
+   release folder (`launchedFromRelease`), where there is no install to update.
+2. **Confirm**, through `confirmDestructive`, so Return and Space land on Cancel (§12). It names
+   the version and says the app will close and reopen itself.
+3. **Download** to a fresh dir under the system temp root, so a crash mid-way leaves nothing in
+   the operator's folder. A feed in a synced folder is already on disk, so that case is a copy and
+   needs no network. Progress is throttled to ~10 updates/s.
+4. **Verify, in three independent ways**, before anything is swapped: the zip's SHA-256 against
+   the manifest's (catches a truncated download or a half-synced Drive file — not an attacker,
+   since whoever can replace the zip can replace the manifest beside it); the bundle and installer
+   are present; and then it **runs the staged binary's `--version` and requires it to equal the
+   manifest's version**. That last one is what makes a one-click update defensible, and it is not
+   hypothetical — the first test of this chain used a manifest claiming 9.9.9 over a 1.1.0 zip and
+   the whole thing stopped there with the working app untouched.
+5. **Hand off and quit.** `Updater.apply` launches the installer detached with
+   `--wait-pid <our pid>`; `store.saveNow()` flushes first, because the debounced save would
+   otherwise still be pending. The installer waits for that pid to disappear (bounded at 30 s,
+   plus 0.5 s for the terminate-time write to land), swaps, and relaunches.
+
+**This path has no Gatekeeper step at all** — worth knowing, because it removes the most repeated
+friction in the whole feature. Quarantine is applied by whatever *downloads* a file (a browser,
+Drive's client), not by the kernel; a zip written by this app's own `URLSession` carries no flag.
+So the staged bundle runs and the installed one opens with no right-click → Open and no trip to
+System Settings. A release delivered as a hand-passed zip still needs that dance every time.
+
+`_settings.lastRanVersion` closes the loop. It is rewritten on every save, so a difference on
+launch means this is the first run of a new build — which is the only way the operator gets told
+the update *worked*. Without it the sole evidence is a notice that failed to appear, which is not
+something anybody can check.
+
+Three things that were wrong on the way here, all of which looked fine:
+
+- **The running check was too broad.** `pgrep -f "$APPEXE"` matches any instance anywhere, so the
+  unattended run refused whenever *another* copy was open — and in the in-app flow the app it was
+  refusing for was the one that had just quit. There are two scopes now: `running_anywhere` is an
+  early courtesy refusal in the attended flow, and `running_in_target` is the load-bearing one,
+  checked after the target is known. A different install elsewhere on the disk is none of our
+  business; two folders have two `config.json`s, so §12's clobber does not apply.
+- **The progress callback was `@MainActor`.** `fetchZip` is a non-isolated async func, so it runs
+  on the generic executor — and a main-actor callback from there deadlocks any caller blocking the
+  main thread, which is exactly what a headless diagnostic does. The callback is plain now and the
+  UI hops to main itself.
+- **Unattended answered its own dialogs with the wrong button.** `say` returned the *first*
+  argument, which is the cancel slot by this script's convention, so the unattended run cancelled
+  itself; and the confirm block ran regardless of mode, so it reached a dialog at all. It returns
+  `${!#}` — the default, what Return would do — and both target-resolution dialogs are gated on
+  attended.
+
+```bash
+INTROPLAYER_DIAG=1 $BIN --updatestage   # fetch → download → unpack → verify, then delete
+```
+
+`--updatestage` is the whole chain except the swap, against whatever `_settings.updateFeed`
+points at. It needs a feed holding a real `manifest.json` + zip whose version is higher than the
+running build; point it at a folder and it prints exactly what the installer *would* be invoked
+as. The swap itself is covered by `installer-test.sh`, which can test it without quitting
+anything.
 
 ### Cutting a release
 
@@ -1580,15 +1659,18 @@ so the shell aborts rather than running the command if either variable is someho
 ./native/installer-test.sh     # needs dist/ — run ./native/release.sh first
 ```
 
-**79 assertions** against the real script with `osascript`/`pgrep` stubbed, so **production code
-is tested unmodified**. It proves the promise the feature rests on by hash: `config.json`,
+**110 assertions** against the real script with `osascript`/`pgrep`/`open` stubbed, so
+**production code is tested unmodified**. It proves the promise the feature rests on by hash: `config.json`,
 `log.json`, `songs/` and a customised `se/correct.mp3` come out byte-identical. 14 cases: the
 app-running refusal, the web-server warning (including that Cancel is the default button), the
 cancel, a full update (asserting *every* program file was replaced), a mid-copy failure (asserting
 every program file came *back*), install-onto-itself directly and through a symlink, a stale
 breadcrumb pointing at a download, a folder that merely contains `songs/`, a fresh install that
 completes, a fresh install whose source is unreadable, a path with spaces + Thai + a quote,
-the concurrency lock, dialogs denied by TCC, and backup pruning.
+the concurrency lock, dialogs denied by TCC, backup pruning — and five for `--unattended`: the
+in-app swap (data by hash, relaunch called, no dialog opened, log written), a missing `--target`,
+a `--target` that is not an install, an app still running *in the target*, and a `--wait-pid`
+that is already gone.
 
 > The stub answers dialogs from a **queue**, which matters: a single fixed answer meant any flow
 > with two questions — the entire fresh-install branch, the branch where rollback was disarmed —

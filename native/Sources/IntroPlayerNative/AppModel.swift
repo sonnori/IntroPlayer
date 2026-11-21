@@ -61,6 +61,13 @@ final class AppModel: ObservableObject {
     /// True when this bundle was launched from an unzipped RELEASE folder rather than an install.
     /// Computed once at startup, never from `body` — see `Updater.manifestLocation`.
     private(set) var launchedFromRelease = false
+
+    // The in-app install (§15). Progress is -1 while the length is unknown.
+    @Published var updateInstalling = false
+    @Published var updateProgress: Double = 0
+    @Published var updateStep = ""
+    /// Set on the launch right after a successful update, so the operator gets told it worked.
+    @Published var justUpdatedFrom: String?
     @Published var setterName = ""
 
     // MARK: two-press confirmation
@@ -197,6 +204,17 @@ final class AppModel: ObservableObject {
         // like §8c's "the app can't find my songs". Detected once, here, never from `body`.
         launchedFromRelease = FileManager.default.fileExists(
             atPath: AppPaths.root.appendingPathComponent("ติดตั้ง-อัปเดต.command").path)
+        // The other half of the update loop. `lastRanVersion` is rewritten on every save, so a
+        // difference here means this launch is the first on a new build.
+        let seen = store.lastRanVersion
+        if !seen.isEmpty, seen != AppVersion.short {
+            justUpdatedFrom = seen
+            // Clear the wave-off so a notice for the version we are now ON cannot linger.
+            if store.dismissedUpdate == AppVersion.short {
+                store.dismissedUpdate = ""
+            }
+            store.settingsChanged()
+        }
         // So the installer can find this folder without asking the operator to navigate to it.
         InstallLocation.record()
         checkForUpdateOnLaunch()
@@ -919,6 +937,97 @@ final class AppModel: ObservableObject {
                 updateState = "เช็กไม่ได้ — \(error.localizedDescription)"
                 if manual { flash("เช็กเวอร์ชั่นไม่ได้") }
             }
+        }
+    }
+
+    /// Download → verify → hand the swap to the installer → quit. It relaunches us.
+    ///
+    /// Three refusals before anything is downloaded, in order of how bad they are:
+    /// **never while playing** (the swap ends in quitting the app, and a song is on camera),
+    /// never onto a macOS the build cannot run on, and never from an unzipped release folder —
+    /// there is no install there to update.
+    func installUpdate() {
+        guard let u = updateInfo, !updateInstalling else { return }
+        if player.isPlaying {
+            updateState = "หยุดเพลงก่อน แล้วค่อยกดอัปเดต — การอัปเดตต้องปิดแอป"
+            return
+        }
+        if u.needsNewerOS {
+            updateState = "เวอร์ชั่นนี้ต้องใช้ macOS \(u.minMacOS) — เครื่องนี้ใช้ไม่ได้"
+            return
+        }
+        if launchedFromRelease {
+            updateState = "แอปนี้เปิดจากโฟลเดอร์ที่แตก zip — ปิดแล้วรัน ติดตั้ง-อัปเดต.command แทน"
+            return
+        }
+        guard u.openable != nil else {
+            updateState = "ชุดอัปเดตนี้ไม่ได้บอกที่อยู่ไฟล์ — แจ้งคนดูแล"
+            return
+        }
+        // Return/Space land on Cancel (§12). This one quits the app, so it earns the guard even
+        // though the operator pressed the button that opened it.
+        guard confirmDestructive(
+            title: "อัปเดตเป็นเวอร์ชั่น \(u.version)?",
+            body: "แอปจะโหลดไฟล์ ตรวจไฟล์ แล้ว **ปิดตัวเองเพื่อสลับตัวโปรแกรม** "
+                + "และเปิดขึ้นมาใหม่ให้เอง\n\n"
+                + "โจทย์ที่ตั้งไว้ · log การถ่าย · ไฟล์เพลง ไม่ถูกแตะ "
+                + "และจะสำรองไว้ใน backups/ ก่อนเสมอ\n\n"
+                + "อย่าทำตอนกำลังถ่าย",
+            ok: "ปิดแอปแล้วอัปเดต") else { return }
+
+        updateInstalling = true
+        updateProgress = 0
+        updateStep = "กำลังโหลดไฟล์…"
+        updateState = ""
+        Task { @MainActor in
+            var scratch: URL?
+            do {
+                let dir = try Updater.scratch()
+                scratch = dir
+                // The callback arrives on the download's executor, not main, so hop
+                // explicitly. Throttled to ~10/s inside fetchZip, so this is ~10 tasks a second.
+                // No `[weak self]`: the enclosing Task already holds self strongly, and mixing
+                // the two is what the ImplicitStrongCapture warning is about.
+                let zip = try await Updater.fetchZip(u, into: dir) { f in
+                    Task { @MainActor in self.updateProgress = f }
+                }
+                updateStep = "กำลังตรวจไฟล์ที่โหลดมา…"
+                updateProgress = -1
+                // Off the main actor: ditto on a 2 MB bundle plus running the staged binary is
+                // ~1 s of synchronous work, and the window must not freeze during it.
+                let staged = try await Task.detached(priority: .userInitiated) {
+                    try Updater.stage(zip: zip, in: dir, expecting: u)
+                }.value
+                updateStep = "กำลังสลับตัวโปรแกรม…"
+                // Flush before handing over. The installer waits for this process to exit, but
+                // the debounced save would otherwise still be pending when it does.
+                store.saveNow()
+                try Updater.apply(staged: staged,
+                                  target: AppPaths.root,
+                                  waitPid: ProcessInfo.processInfo.processIdentifier)
+                updateStep = "กำลังปิดแอป — เดี๋ยวมันจะเปิดขึ้นมาใหม่เอง"
+                // Let the child reach its wait loop before we vanish.
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                NSApp.terminate(nil)
+            } catch {
+                if let d = scratch { try? FileManager.default.removeItem(at: d) }
+                updateInstalling = false
+                updateProgress = 0
+                updateStep = ""
+                // Reported in the sheet, never as a toast: the toast is an overlay on the window
+                // content, which a sheet covers.
+                updateState = "อัปเดตไม่สำเร็จ — \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Opens the installer's log. The only report an unattended failure can leave.
+    func openUpdateLog() {
+        let f = Updater.installLog
+        if FileManager.default.fileExists(atPath: f.path) {
+            NSWorkspace.shared.open(f)
+        } else {
+            updateState = "ยังไม่มี log การอัปเดต"
         }
     }
 

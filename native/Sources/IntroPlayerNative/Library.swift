@@ -585,6 +585,80 @@ enum Diagnostics {
         print(ok ? "\n✓ ผ่าน" : "\n✗ ไม่ผ่าน")
     }
 
+    /// The whole in-app update chain except the final swap: fetch the manifest, download (or
+    /// copy) the zip, unpack it, and prove the app inside reports the version the manifest
+    /// promised. The swap itself is covered by `installer-test.sh`, which can test it without
+    /// quitting anything.
+    ///
+    /// Read-only with respect to the project: everything lands in a temp dir and is deleted.
+    /// Point `_settings.updateFeed` at a folder holding a real `manifest.json` + zip to run it.
+    static func updateStage() {
+        print("this build: \(AppVersion.full)")
+        print("macOS:      \(UpdateInfo.runningOS)")
+        let feed = Store().updateFeed
+        guard !feed.isEmpty else {
+            print("\nยังไม่ได้ตั้ง _settings.updateFeed — ไม่มีอะไรให้ทดสอบ")
+            print("ตั้งเป็น path ของโฟลเดอร์ที่มี manifest.json + zip แล้วรันอีกครั้ง")
+            return
+        }
+        print("feed:       \(feed)")
+        var ok = true
+        let sem = DispatchSemaphore(value: 0)
+        Task {
+            defer { sem.signal() }
+            do {
+                guard let info = try await Updater.check(feed: feed) else {
+                    print("\n→ ไม่มีเวอร์ชั่นใหม่กว่า \(AppVersion.short) — ไม่มีอะไรให้ stage")
+                    print("   (ถ้าจะทดสอบ ให้แก้ version ใน manifest.json ให้สูงกว่านี้)")
+                    return
+                }
+                print("\nmanifest")
+                print("  version   \(info.version)")
+                print("  download  \(info.download)")
+                print("  sha256    \(info.sha256.isEmpty ? "— (ไม่มีใน manifest)" : info.sha256)")
+                print("  minMacOS  \(info.minMacOS.isEmpty ? "—" : info.minMacOS)\(info.needsNewerOS ? "  ✗ เครื่องนี้ใช้ไม่ได้" : "")")
+                print("  openable  \(info.openable?.path ?? info.openable?.absoluteString ?? "✗ ถูกบล็อก")")
+                guard info.openable != nil else { ok = false; return }
+
+                let dir = try Updater.scratch()
+                defer { try? FileManager.default.removeItem(at: dir) }
+
+                var ticks = 0
+                let t0 = Date()
+                let zip = try await Updater.fetchZip(info, into: dir) { _ in ticks += 1 }
+                let dl = Date().timeIntervalSince(t0)
+                let size = ((try? FileManager.default
+                    .attributesOfItem(atPath: zip.path))?[.size] as? Int) ?? 0
+                print("\nดาวน์โหลด")
+                print(String(format: "  %.2f MB in %.2fs  (%d progress ticks)",
+                             Double(size) / 1_048_576, dl, ticks))
+
+                let t1 = Date()
+                let staged = try Updater.stage(zip: zip, in: dir, expecting: info)
+                print(String(format: "\nแตกไฟล์ + ตรวจ  %.2fs", Date().timeIntervalSince(t1)))
+                print("  staged at \(staged.lastPathComponent)")
+                let fm = FileManager.default
+                for f in ["IntroPlayerNative.app", Updater.installerName, "VERSION", "server.py"] {
+                    let there = fm.fileExists(atPath: staged.appendingPathComponent(f).path)
+                    print("  \(there ? "ok  " : "✗   ")\(f)")
+                    if !there { ok = false }
+                }
+                print("  ✓ แอปที่แตกออกมาตอบเวอร์ชั่น \(info.version) ตรงกับ manifest")
+                print("\nถ้ากดอัปเดตจริง จะเรียก:")
+                print("  bash \(staged.appendingPathComponent(Updater.installerName).path) \\")
+                print("    --unattended --target \(AppPaths.root.path) --wait-pid <pid> --relaunch")
+            } catch {
+                ok = false
+                print("\n✗ \(error.localizedDescription)")
+            }
+        }
+        if sem.wait(timeout: .now() + 960) == .timedOut {
+            ok = false
+            print("\n✗ ค้าง ไม่เสร็จในเวลา")
+        }
+        print(ok ? "\n✓ ผ่าน" : "\n✗ ไม่ผ่าน")
+    }
+
     static func timeFmt() {
         print("round-trip  fmtClock -> parseClock")
         var ok = true

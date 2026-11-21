@@ -27,13 +27,14 @@ import SwiftUI
 struct NewsBanner: View {
     @EnvironmentObject var model: AppModel
 
-    private enum Item { case wrongFolder, update, schema }
+    private enum Item { case wrongFolder, update, justUpdated, schema }
 
     /// Priority order. Only the first is shown; the rest are a count.
     private var items: [Item] {
         var out: [Item] = []
         if model.launchedFromRelease { out.append(.wrongFolder) }
-        if model.showUpdateNotice { out.append(.update) }
+        if model.updateInstalling || model.showUpdateNotice { out.append(.update) }
+        if model.justUpdatedFrom != nil { out.append(.justUpdated) }
         if model.showSchemaNotice { out.append(.schema) }
         return out
     }
@@ -55,27 +56,7 @@ struct NewsBanner: View {
                     .help("มีเรื่องแจ้งอีก \(more) อย่าง — ดูที่หน้าเกี่ยวกับแอป")
             }
             Spacer(minLength: 8)
-            Button { model.showAbout = true } label: {
-                Text(item == .wrongFolder ? "ดูวิธีแก้" : "ดูรายละเอียด")
-                    .font(Typo.font(12, .semibold))
-                    .padding(.horizontal, 12).padding(.vertical, 6)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(PressStyle(corner: 7))
-            .background(Color.black.opacity(0.25))
-            .clipShape(RoundedRectangle(cornerRadius: 7))
-            // No dismiss for wrongFolder: nothing in the app works from that folder, so hiding
-            // the only thing that explains why would be the worst possible kindness.
-            if item != .wrongFolder {
-                Button { dismiss(item) } label: {
-                    Text("ไว้ก่อน").font(Typo.font(11))
-                        .padding(.horizontal, 8).padding(.vertical, 6)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(PressStyle(corner: 7))
-                .foregroundStyle(Palette.text.opacity(0.7))
-                .help("ปิดแถบนี้ — เลขเวอร์ชั่นในรายชื่อเพลงจะยังเป็นสีฟ้าไว้เตือน")
-            }
+            buttons(item)
         }
         .padding(.horizontal, 18).padding(.vertical, 9)
         .frame(maxWidth: .infinity)
@@ -90,17 +71,58 @@ struct NewsBanner: View {
     private func glyph(_ i: Item) -> String {
         switch i {
         case .wrongFolder: return "⚠"
-        case .update: return "⬆"
+        case .update: return model.updateInstalling ? "⟳" : "⬆"
+        case .justUpdated: return "✓"
         case .schema: return "ℹ"
         }
     }
 
-    private func dismiss(_ i: Item) {
+    @ViewBuilder private func buttons(_ i: Item) -> some View {
         switch i {
-        case .update: model.dismissUpdateNotice()
-        case .schema: model.dismissSchemaNotice()
-        case .wrongFolder: break
+        case .wrongFolder:
+            // No dismiss: nothing in the app works from that folder, so hiding the only thing
+            // that explains why would be the worst possible kindness.
+            pill("ดูวิธีแก้", prominent: false) { model.showAbout = true }
+        case .update:
+            if model.updateInstalling {
+                // Nothing to press. A cancel button here would have to abort a swap that may
+                // already be under way in another process.
+                EmptyView()
+            } else {
+                // This is the button the whole feature is for: one press, one confirm, done.
+                pill("อัปเดตเลย", prominent: true) { model.installUpdate() }
+                pill("รายละเอียด", prominent: false) { model.showAbout = true }
+                dismissPill { model.dismissUpdateNotice() }
+            }
+        case .justUpdated:
+            pill("มีอะไรใหม่", prominent: false) { model.showAbout = true }
+            dismissPill { model.justUpdatedFrom = nil }
+        case .schema:
+            pill("ดูรายละเอียด", prominent: false) { model.showAbout = true }
+            dismissPill { model.dismissSchemaNotice() }
         }
+    }
+
+    private func pill(_ t: String, prominent: Bool, _ act: @escaping () -> Void) -> some View {
+        Button(action: act) {
+            Text(t).font(Typo.font(12, .semibold))
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle(corner: 7))
+        .background(prominent ? Palette.cyan.opacity(0.42) : Color.black.opacity(0.25))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+    }
+
+    private func dismissPill(_ act: @escaping () -> Void) -> some View {
+        Button(action: act) {
+            Text("ไว้ก่อน").font(Typo.font(11))
+                .padding(.horizontal, 8).padding(.vertical, 6)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle(corner: 7))
+        .foregroundStyle(Palette.text.opacity(0.7))
+        .help("ปิดแถบนี้ — เลขเวอร์ชั่นในรายชื่อเพลงจะยังเป็นสีฟ้าไว้เตือน")
     }
 
     @ViewBuilder private func content(_ i: Item) -> some View {
@@ -112,7 +134,11 @@ struct NewsBanner: View {
                 .font(Typo.font(12)).foregroundStyle(Palette.text)
                 .layoutPriority(-1).lineLimit(1)
         case .update:
-            if let u = model.updateInfo {
+            if model.updateInstalling {
+                Text(model.updateStep.isEmpty ? "กำลังอัปเดต…" : model.updateStep)
+                    .font(Typo.font(13, .bold))
+                progressBar
+            } else if let u = model.updateInfo {
                 Text("มีเวอร์ชั่นใหม่ \(u.version)").font(Typo.font(13, .bold))
                 Text("· ตอนนี้ใช้ \(AppVersion.display)")
                     .font(Typo.font(12)).foregroundStyle(Palette.text.opacity(0.85))
@@ -123,18 +149,41 @@ struct NewsBanner: View {
                     // `layoutPriority(-1)` is load-bearing. SwiftUI shares a width shortfall out
                     // in proportion to ideal widths, so a 1200-char note (the cap) has a ~7000 pt
                     // ideal and dominated the row: the VERSION NUMBER truncated to "มีเวอร์ชั่นใ…"
-                    // and both buttons collapsed to ellipses. Capping the string bounded the
+                    // and the buttons collapsed to ellipses. Capping the string bounded the
                     // string, not the layout.
                     Text("· \(u.notes)")
                         .font(Typo.font(12)).foregroundStyle(Palette.text.opacity(0.75))
                         .layoutPriority(-1).lineLimit(1)
                 }
             }
+        case .justUpdated:
+            // Cyan, not green. §6d gives green exactly one meaning — "a human answered
+            // correctly" — and this strip sits in the same visual field as ✓ Correct, 60 pt
+            // above the transport. The glyph and the word carry "it worked" without spending
+            // the hue that the outcome pair depends on.
+            Text("อัปเดตเป็น \(AppVersion.display) แล้ว").font(Typo.font(13, .bold))
+            Text("· จากเวอร์ชั่น \(model.justUpdatedFrom ?? "—") · โจทย์และ log อยู่ครบ")
+                .font(Typo.font(12)).foregroundStyle(Palette.text.opacity(0.85))
+                .layoutPriority(-1).lineLimit(1)
         case .schema:
             Text("ไฟล์โจทย์เคยถูกเปิดด้วยแอปเวอร์ชั่นใหม่กว่า").font(Typo.font(13, .bold))
             Text("· เล่นและแก้ได้ปกติ ค่าที่แอปนี้ไม่รู้จักไม่ถูกลบ — แต่ควรอัปเดตให้ตรงกัน")
                 .font(Typo.font(12)).foregroundStyle(Palette.text.opacity(0.8))
                 .layoutPriority(-1).lineLimit(1)
+        }
+    }
+
+    /// Fixed width so the strip's height and the buttons' position do not move as it fills —
+    /// same reasoning as the transport buttons that used to slide (§12).
+    @ViewBuilder private var progressBar: some View {
+        if model.updateProgress >= 0 {
+            ProgressView(value: min(1, max(0, model.updateProgress)))
+                .progressViewStyle(.linear)
+                .frame(width: 180)
+            Text("\(Int(min(1, max(0, model.updateProgress)) * 100))%")
+                .font(Typo.numS).foregroundStyle(Palette.text.opacity(0.8))
+        } else {
+            ProgressView().progressViewStyle(.linear).frame(width: 180)
         }
     }
 }
@@ -338,19 +387,48 @@ struct AboutPanel: View {
                     .font(Typo.font(12, .semibold)).foregroundStyle(Palette.amber)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if model.updateInstalling {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(model.updateStep).font(Typo.font(13, .semibold))
+                        .foregroundStyle(Palette.text)
+                    if model.updateProgress >= 0 {
+                        HStack(spacing: 8) {
+                            ProgressView(value: min(1, max(0, model.updateProgress)))
+                                .progressViewStyle(.linear)
+                            Text("\(Int(min(1, max(0, model.updateProgress)) * 100))%")
+                                .font(Typo.numS).foregroundStyle(Palette.muted)
+                        }
+                    } else {
+                        ProgressView().progressViewStyle(.linear)
+                    }
+                    Text("อย่าปิดเครื่อง — แอปจะปิดตัวเองแล้วเปิดขึ้นมาใหม่")
+                        .font(Typo.font(11)).foregroundStyle(Palette.muted)
+                }
+            } else {
             HStack(spacing: 8) {
+                // The one-press path, and the reason the manual steps below are a *fallback*
+                // now rather than the procedure.
                 if u.openable != nil && !u.needsNewerOS {
+                    Button { model.installUpdate() } label: {
+                        Text("⬆ อัปเดตเลย").font(Typo.font(13, .bold))
+                            .padding(.horizontal, 16).padding(.vertical, 8).contentShape(Rectangle())
+                    }
+                    .buttonStyle(PressStyle(corner: 7))
+                    .background(Palette.cyan.opacity(0.42))
+                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(Palette.cyan.opacity(0.9))
+                        .allowsHitTesting(false))
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                    .foregroundStyle(Palette.text)
+                    .disabled(model.player.isPlaying)
                     Button {
                         note = model.openUpdateDownload() ?? ""
                     } label: {
-                        Text(u.isLocalFile ? "เปิดโฟลเดอร์ที่มีไฟล์" : "ดาวน์โหลด")
-                            .font(Typo.font(12, .semibold))
-                            .padding(.horizontal, 12).padding(.vertical, 6).contentShape(Rectangle())
+                        Text(u.isLocalFile ? "เปิดโฟลเดอร์ที่มีไฟล์" : "โหลดเอง")
+                            .font(Typo.font(12))
+                            .padding(.horizontal, 10).padding(.vertical, 6).contentShape(Rectangle())
                     }
                     .buttonStyle(PressStyle(corner: 7))
-                    .background(Palette.cyan.opacity(0.28))
-                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(Palette.cyan.opacity(0.7))
-                        .allowsHitTesting(false))
+                    .background(Palette.panel3)
                     .clipShape(RoundedRectangle(cornerRadius: 7))
                     .foregroundStyle(Palette.text)
                 } else if !u.download.isEmpty {
@@ -369,6 +447,12 @@ struct AboutPanel: View {
                 .background(Palette.panel3).clipShape(RoundedRectangle(cornerRadius: 7))
                 .foregroundStyle(Palette.text)
                 .disabled(model.updateChecking)
+            }
+            if model.player.isPlaying {
+                Text("⚠ กำลังเล่นเพลงอยู่ — กดอัปเดตไม่ได้ (การอัปเดตต้องปิดแอป) หยุดเพลงก่อน")
+                    .font(Typo.font(12, .semibold)).foregroundStyle(Palette.amber)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             }
         }
         .padding(12)
@@ -435,11 +519,23 @@ struct AboutPanel: View {
 
     private var howToUpdate: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text("วิธีอัปเดต").font(Typo.subhead).foregroundStyle(Palette.text)
+            HStack(spacing: 8) {
+                Text("ถ้าอัปเดตในแอปไม่ได้ — ทำมือ").font(Typo.subhead).foregroundStyle(Palette.text)
+                Spacer()
+                Button { model.openUpdateLog() } label: {
+                    Text("เปิด log การอัปเดต").font(Typo.font(11))
+                        .padding(.horizontal, 8).padding(.vertical, 4).contentShape(Rectangle())
+                }
+                .buttonStyle(PressStyle(corner: 5))
+                .foregroundStyle(Palette.muted)
+                .help("ตัวติดตั้งเขียนไว้ที่ ~/Library/Logs/IntroPlayer-update.log")
+            }
             // Said plainly and first, because it is the thing the operator is actually worried
             // about. The questions are siblings of the bundle, never inside it (§5).
+            // Cyan, not green: §6d gives green one meaning only ("a human answered correctly")
+            // and this app's two biggest buttons depend on that pair not being diluted.
             Text("โจทย์ที่ตั้งไว้ · log การถ่าย · ไฟล์เพลง — ไม่ถูกแตะเลย ตัวอัปเดตเปลี่ยนแค่ตัวแอป")
-                .font(Typo.font(12, .medium)).foregroundStyle(Palette.greenText)
+                .font(Typo.font(12, .medium)).foregroundStyle(Palette.cyan)
             step(1, "ปิดแอปก่อน (Cmd+Q) — ห้ามอัปเดตตอนกำลังถ่าย")
             step(2, "แตกไฟล์ zip ที่ได้มา (ดับเบิลคลิก)")
             step(3, "ดับเบิลคลิก ติดตั้ง-อัปเดต.command ในโฟลเดอร์ที่แตกออกมา")
