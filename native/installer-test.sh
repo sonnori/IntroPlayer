@@ -235,7 +235,9 @@ check "exit 0 (rc=$rc)" '[ "$rc" = "0" ]'
 check "บอกว่าเรียบร้อย" 'grep -q "เรียบร้อย" "$BASE/log9"'
 check "แอปรันได้ และตอบเวอร์ชั่นถูก" '[ "$("$N/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 | cut -d" " -f1)" = "$VER" ]'
 check "สร้าง songs/ ให้" '[ -d "$N/songs" ]'
-check "วาง se/ ให้" '[ -f "$N/se/correct.mp3" ]'
+# The folder and its instructions — not the audio. The stings are not redistributed, so a
+# fresh install starts silent on purpose and se/README.txt is what tells the operator why.
+check "วาง se/ + คำอธิบาย ให้" '[ -f "$N/se/README.txt" ]'
 check "เขียน breadcrumb ได้ ทั้งที่โฟลเดอร์ยังไม่เคยมี" '[ "$(head -1 "$BASE/home/Library/Application Support/IntroPlayer/location")" = "$(cd "$N" && pwd -P)" ]'
 check "ไม่สร้าง config.json/log.json ขึ้นมาเอง" '[ ! -e "$N/config.json" ] && [ ! -e "$N/log.json" ]'
 
