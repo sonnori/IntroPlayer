@@ -360,9 +360,21 @@ enum InstallLocation {
     private static let transientRoots = ["/private/tmp/", "/tmp/", "/private/var/folders/",
                                          "/var/folders/", "/Volumes/"]
 
+    /// True for anything inside a `backups/` directory. The installer moves the previous
+    /// bundle there, and macOS Dock entries follow a same-volume move — so the operator's
+    /// existing icon opens the OLD app with `AppPaths.root` set to the backup folder. That
+    /// folder has a `config.json` (the installer copied one in) but no `songs/`, which looks
+    /// exactly like §8c's "the app can't find my songs". Recording it would then point every
+    /// later marker edit, log event and update at a directory `KEEP_BACKUPS` pruning deletes
+    /// three updates later. `installer.command` rejects the same shape from the other side.
+    private static func inBackups(_ path: String) -> Bool {
+        ("/" + path + "/").contains("/backups/")
+    }
+
     static func record() {
         let root = AppPaths.root.path
         guard !transientRoots.contains(where: { root.hasPrefix($0) }) else { return }
+        guard !inBackups(root) else { return }
         // A bundle opened from a Downloads folder or an unzipped release has neither of these.
         // The installer writes the breadcrumb itself on a fresh install, so nothing is lost by
         // declining to guess here.

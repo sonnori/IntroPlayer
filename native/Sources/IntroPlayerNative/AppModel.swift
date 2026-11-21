@@ -261,7 +261,21 @@ final class AppModel: ObservableObject {
         // Otherwise the centre pane keeps playing a song from the round you just left, and
         // Correct/Wrong logs it under THAT round's playlist.
         if let cur = current, Library.playlist(of: cur) == p { return }
-        if let first = songsIn(p).first { select(first) } else { current = nil; analysis = nil }
+        if let first = songsIn(p).first {
+            select(first)
+        } else {
+            // An EMPTY round (a setter making `songs/EP06/` before copying files into it —
+            // §8c says the app rescans on activation and names new rounds). Dropping `current`
+            // while the player runs leaves `configProvider` answering with a DEFAULT config,
+            // so the live guard silently switches to `introEnd: 15, ignoreEnd: false`: a song
+            // deliberately set to ignore the stop gets cut at 15 s, and one whose playhead is
+            // already past 15 takes `beginFade`'s "already late" branch — an instant cut and
+            // the playhead jumping backwards. Stop first; nothing should be playing from a
+            // round that no longer has a selected song.
+            player.pause()
+            current = nil
+            analysis = nil
+        }
     }
 
     // MARK: - selection
@@ -286,6 +300,10 @@ final class AppModel: ObservableObject {
             refreshGain()
             player.seek(to: c.introStart, config: c)
             zoomIntro()
+            // Re-selecting a cached song must still be able to finish a guess that an earlier
+            // visit did not. This branch used to `return` before reaching the guess at all, so
+            // once a song had been looked at and arrowed past, nothing could ever guess it.
+            if !c.isConfigured { guessRest(path, duration: hit.duration) }
             return
         }
         analysis = nil
@@ -605,54 +623,161 @@ final class AppModel: ObservableObject {
     var secondsToStop: Double? { secondsToIntroEnd }
 
     /// Paths a full guess has already been attempted for this session, so arrowing back and
-    /// forth does not re-run an FFT per visit.
+    /// forth does not re-run an FFT per visit. Recorded only once the work has actually
+    /// FINISHED — marking before it starts, with a single shared task slot, meant holding ↓
+    /// through a round marked every song done while cancelling all but the last, so Intro End
+    /// and Hook were never guessed for any song except the one you stopped on. That is the
+    /// entire point of the feature, silently not happening.
     private var autoGuessed = Set<String>()
-    private var guessTask: Task<Void, Never>?
+    /// One task PER PATH, so arrowing on does not cancel a guess that is nearly finished.
+    ///
+    /// Cost is ~0.25 s per song in RELEASE. Be careful measuring this: the same pass takes
+    /// ~5 s in a debug build, and `build.sh debug` is what sits in the tree while iterating —
+    /// a figure read off a debug diagnostic is 20x out and would argue for a design this
+    /// does not need.
+    private var guessTasks: [String: Task<Void, Never>] = [:]
 
     /// Intro End and Hook, guessed. Everything it writes stays `auto`, so the song remains in
     /// the `Return`/`Tab` review sweep and in the pre-flight warnings until a human confirms it.
     ///
-    /// `manual` runs it even for a configured song and tells the operator what happened — the
-    /// automatic pass is deliberately silent, because a toast per song while arrowing through a
-    /// round is noise.
+    /// `manual` runs it even for a configured song, pushes an undo entry first, and tells the
+    /// operator what happened. The automatic pass is silent — a toast per song while arrowing
+    /// through a round is noise.
     func guessRest(_ path: String, duration: Double, manual: Bool = false) {
         if !manual && autoGuessed.contains(path) { return }
-        autoGuessed.insert(path)
-        guessTask?.cancel()
+        if guessTasks[path] != nil && !manual { return }
+        guessTasks[path]?.cancel()
         let url = Library.url(path)
-        guessTask = Task.detached(priority: .utility) { [weak self] in
-            guard let f = AutoDetect.extract(url: url), !Task.isCancelled else {
-                if manual {
-                    await MainActor.run { self?.flash("วิเคราะห์เพลงนี้ไม่ได้") }
+        guessTasks[path] = Task.detached(priority: .utility) { [weak self] in
+            let f = AutoDetect.extract(url: url)
+            if Task.isCancelled { return }
+            guard let f else {
+                await MainActor.run {
+                    self?.guessTasks[path] = nil
+                    if manual { self?.flash("วิเคราะห์เพลงนี้ไม่ได้") }
                 }
                 return
             }
             await MainActor.run {
                 guard let self else { return }
-                // The song may have changed, or the setter may have started marking it while
-                // the FFT ran. Either way the guess is stale and must not overwrite them.
-                guard !self.store.config(for: path).isConfigured || manual else { return }
-                var c = self.store.config(for: path)
-                let end = AutoDetect.introEnd(features: f, from: c.introStart)
-                c.introEnd = (min(duration, max(c.introStart + 1, end)) * 100).rounded() / 100
-                var msg = String(format: "เดา Intro End = %.1fs", c.introEnd)
-                if let h = AutoDetect.hook(features: f, after: c.introEnd) {
-                    c.hook = (min(duration - 1, h.time) * 100).rounded() / 100
-                    msg += String(format: " · Hook = %.1fs", c.hook)
-                }
-                c.auto = true
-                self.store.set(c, for: path)
-                self.invalidateStatus()
-                if self.current == path { self.refreshGain() }
-                if manual { self.flash(msg + " — ตรวจดูอีกที") }
-                self.objectWillChange.send()
+                self.guessTasks[path] = nil
+                self.autoGuessed.insert(path)
+                self.applyGuess(path, features: f, duration: duration, manual: manual)
             }
+        }
+    }
+
+    /// The write half, on the main actor.
+    ///
+    /// **It refuses while that song is on air.** This is the one rule here that is not a
+    /// nicety: a background task moving Intro End under live playback is §10's forbidden
+    /// shape. Measured on the real library, song 102's guess is 11.0 s against a stored 15.0 —
+    /// so a guess landing ~5 s into a question would have cut the audio instantly and parked
+    /// the playhead backwards (if it moved inward), or let the node run to the OLD boundary
+    /// while the countdown read the new one (if it moved outward). Either way nobody pressed
+    /// anything. A guess is a convenience; there is never a reason to apply one mid-question.
+    private func applyGuess(_ path: String, features f: AutoDetect.Features,
+                            duration: Double, manual: Bool) {
+        if player.isPlaying && current == path {
+            autoGuessed.remove(path)       // try again next time the song is selected
+            if manual { flash("กำลังเล่นอยู่ — หยุดก่อนแล้วกด 🎯 อีกที") }
+            return
+        }
+        // The song may have been set up while the FFT ran. Re-read, and re-check, HERE.
+        let existing = store.config(for: path)
+        guard !existing.isConfigured || manual else { return }
+
+        // A round that has been signed off is past the point where guessing is anybody's job.
+        // Without this, an imported round whose songs are still `auto` (the pre-flight warns
+        // about that and deliberately does not block) gets its markers moved off `base` by a
+        // robot — producing magenta "แก้ที่กอง" badges for edits nobody made, which the return
+        // path then exports as the operator's decisions and the setter's diff sheet accepts by
+        // default. §8e's whole audit trail, laundered.
+        guard existing.base == nil || manual else { return }
+
+        let end = AutoDetect.introEnd(features: f, from: existing.introStart)
+        let hook = AutoDetect.hook(features: f, after: end)
+
+        // **Fill blanks only.** `isConfigured` returns false whenever `auto` is true, which is
+        // right for the green badge and WRONG as a licence to overwrite: the live config has
+        // song 102 at `auto: true` with `hook: 62.03` — a number no default produces, so a
+        // human put it there. It is `auto` only because `Store.decode` repaired its degenerate
+        // intro range and demoted it. Overwriting that hook would have destroyed the one copy
+        // of it in existence. So an automatic guess may only write a field that is still
+        // exactly at its default; a manual 🎯 may write anything, but asks first (SetupPanel).
+        let d = SongConfig.defaults
+        let mayWriteEnd = manual || SongConfig.same(existing.introEnd, d.introEnd)
+        let mayWriteHook = manual || SongConfig.same(existing.hook, d.hook)
+        guard mayWriteEnd || mayWriteHook else { return }
+
+        // Routed through the ordinary edit path so it inherits the clamps that keep
+        // `introEnd >= introStart + minIntro` (§12: `introStart == introEnd` makes
+        // `modeForPosition` return `.free` — the whole song on camera), the undo snapshot, and
+        // `remode`. `store.set` direct was the only marker write in the app that skipped all
+        // three.
+        let wasConfigured = existing.configured
+        withConfig(of: path) { c in
+            if mayWriteEnd { c.introEnd = (min(duration, end) * 100).rounded() / 100 }
+            if mayWriteHook, let h = hook {
+                c.hook = (max(0, min(duration - 1, h.time)) * 100).rounded() / 100
+            }
+        }
+        // `updateConfig` stamps `configured = true, auto = false` because a human edited. This
+        // is not a human. Restore the truth: a guess leaves the song needing review — and for
+        // a MANUAL run on an already-reviewed song, it must not silently un-review it either.
+        var after = store.config(for: path)
+        after.auto = !wasConfigured
+        after.configured = wasConfigured
+        store.set(after, for: path)
+        invalidateStatus()
+
+        // Only when this song is still the one on screen: the pass takes ~5.4 s, so a toast
+        // naming times is otherwise read as describing whatever is in front of the operator now.
+        if manual && current == path {
+            flash(String(format: "เดา Intro End = %.2fs · Hook = %.2fs — ตรวจดูอีกที",
+                         after.introEnd, after.hook))
+        }
+        objectWillChange.send()
+    }
+
+    /// Duration from the analysis cache, for a path that may no longer be selected.
+    private func cachedDuration(_ path: String) -> Double? {
+        analysisCache.first(where: { $0.path == path })?.a.duration
+    }
+
+    /// `updateConfig`, but for a named path rather than `current`. The guess finishes seconds
+    /// after it started, and the selection may have moved on in the meantime — writing to
+    /// `current` would then put one song's markers on another.
+    private func withConfig(of path: String, _ mutate: (inout SongConfig) -> Void) {
+        pushUndo(path, coalesce: false)
+        var c = store.config(for: path)
+        mutate(&c)
+        c.introStart = min(max(0, c.introStart), AppModel.maxTime)
+        c.introEnd = min(max(0, c.introEnd), AppModel.maxTime)
+        c.hook = min(max(0, c.hook), AppModel.maxTime)
+        if let d = cachedDuration(path), d > 0 {
+            c.introStart = min(c.introStart, d)
+            c.introEnd = min(c.introEnd, d)
+            c.hook = min(c.hook, d)
+        }
+        c.introEnd = max(c.introEnd, c.introStart + AppModel.minIntro)
+        c.configured = true
+        c.auto = false
+        store.set(c, for: path)
+        saveState = "saving…"
+        if current == path {
+            refreshGain()
+            player.remode(config: c)
         }
     }
 
     @discardableResult
     func applyAutoStart(_ path: String, analysis a: Analysis, manual: Bool) -> Bool {
         guard let t = a.detectIntroStart() else { return false }
+        // §12 records `copyConfig(from:)` overwriting signed-off fields "in one click with no
+        // undo entry" as a defect. This writes two markers; a manual run can write them over a
+        // reviewed song, and 🎯 sits 8 pt from the `−`/`+` nudges.
+        if manual { pushUndo(path, coalesce: false) }
         var c = store.config(for: path)
         let span = max(0.5, c.introEnd - c.introStart)     // keep the intro's length
         c.introStart = (t * 100).rounded() / 100
@@ -1070,6 +1195,7 @@ final class AppModel: ObservableObject {
                 guard let self else { return }
                 self.coverLoading.remove(path)
                 self.coverCache[path] = img
+                self.trimCoverCache()
                 if img != nil { self.objectWillChange.send() }
             }
         }
@@ -1080,23 +1206,71 @@ final class AppModel: ObservableObject {
         coverCache.removeValue(forKey: path)
     }
 
+    /// One full-size `NSImage` per song ever selected adds up; `analysisCache` is capped at 4
+    /// for the same reason. Keyed misses (`.some(nil)`) are cheap, so only images are counted.
+    private static let coverCacheMax = 40
+    private func trimCoverCache() {
+        guard coverCache.count > AppModel.coverCacheMax else { return }
+        // Cheap and good enough: drop the misses first, then clear. The next render re-resolves
+        // whatever is on screen, which is one or two songs.
+        coverCache = coverCache.filter { $0.value != nil }
+        if coverCache.count > AppModel.coverCacheMax { coverCache.removeAll() }
+    }
+
     /// Fetch covers for everything in the current round that has none.
     ///
     /// Explicitly a setter's action, never automatic: §1 says the app needs no internet, and a
     /// background fetch would make that false without anybody choosing it. Songs that already
     /// have a cover are skipped, so pressing it again after adding a few songs costs only those.
+    private var coverTask: Task<Void, Never>?
+
+    /// Stop a fetch in progress. A round of 60 with no embedded art is over three minutes of
+    /// requests at `Artwork.gapSeconds`, and there was no way to abort it.
+    func cancelCoverFetch() {
+        coverTask?.cancel()
+        coverTask = nil
+        coverFetching = false
+        coverProgress = ""
+        objectWillChange.send()
+    }
+
     func fetchCoversForRound() {
         guard !coverFetching else { return }
-        let paths = songsIn(currentPlaylist).filter { !Artwork.hasCover($0) }
-        guard !paths.isEmpty else { flash("มีปกครบทุกเพลงในรอบนี้แล้ว"); return }
+        // Never while a question is on air. §1 calls this machine offline by design, and the
+        // installer's own in-app update refuses for the same reason.
+        guard !player.isPlaying else { flash("กำลังเล่นอยู่ — หยุดก่อนแล้วค่อยดึงปก"); return }
+        let round = currentPlaylist
+        let candidates = songsIn(round)
         coverFetching = true
-        coverProgress = "0/\(paths.count)"
-        Task { [weak self] in
+        coverProgress = "…"
+        coverTask = Task { [weak self] in
+            // `hasCover` opens an AVURLAsset and decodes an image to answer a Bool, so running
+            // it for a whole round on the main actor beachballed the menu click. Off-main.
+            let paths = await Task.detached(priority: .utility) {
+                candidates.filter { !Artwork.hasCover($0) }
+            }.value
+            if Task.isCancelled { await MainActor.run { self?.cancelCoverFetch() }; return }
+            guard !paths.isEmpty else {
+                await MainActor.run {
+                    self?.cancelCoverFetch()
+                    self?.flash("มีปกครบทุกเพลงในรอบนี้แล้ว")
+                }
+                return
+            }
             var done = 0, failed = 0
+            var writeProblem: String?
             for p in paths {
                 if Task.isCancelled { break }
                 do { _ = try await Artwork.fetch(for: p); done += 1 }
-                catch { failed += 1 }
+                catch let e as Artwork.Failure {
+                    failed += 1
+                    // A failed WRITE is not a failed lookup. Reporting "หาไม่เจอ" for a
+                    // read-only volume or a full disk is §12's `saveNow() -> "saved ✓"` again:
+                    // the cheapest early signal that the folder holding config.json's siblings
+                    // cannot be written, caught and relabelled. Stop rather than repeat it 60x.
+                    if case .write = e { writeProblem = e.localizedDescription }
+                } catch { failed += 1 }
+                if writeProblem != nil { break }
                 await MainActor.run {
                     guard let self else { return }
                     self.forgetCover(p)
@@ -1106,12 +1280,19 @@ final class AppModel: ObservableObject {
                 // Spaced out on purpose — see `Artwork.gapSeconds`.
                 try? await Task.sleep(nanoseconds: UInt64(Artwork.gapSeconds * 1_000_000_000))
             }
+            let cancelled = Task.isCancelled
             await MainActor.run {
                 guard let self else { return }
+                self.coverTask = nil
                 self.coverFetching = false
                 self.coverProgress = ""
-                self.flash(failed == 0 ? "ได้ปกเพลงครบ \(done) เพลง"
-                                       : "ได้ปก \(done) เพลง · หาไม่เจอ \(failed) เพลง")
+                if let w = writeProblem { self.flash("เขียนไฟล์ปกไม่ได้ — \(w)") }
+                else if cancelled { self.flash("หยุดดึงปกแล้ว (ได้ \(done) เพลง)") }
+                // Only when the operator is still looking at the round this was about.
+                else if self.currentPlaylist == round {
+                    self.flash(failed == 0 ? "ได้ปกเพลงครบ \(done) เพลง"
+                                           : "ได้ปก \(done) เพลง · หาไม่เจอ \(failed) เพลง")
+                }
                 self.objectWillChange.send()
             }
         }

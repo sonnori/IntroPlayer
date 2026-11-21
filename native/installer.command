@@ -169,19 +169,34 @@ cancelled() { printf '\nยกเลิก — ไม่มีอะไรถู
 # the same config.json open, so swapping under it is §12's clobber with extra steps.
 _exe_paths() {
   printf '%s\n' "$APPEXE"
-  local l; for l in "${LEGACY[@]}"; do printf '%s\n' "$l/Contents/MacOS/IntroPlayerNative"; done
+  local l
+  for l in ${LEGACY[@]+"${LEGACY[@]}"}; do
+    printf '%s\n' "$l/Contents/MacOS/IntroPlayerNative"
+  done
+}
+# `grep -F` on `ps` output, NOT `pgrep -f`. `pgrep -f` takes an extended regex, and these
+# patterns are built from a path the operator chose: a folder called `IntroPlayer (สำรอง)` or
+# `IntroPlayer [2]` produces an uncompilable pattern, whereupon pgrep exits non-zero with no
+# output and the check fails OPEN — swapping files under a running app, which is §12's clobber
+# of config.json. The space in the bundle name is harmless either way; the brackets are not.
+_pid_matching() {
+  ps -Ao pid=,command= 2>/dev/null \
+    | grep -F -- "$1" \
+    | awk '{print $1}' \
+    | grep -vx -e "$$" -e "$PPID" \
+    | head -1
 }
 running_anywhere() {
   local e pid
   while IFS= read -r e; do
-    pid="$(pgrep -f "$e" 2>/dev/null | grep -vx -e "$$" -e "$PPID" | head -1)"
+    pid="$(_pid_matching "$e")"
     [ -n "$pid" ] && { printf '%s' "$pid"; return; }
   done < <(_exe_paths)
 }
 running_in_target() {
   local e pid
   while IFS= read -r e; do
-    pid="$(pgrep -f "$1/$e" 2>/dev/null | grep -vx -e "$$" -e "$PPID" | head -1)"
+    pid="$(_pid_matching "$1/$e")"
     [ -n "$pid" ] && { printf '%s' "$pid"; return; }
   done < <(_exe_paths)
 }
@@ -229,9 +244,23 @@ is_release_folder() {
   for f in "${RELEASE_MARKERS[@]}"; do [ -e "$d/$f" ] && return 0; done
   return 1
 }
+# A directory under backups/ is the THIRD shape that is not an install, after a release folder
+# and a folder that merely contains songs/. It looks like one to every other test: this script
+# puts a copy of config.json in there itself, and it holds no release marker.
+#
+# The way in is real. The old bundle is `mv`'d into backups/<stamp>/, and macOS Dock entries
+# follow a same-volume move — so the operator's existing Dock icon now opens the old app with
+# `AppPaths.root` = the backup folder. It has a config.json but no songs/, i.e. §8c's "the app
+# can't find my songs", and every marker and log event from then on is written into a directory
+# that KEEP_BACKUPS pruning deletes three updates later.
+is_in_backups() {
+  case "/$1/" in */backups/*) return 0 ;; esac
+  return 1
+}
 valid_target() {
   [ -n "${1:-}" ] && [ -d "$1" ] || return 1
   is_release_folder "$1" && return 1
+  is_in_backups "$1" && return 1
   [ -f "$1/config.json" ] || [ -d "$1/songs" ]
 }
 
@@ -336,27 +365,49 @@ done
 # LEGACY is in here too, so a bundle from an earlier release under a different name is set aside
 # with everything else — and is therefore restorable by `rollback`, which matters: on a failed
 # update the old bundle may be the ONLY working app on the machine.
-RESTORE=("${PROGRAM[@]}" "${LEGACY[@]}")
-for item in "${RESTORE[@]}"; do
-  if [ -e "$TARGET/$item" ]; then
-    mv "$TARGET/$item" "$BK/$item" || die "ย้าย $item ไปที่สำรองไม่ได้ — ไม่มีอะไรถูกเปลี่ยน"
-  fi
-done
+#
+# `${LEGACY[@]+...}` because bash 3.2 (what macOS ships) treats `"${EMPTY[@]}"` under `set -u`
+# as an unbound variable. That matters for the day someone writes "everyone has migrated, drop
+# the legacy list": `_exe_paths` runs inside process substitution, so the subshell would die,
+# `running_anywhere` would return EMPTY — failing OPEN on the very check that stops a swap
+# under a live app — and then this line would kill the script outright, after the backup
+# directory and the data copy, with `die` never reached and so no dialog at all.
+RESTORE=("${PROGRAM[@]}" ${LEGACY[@]+"${LEGACY[@]}"})
 
-# ---------- 5. swap ----------
-# ALWAYS dies. The previous version returned 0 when there was nothing to restore, so on a FRESH
+# ---------- 5. rollback, defined BEFORE anything moves ----------
+# ALWAYS dies. An earlier version returned 0 when there was nothing to restore, so on a FRESH
 # install `cp -R … || rollback` was satisfied by the rollback itself: the loop carried on past a
 # failed copy, and the operator was shown "เรียบร้อย" over an app bundle with no executable in it.
+#
+# Defined HERE, above the loop that moves things, because that loop used to `die` instead — and
+# `die` does not put back what the loop had already moved. On a machine past 1.3.0 `PROGRAM[0]`
+# is the native bundle and it moves first, so a failure on the next item left the target with
+# no native app AND no web launcher, while announcing "ไม่มีอะไรถูกเปลี่ยน".
 rollback() {
   local why="$1" item
   for item in "${RESTORE[@]}"; do
-    [ -e "$BK/$item" ] || continue
-    rm -rf "${TARGET:?}/${item:?}" 2>/dev/null
-    mv "$BK/$item" "$TARGET/$item" 2>/dev/null
+    if [ -e "$BK/$item" ]; then
+      rm -rf "${TARGET:?}/${item:?}" 2>/dev/null
+      mv "$BK/$item" "$TARGET/$item" 2>/dev/null
+    else
+      # Nothing was backed up under this name, so whatever sits there now is something THIS run
+      # installed. Leaving it was how a failed FIRST upgrade ended with the old bundle restored
+      # AND the new one in place: two app icons, possibly a half-copied bundle macOS calls
+      # "damaged", under a dialog claiming the original set had been restored.
+      [ -e "$TARGET/$item" ] && rm -rf "${TARGET:?}/${item:?}" 2>/dev/null
+    fi
   done
   die "$why\n\nคืนไฟล์ชุดเดิมให้แล้วทั้งหมด\nโจทย์ · log · เพลง ไม่ถูกแตะ\nสำเนาข้อมูลอยู่ที่: $BK"
 }
 
+# ---------- 6. move the old program files aside ----------
+for item in "${RESTORE[@]}"; do
+  if [ -e "$TARGET/$item" ]; then
+    mv "$TARGET/$item" "$BK/$item" || rollback "ย้าย $item ไปที่สำรองไม่ได้"
+  fi
+done
+
+# ---------- 7. swap ----------
 for item in "${PROGRAM[@]}"; do
   [ -e "$SRC/$item" ] || continue
   # `rm -rf`'s exit status was never checked, and when it fails on a DIRECTORY `cp -R src dst`

@@ -194,8 +194,10 @@ extension Diagnostics {
             // because the bar is dark red in both themes. Checking `ink` here reported a
             // failure against the palette when the mistake was in the check.
             let head = c("header", dark: dark)
-            let w = ColorMath.contrast(0xFFFFFF, head)
-            let warn = ColorMath.contrast(0xFFC53D, head)
+            // Read from the audit list, not re-typed. The list exists so the check measures the
+            // real value; typing `0xFFFFFF` here again is exactly the drift it is meant to stop.
+            let w = ColorMath.contrast(c("onHeader", dark: dark), head)
+            let warn = ColorMath.contrast(c("onHeaderWarn", dark: dark), head)
             assertThat("header: ขาวบนมัน >= 4.5:1", w >= 4.5, String(format: "%.2f:1", w))
             assertThat("header: amber เตือน save fail >= 3:1", warn >= 3.0,
                        String(format: "%.2f:1", warn))
@@ -223,7 +225,28 @@ extension Diagnostics {
             assertThat("accent vs purple ยังกลืนกัน (ตามที่ออกแบบ)", collide < 6.0,
                        String(format: "ΔE %.1f — ห้ามใช้ฟ้า/ม่วงสื่อสถานะเดี่ยวๆ", collide))
 
-            // 7. the waveform's inside/outside distinction
+            // 7. The tinted chips. These were added for the light theme and then not measured
+            //    — the audit list named none of them, so the suite passed 44/44 while testing
+            //    nothing the theme change introduced. Each pair below is a real call site.
+            print("  7) ตัวอักษรบนชิปสีอ่อน/เข้ม")
+            let chips: [(String, String, String)] = [
+                ("text", "tintSelect", "แถวเพลงที่เลือก"),
+                ("tintSelectText", "tintSelect", "ชื่อเพลงที่เลือก"),
+                ("text", "tintCyan", "การ์ดอัตโนมัติ"),
+                ("cyanOnTint", "tintCyan", "ป้าย 🎯 / ปุ่มสโคป"),
+                ("text", "tintWarn", "การ์ด played / ข้าม Intro End"),
+                ("amberOnTint", "tintWarn", "ข้อความเตือนบนการ์ดนั้น"),
+                ("greenText", "tintGood", "แถว log ตอบถูก"),
+                ("redOnTint", "tintBad", "แถว log ไม่มีคนตอบ / แถบ save fail"),
+                ("text", "tintBad", "คำอธิบายบนแถบ save fail"),
+                ("muted", "tintBad", "คำอธิบายรองบนแถบนั้น"),
+            ]
+            for (fg, bg, what) in chips {
+                let v = ColorMath.contrast(c(fg, dark: dark), c(bg, dark: dark))
+                assertThat("\(fg) บน \(bg) — \(what)", v >= 4.5, String(format: "%.2f:1", v))
+            }
+
+            // 8. the waveform's inside/outside distinction
             let wd = abs(ColorMath.lightness(c("waveIn", dark: dark))
                          - ColorMath.lightness(c("waveOut", dark: dark)))
             assertThat("คลื่นใน/นอกช่วง intro", wd >= 10.0, String(format: "ΔL* %.1f", wd))

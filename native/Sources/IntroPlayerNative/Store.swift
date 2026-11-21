@@ -398,7 +398,12 @@ final class Store {
         var s = (raw["_settings"] as? [String: Any]) ?? [:]
         s["normalize"] = normalize
         s["loudnessScope"] = loudnessScope.rawValue
-        s["theme"] = theme.rawValue
+        // Guarded like `updateFeed` and `schema`, not written blind. The rule exists because
+        // overwriting a `_settings` key this build failed to READ is how every `resetAt` stamp
+        // was wiped once: if a newer build ever stores the theme as something other than a bare
+        // string, this build would decode `""` → `.dark` and overwrite it on the next save —
+        // and `writeSettings` runs on every marker edit.
+        if s["theme"] == nil || s["theme"] is String { s["theme"] = theme.rawValue }
         s["lastPlaylist"] = lastPlaylist
         if !resetAt.isEmpty { s["resetAt"] = resetAt }   // never delete stamps we merely failed to read
         // Same rule as `resetAt`, one line above: only delete a key we successfully READ as

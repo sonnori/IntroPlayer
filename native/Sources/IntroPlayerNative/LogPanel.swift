@@ -121,7 +121,7 @@ struct LogPanel: View {
                     model.flash("คัดลอกแล้ว")
                 }
                 foot("⤓ บันทึก CSV") { saveCSV() }
-                foot("↩ ยกเลิกรายการล่าสุด", Palette.amber) {
+                foot("↩ ยกเลิกรายการล่าสุด", Palette.red) {
                     if let e = model.logStore.undoLast(playlist: model.logAllRounds ? nil : model.currentPlaylist) {
                         model.flash("ยกเลิก \(Library.title(e.path)) แล้ว")
                     } else { model.flash("ยังไม่มีรายการให้ยกเลิก") }
@@ -211,7 +211,7 @@ struct LogPanel: View {
                 .foregroundStyle(Color(hex: 0xCFE0FF))
                 .padding(.horizontal, 8).padding(.vertical, 6)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(hex: 0x24304A))
+                .background(Palette.tintSelect)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .padding(.top, gi == 0 ? 6 : 12).padding(.bottom, 2)
             }
@@ -226,7 +226,7 @@ struct LogPanel: View {
                 // The order number, large and tabular: the primary key of this whole view.
                 Text("\(t.order)")
                     .font(Typo.font(17, .bold, mono: true, latinOnly: true))
-                    .foregroundStyle(t.correct ? Palette.greenText : Palette.red)
+                    .foregroundStyle(t.correct ? Palette.greenText : Palette.redOnTint)
                     .frame(width: 26, alignment: .trailing)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(Library.displayTitle(t.path))
@@ -248,7 +248,7 @@ struct LogPanel: View {
                 VStack(alignment: .trailing, spacing: 3) {
                     Text(t.correct ? "✓ ตอบถูก" : "✗ ไม่มีคนตอบ")
                         .font(Typo.font(11, .semibold))
-                        .foregroundStyle(t.correct ? Palette.greenText : Palette.red)
+                        .foregroundStyle(t.correct ? Palette.greenText : Palette.redOnTint)
                     if t.wrongs > 0 {
                         Text(t.correct ? "ผิดก่อน \(t.wrongs)" : "ผิด \(t.wrongs) ครั้ง")
                             .font(Typo.font(10)).foregroundStyle(Palette.muted)
@@ -258,7 +258,7 @@ struct LogPanel: View {
             }
             .padding(.vertical, 9).padding(.horizontal, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(isCurrent ? Color(hex: 0x24304A) : .clear)
+            .background(isCurrent ? Palette.tintSelect : .clear)
             .clipShape(RoundedRectangle(cornerRadius: 6))
             .contentShape(Rectangle())
             .onTapGesture { model.selectFromLog(t.path) }
@@ -293,7 +293,7 @@ struct LogPanel: View {
                 }
                 Text(e.isCorrect ? "ตอบถูก" : "ตอบผิด")
                     .font(Typo.font(11, .semibold))
-                    .foregroundStyle(e.isCorrect ? Palette.green : Palette.amber)
+                    .foregroundStyle(e.isCorrect ? Palette.green : Palette.red)
                     .padding(.horizontal, 8).padding(.vertical, 2)
                     .background(e.isCorrect ? Palette.tintGood
                                             : Palette.tintBad)

@@ -36,6 +36,11 @@ enum Palette {
     /// that follows the theme turned the playhead white-on-white — invisible, on the one element
     /// every marker is placed against.
     static let outline = Color(hex: 0x0A0C10)
+    /// Drawn ON the waveform bed and nothing else, so it must INVERT: white against the dark
+    /// bed, near-black against the light one. Distinct from `outline`, which is fixed dark
+    /// because it is the hairline the playhead's white core is drawn on top of — that pair
+    /// works in both themes precisely because only one of the two moves.
+    static let onWave = dyn(0xFFFFFF, 0x0A0C10)
     /// The header bar is a saturated dark red in BOTH themes, so whatever sits on it sits on
     /// dark and must not flip. Measured: the light theme's amber on the light header is 1.2:1,
     /// and the thing drawn in it is the save-failure warning — the single condition that
@@ -97,6 +102,15 @@ enum Palette {
     /// The level bar's fill.
     static let levelBar = dyn(0x5BD6FF, 0x0190A9)
 
+    /// Text drawn ON a tint of its OWN hue. Putting `cyan` on `tintCyan` is the natural thing
+    /// to write and it does not reach 4.5:1 in either theme (measured 3.66:1 light, and
+    /// `red` on `tintBad` only 4.00:1 in dark) — a tint and its accent are by construction
+    /// close in hue, so only lightness can separate them and the tint has already spent it
+    /// staying distinct from the surface behind it. Same hue, pushed to the legible end.
+    static let cyanOnTint = dyn(0x00E2FF, 0x00697F)
+    static let amberOnTint = dyn(0xFFCD00, 0x815700)
+    static let redOnTint = dyn(0xFF495B, 0xC20024)
+
     // waveform envelope: inside vs outside the intro, 14.5 ΔL* apart in dark, 14.4 in light
     static let waveOut = dyn(0x3E4A61, 0xA2ACB9)
     static let waveIn = dyn(0x5C6D8C, 0x7C8693)
@@ -130,6 +144,16 @@ enum Palette {
         ("purple", 0xA06BFF, 0x6E3FCD), ("onsite", 0xF763B8, 0xC82C8D),
         ("header", 0xC8402A, 0xBA2616),
         ("waveOut", 0x3E4A61, 0xA2ACB9), ("waveIn", 0x5C6D8C, 0x7C8693),
+        ("hook", 0xA06BFF, 0x6E3FCD),
+        ("tintCyan", 0x12303F, 0xBDE3EE), ("tintCyanLine", 0x2A6B80, 0x6AAABB),
+        ("tintWarn", 0x2A2418, 0xF3D9B0), ("tintWarnLine", 0x6B5A33, 0xBB9C64),
+        ("tintSelect", 0x243049, 0xD3D9F7), ("tintSelectText", 0xCFE0FF, 0x214583),
+        ("tintGood", 0x121F22, 0xC0E6CA), ("tintBad", 0x2E2412, 0xFFD2CF),
+        ("tintGoodLine", 0x2F5B41, 0x78AC88), ("levelBar", 0x5BD6FF, 0x0190A9),
+        ("onWave", 0xFFFFFF, 0x0A0C10), ("outline", 0x0A0C10, 0x0A0C10),
+        ("cyanOnTint", 0x00E2FF, 0x00697F), ("amberOnTint", 0xFFCD00, 0x815700),
+        ("redOnTint", 0xFF495B, 0xC20024),
+        ("onHeader", 0xFFFFFF, 0xFFFFFF), ("onHeaderWarn", 0xFFC53D, 0xFFC53D),
     ]
 }
 
@@ -224,7 +248,18 @@ enum MarkerGrab {
         var bd = slop
         for m in positions {
             let d = abs(m.x - pressX)
-            if d <= bd { bd = d; best = m.field }
+            if d < bd {
+                bd = d; best = m.field
+            } else if d == bd {
+                // TIE. `<=` (later wins) is what makes Intro End reachable when two markers
+                // sit on the same time — song 102's real state. But applied blindly it also
+                // made Intro Start **permanently undraggable** while stacked: every press
+                // returned Intro End, which merely moved focus OFF Intro Start, and `M` could
+                // not help because the next press moved it off again. The active marker wins a
+                // tie; otherwise the later one still does.
+                if m.field == active { best = m.field }
+                else if best != active { best = m.field }
+            }
         }
         guard let best else { return .away }
         return best == active ? .drag(best) : .activate(best)
@@ -243,8 +278,16 @@ struct WaveformView: View {
     @State private var armedExplained = false
     @State private var panning = false
     @State private var panLast: CGFloat = 0
-    /// The marker's value when the drag grabbed it, so a press that moves nothing writes nothing.
-    @State private var dragFrom: Double = 0
+    /// The whole question as it stood when the drag grabbed a marker, so "did anything change"
+    /// is answered over every field rather than the one being dragged — `updateConfig` also
+    /// nudges `introEnd` to keep `minIntro`, so a drag out and back changed the config while
+    /// the dragged field finished where it started.
+    @State private var dragFrom: SongBase?
+    /// Marker time minus cursor time at the moment of the grab. Dragging RELATIVE to where the
+    /// line was grabbed is what makes "a press that moves nothing writes nothing" true by
+    /// construction: writing the cursor's own time instead teleported the marker by up to the
+    /// 8 pt slop, which at full-song zoom is over a second.
+    @State private var dragOffset: Double = 0
     private let panSlop: CGFloat = 4
 
     private func timeToX(_ t: Double, _ w: CGFloat) -> CGFloat {
@@ -289,6 +332,13 @@ struct WaveformView: View {
                 .allowsHitTesting(false)
             }
             .contentShape(Rectangle())
+            // SwiftUI does not guarantee `onEnded` for a cancelled gesture (a sheet opening
+            // mid-press, for instance). `arming` is the one flag that blocks ALL THREE things
+            // this surface does — drag, pan and seek — so if it stuck true the waveform went
+            // completely dead with no way back. Clear it whenever the song changes.
+            .onChange(of: model.current) { _ in
+                arming = false; dragKey = nil; panning = false; dragFrom = nil
+            }
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { g in
@@ -317,19 +367,23 @@ struct WaveformView: View {
                             case .drag(let f):
                                 guard let k = f.timeKey else { return }
                                 dragKey = k
-                                dragFrom = model.config()[keyPath: k]
+                                let live = model.config()
+                                dragFrom = live.current
+                                dragOffset = live[keyPath: k] - xToTime(g.startLocation.x, w)
                             case .away:
                                 panLast = g.startLocation.x
                             }
                         }
                         if let k = dragKey {
-                            let t = max(0, min(model.player.duration, xToTime(g.location.x, w)))
+                            let t = max(0, min(model.player.duration,
+                                               xToTime(g.location.x, w) + dragOffset))
                             let v = (t * 100).rounded() / 100
-                            // A press that moves nothing must WRITE nothing. `updateConfig` stamps
-                            // `configured` and pushes an undo snapshot, so a click merely to
-                            // select the active marker used to mark an unreviewed guess as
-                            // reviewed — dropping the song out of the Return/Tab sweep and out of
-                            // the pre-flight warnings. Same defect the typed field has in §11.
+                            // A press that moves nothing must WRITE nothing — `updateConfig`
+                            // stamps `configured` and pushes an undo snapshot, so a click
+                            // merely to pick the marker up would mark an unreviewed guess as
+                            // reviewed and drop the song out of the Return/Tab sweep and the
+                            // pre-flight. With the grab offset above, a still cursor gives back
+                            // exactly the stored value and this comparison is what it says.
                             if v != model.config()[keyPath: k] {
                                 // commit:false — re-levelling the gain per frame steps and clicks.
                                 model.updateConfig(commit: false) { $0[keyPath: k] = v }
@@ -343,10 +397,14 @@ struct WaveformView: View {
                         }
                     }
                     .onEnded { g in
-                        let moved = dragKey.map { model.config()[keyPath: $0] != dragFrom } ?? false
+                        // The WHOLE question, not just the dragged field: `updateConfig` clamps
+                        // `introEnd >= introStart + minIntro`, so dragging Intro Start out and
+                        // back leaves Intro End pushed out while the dragged value matches.
+                        // Skipping the commit then skips `remode` and the re-level.
+                        let moved = dragFrom.map { model.config().current != $0 } ?? false
                         let wasMarker = dragKey != nil
                         let wasArming = arming
-                        defer { dragKey = nil; panning = false; arming = false }
+                        defer { dragKey = nil; panning = false; arming = false; dragFrom = nil }
                         guard model.player.duration > 0 else { return }
                         if wasArming {
                             return                    // the press only activated a marker
@@ -355,7 +413,9 @@ struct WaveformView: View {
                             // re-schedules the node and ends the undo coalescing window.
                             if moved { model.commitConfig() }
                         } else if !panning {
-                            model.player.seek(to: xToTime(g.location.x, w), config: c)
+                            // The LIVE config: `seek` hands it to `modeForPosition`, so a stale
+                            // `introEnd` would decide whether the intro-end guard stays armed.
+                            model.player.seek(to: xToTime(g.location.x, w), config: model.config())
                         }
                     }
             )
@@ -443,7 +503,9 @@ struct WaveformView: View {
         cap.addLine(to: CGPoint(x: px + 5, y: mid - 6))
         cap.addLine(to: CGPoint(x: px, y: mid + 2))
         cap.closeSubpath()
-        ctx.fill(cap, with: .color(.white))
+        // The cap sits above the waveform on bare panel, where white measures 1.16:1 in light.
+        // The playhead's own hairline is `outline` for the same reason.
+        ctx.fill(cap, with: .color(Palette.onWave))
     }
 
     private func onsiteGhost(_ ctx: GraphicsContext, _ was: Double, _ now: Double,
@@ -489,7 +551,10 @@ struct WaveformView: View {
             ring.addLine(to: CGPoint(x: x + 9, y: yBase + 0.5 * dir))
             ring.addLine(to: CGPoint(x: x, y: yBase + 13 * dir))
             ring.closeSubpath()
-            ctx.stroke(ring, with: .color(.white.opacity(0.9)), lineWidth: 1.5)
+            // `outline`, not white: this is the focus ring on the marker Shift+←/→ will move,
+            // and §11 says that state is carried by "width AND an outline". White on the light
+            // theme's bed is 1.14:1 — half the cue gone, leaving a 3pt-vs-2pt stem.
+            ctx.stroke(ring, with: .color(Palette.onWave.opacity(0.9)), lineWidth: 1.5)
         }
         // `.foregroundStyle` on Text is macOS 14+; this app targets 13.
         ctx.draw(Text(label).font(Typo.font(10, .bold, latinOnly: true)).foregroundColor(color),

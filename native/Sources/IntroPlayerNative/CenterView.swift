@@ -133,11 +133,15 @@ struct CenterView: View {
                 Text("(\(pm.field.label) เดิม \(MarkerField.text(pm.field, c)))")
                     .font(Typo.font(11)).foregroundStyle(Palette.muted)
             } else if disarmed {
+                // `amberOnTint`, not `amber`: this text sits on an amber wash of its own hue,
+                // which measured 2.70:1 in light — on the single most consequential state in
+                // the app (§6d). A tint and its accent are close in hue by construction, so
+                // only lightness can separate them, and the wash has already spent it.
                 Text("⚠ ไม่หยุดเอง").font(Typo.font(20, .bold))
-                    .foregroundStyle(Palette.amber)
+                    .foregroundStyle(Palette.amberOnTint)
                 Text(c.ignoreEnd ? "ติ๊ก \"ข้าม Intro End\" อยู่ — กด E เพื่อปิด"
                                  : "หัวเล่นอยู่หลัง Intro End แล้ว")
-                    .font(Typo.font(13)).foregroundStyle(Palette.amber.opacity(0.9))
+                    .font(Typo.font(13)).foregroundStyle(Palette.amberOnTint)
             } else if model.current != nil {
                 Text("หยุดเองที่").font(Typo.font(13)).foregroundStyle(Palette.muted)
                 Text(String(format: "%.2fs", c.introEnd))
@@ -160,11 +164,11 @@ struct CenterView: View {
         .padding(.horizontal, 14)
         .frame(height: 44)
         .frame(maxWidth: .infinity)
-        .background(pending != nil ? Palette.cyan.opacity(0.14)
-                    : disarmed ? Palette.amber.opacity(0.14) : Palette.panel2)
+        .background(pending != nil ? Palette.tintCyan
+                    : disarmed ? Palette.tintWarn : Palette.panel2)
         .overlay(RoundedRectangle(cornerRadius: 8)
-            .stroke(pending != nil ? Palette.cyan
-                    : disarmed ? Palette.amber : Palette.line,
+            .stroke(pending != nil ? Palette.tintCyanLine
+                    : disarmed ? Palette.tintWarnLine : Palette.line,
                     lineWidth: pending != nil || disarmed ? 2 : 1)
             .allowsHitTesting(false))
         .clipShape(RoundedRectangle(cornerRadius: 8))

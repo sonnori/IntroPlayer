@@ -324,6 +324,16 @@ enum Diagnostics {
         check("ทับกันเป๊ะ ตอน Intro End ยัง active → เลือก Intro End",
               MarkerGrab.decide(pressX: 420, positions: stacked, active: .hook),
               .activate(.introEnd))
+        // The blind spot the two-stage rule created: with `<=` alone the LATER marker always
+        // wins a tie, so a press while Intro Start was active returned `.activate(.introEnd)`
+        // — moving focus OFF Intro Start — and no sequence of gestures could ever drag it.
+        // `M` did not help: the next press moved focus off again.
+        check("ทับกันเป๊ะ ตอน Intro Start active → ต้องลาก Intro Start ได้",
+              MarkerGrab.decide(pressX: 420, positions: stacked, active: .introStart),
+              .drag(.introStart))
+        check("ทับกันเป๊ะ เยื้อง 3pt ตอน Intro Start active → ยังลาก Intro Start ได้",
+              MarkerGrab.decide(pressX: 423, positions: stacked, active: .introStart),
+              .drag(.introStart))
 
         print("\n4) ตัวที่ใกล้ที่สุดชนะ ไม่ใช่ตัวแรกที่เจอ")
         let near: [(field: MarkerField, x: CGFloat)] =

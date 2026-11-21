@@ -52,16 +52,27 @@ cat > "$BASE/bin/open" <<'EOS'
 echo "OPEN: $*" >> "${STUB_OPEN_LOG:-/dev/null}"
 exit 0
 EOS
+# `ps` stub, because installer.command matches on `ps -Ao pid=,command=` piped through
+# `grep -F` (a path the operator chose is not a safe regex). STUB_RUNNING_PATH is the FULL
+# command line to pretend is running, so `running_in_target` and `running_anywhere` can be told
+# apart — with the old blanket pattern they could not be, which left the scope distinction the
+# whole `_exe_paths` refactor is built around with zero coverage, and meant the LEGACY arm of
+# that loop was never reached in any of the cases.
+cat > "$BASE/bin/ps" <<'EOS'
+#!/bin/bash
+# STUB_RUNNING_PATH=<full command line> pretends exactly that process is alive.
+[ -n "${STUB_RUNNING_PATH:-}" ] && echo "99999 ${STUB_RUNNING_PATH}"
+exit 0
+EOS
 cat > "$BASE/bin/pgrep" <<'EOS'
 #!/bin/bash
-# STUB_RUNNING=1 pretends the app is open; STUB_WEB=1 pretends server.py is.
+# Only server.py is still matched with pgrep (a fixed pattern of ours, not a user path).
 case "$*" in
-  *MacOS/IntroPlayerNative*) [ "${STUB_RUNNING:-0}" = "1" ] && { echo 99999; exit 0; } ;;
-  *erver*)                   [ "${STUB_WEB:-0}" = "1" ]     && { echo 99998; exit 0; } ;;
+  *erver*) [ "${STUB_WEB:-0}" = "1" ] && { echo 99998; exit 0; } ;;
 esac
 exit 1
 EOS
-chmod +x "$BASE/bin/osascript" "$BASE/bin/pgrep" "$BASE/bin/open"
+chmod +x "$BASE/bin/osascript" "$BASE/bin/pgrep" "$BASE/bin/ps" "$BASE/bin/open"
 export PATH="$BASE/bin:$PATH"
 
 # ---- the new release, unzipped like the operator would ----
@@ -99,6 +110,7 @@ fresh_target() {
 run() {  # run <log> <src> [env assignments via globals]
   rm -f "$BASE/q"
   STUB_QUEUE_FILE="$BASE/q" STUB_LOG="$1" HOME="$BASE/home" \
+    STUB_RUNNING_PATH="${STUB_RUNNING_PATH:-}" \
     bash "$2/ติดตั้ง-อัปเดต.command" >/dev/null 2>&1
 }
 
@@ -107,6 +119,7 @@ run_unattended() {  # run_unattended <log> <src> [extra args...]
   local lg="$1" src="$2"; shift 2
   rm -f "$BASE/q"
   STUB_QUEUE_FILE="$BASE/q" STUB_LOG="$lg" STUB_OPEN_LOG="$BASE/openlog" HOME="$BASE/home" \
+    STUB_RUNNING_PATH="${STUB_RUNNING_PATH:-}" \
     bash "$src/ติดตั้ง-อัปเดต.command" --unattended "$@" >/dev/null 2>&1
 }
 
@@ -118,7 +131,8 @@ data_intact() {
 
 echo "=== 1. refuses while the app is running ==="
 fresh_target
-STUB_RUNNING=1 STUB_ANSWERS="อัปเดต" run "$BASE/log1" "$SRC"; rc=$?
+STUB_RUNNING_PATH="$TARGET/$APPB/Contents/MacOS/IntroPlayerNative" \
+  STUB_ANSWERS="อัปเดต" run "$BASE/log1" "$SRC"; rc=$?
 check "exit != 0 (rc=$rc)" '[ "$rc" != "0" ]'
 check "แอปตัวเก่ายังอยู่ ไม่ถูกแตะ" 'grep -q "OLD APP" "$TARGET/$LEGACYB/Contents/MacOS/IntroPlayerNative"'
 check "ไม่มี backups/ ถูกสร้าง" '[ ! -d "$TARGET/backups" ]'
@@ -189,6 +203,10 @@ for f in server.py index.html start.command ตรวจสอบเครื่
   check "คืน $f ตัวเดิม" 'grep -q "^OLD " "$TARGET/'"$f"'" 2>/dev/null'
 done
 check "VERSION ไม่หาย"  '[ -f "$TARGET/VERSION" ] && [ "$(tr -d " \n\r" < "$TARGET/VERSION")" = "1.0.0" ]'
+# Nothing was backed up under the NEW name on a pre-1.3.0 machine, so rollback used to skip the
+# one item it had actually installed: the old bundle came back AND the new one stayed, under a
+# dialog claiming the original set was restored.
+check "ไม่ทิ้งแอปชื่อใหม่ที่เพิ่งลงไปค้างไว้" '[ ! -e "$TARGET/$APPB" ]'
 data_intact
 check "บอกว่าคืนให้แล้ว" 'grep -q "คืนไฟล์ชุดเดิม" "$BASE/log5"'
 check "ไม่ทิ้ง lock ค้างไว้" '[ ! -d "$TARGET/.installing" ]'
@@ -370,7 +388,8 @@ check "ไม่สร้าง backups ที่นั่น" '[ ! -d "$BASE/no
 echo
 echo "=== 18. unattended refuses while an app is still running IN THE TARGET ==="
 fresh_target
-STUB_RUNNING=1 run_unattended "$BASE/log18" "$SRC" --target "$TARGET"
+STUB_RUNNING_PATH="$(cd "$TARGET" && pwd -P)/$APPB/Contents/MacOS/IntroPlayerNative" \
+  run_unattended "$BASE/log18" "$SRC" --target "$TARGET"
 rc=$?
 check "exit != 0 (rc=$rc)" '[ "$rc" != "0" ]'
 check "แอปตัวเก่ายังอยู่" 'grep -q "OLD APP" "$TARGET/$LEGACYB/Contents/MacOS/IntroPlayerNative"'
@@ -390,6 +409,36 @@ EL=$(( $(date +%s) - T0 ))
 check "pid ที่ตายแล้วไม่ถูกรอ (${EL}s ควร < 3)" '[ "$EL" -lt 3 ]'
 check "ยังอัปเดตสำเร็จ" '[ "$("$TARGET/$APPB/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 | cut -d" " -f1)" = "$VER" ]'
 data_intact
+
+echo
+echo "=== 20. a LEGACY-named app running in the target also blocks the swap ==="
+# The whole reason `_exe_paths` loops: a leftover IntroPlayerNative.app holds the SAME
+# config.json open, so swapping under it is §12's clobber with extra steps. With the old
+# blanket pgrep stub this arm of the loop was never reached in any case.
+fresh_target
+STUB_RUNNING_PATH="$(cd "$TARGET" && pwd -P)/$LEGACYB/Contents/MacOS/IntroPlayerNative" \
+  run_unattended "$BASE/log20" "$SRC" --target "$TARGET"
+rc=$?
+check "exit != 0 (rc=$rc)" '[ "$rc" != "0" ]'
+check "แอปชื่อเก่ายังอยู่ ไม่ถูกย้าย" 'grep -q "OLD APP" "$TARGET/$LEGACYB/Contents/MacOS/IntroPlayerNative"'
+check "ไม่ติดตั้งแอปชื่อใหม่" '[ ! -e "$TARGET/$APPB" ]'
+data_intact
+check "บอกเหตุผลใน log" 'grep -q "ยังมีแอปเปิดอยู่" "$BASE/home/Library/Logs/IntroPlayer-update.log"'
+
+echo
+echo "=== 21. a backups/ folder is not an install target ==="
+# The installer puts a copy of config.json inside backups/<stamp>/, and the Dock follows the
+# old bundle when it is moved there — so a backup directory looks like an install to every
+# other test. Accepting one means markers get written into a folder that pruning deletes.
+fresh_target
+BKDIR="$TARGET/backups/20200101-000009"
+mkdir -p "$BKDIR"
+cp "$TARGET/config.json" "$BKDIR/config.json"
+run_unattended "$BASE/log21" "$SRC" --target "$BKDIR"
+rc=$?
+check "exit != 0 (rc=$rc)" '[ "$rc" != "0" ]'
+check "ไม่ติดตั้งลงใน backups/" '[ ! -e "$BKDIR/$APPB" ]'
+check "ไม่ซ้อน backups ใน backups" '[ ! -d "$BKDIR/backups" ]'
 
 echo
 echo "================================"

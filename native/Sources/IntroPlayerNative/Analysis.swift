@@ -17,6 +17,9 @@ final class Analysis {
     static let targetLufs: Double = -15.0
     static let minScopeSec: Double = 0.5     // intro shorter than this can't be measured
     static let minUsableRms: Double = 0.005  // near-silent range → fall back to whole song
+    /// The LUFS equivalent of `minUsableRms` (0.005 ≈ −46 dBFS). Below this there is nothing
+    /// for the audience to hear, so measuring the whole song is the better answer.
+    static let minUsableLufs: Double = -46
 
     // intro-start detection
     static let preRoll: Double = 0.25
@@ -40,6 +43,14 @@ final class Analysis {
     /// what makes a per-marker-edit re-level affordable — the window moves every time a marker
     /// does. ~10 doubles a second: 21 KB for a four-minute song.
     private(set) var kBlocks: [Double] = []
+    /// Peak magnitude ACROSS ALL CHANNELS per sub-block, aligned with `kBlocks`. `env` is
+    /// channel 0 only (fine for drawing), but the gain is applied to every channel, so a
+    /// hard-panned transient on the right was invisible to the headroom model — measured
+    /// 1.41 dB low on song 106. 10 values a second: a few KB.
+    private(set) var peakBlocks: [Float] = []
+    /// The ACTUAL sub-block period, `kSubFrames / sampleRate`, not the nominal 0.1 s. Exactly
+    /// 0.1 at 44.1/48/96 kHz, but `round(0.1 * 11025) = 1103` drifts 0.045% — the same class
+    /// of bug §12 records for `bucketHz` indexing the envelope at a flat `envHz`.
     private(set) var kBlockSec: Double = Loudness.stepSec
     private(set) var channels: Int = 1
 
@@ -73,7 +84,10 @@ final class Analysis {
         let kSubFrames = max(1, Int((Loudness.stepSec * fmt.sampleRate).rounded()))
         var kSum = [Double](repeating: 0, count: a.channels)
         var kCount = 0
-        a.kBlocks.reserveCapacity(Int(a.duration / Loudness.stepSec) + 2)
+        a.kBlockSec = Double(kSubFrames) / fmt.sampleRate
+        a.kBlocks.reserveCapacity(Int(a.duration / a.kBlockSec) + 2)
+        a.peakBlocks.reserveCapacity(Int(a.duration / a.kBlockSec) + 2)
+        var kPeak: Float = 0
 
         let chunk = AVAudioFrameCount(1 << 18)
         guard let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: chunk) else { return a }
@@ -102,7 +116,10 @@ final class Analysis {
                 // K-weighting runs over EVERY channel — BS.1770 sums channel powers, and the
                 // envelope's channel-0 shortcut is fine for drawing but not for loudness.
                 for c in 0..<a.channels {
-                    let x = Double(ch[c][i])
+                    let xf = ch[c][i]
+                    let axf = xf < 0 ? -xf : xf
+                    if axf > kPeak { kPeak = axf }
+                    let x = Double(xf)
                     var st = kState[c]
                     let y = kw.shelf.b0 * x + kw.shelf.b1 * st.x1 + kw.shelf.b2 * st.x2
                             - kw.shelf.a1 * st.y1 - kw.shelf.a2 * st.y2
@@ -120,6 +137,8 @@ final class Analysis {
                         acc += Loudness.channelWeight(c, of: a.channels) * (kSum[c] / Double(kCount))
                     }
                     a.kBlocks.append(acc)
+                    a.peakBlocks.append(kPeak)
+                    kPeak = 0
                     for c in 0..<a.channels { kSum[c] = 0 }
                     kCount = 0
                 }
@@ -212,9 +231,21 @@ final class Analysis {
         return Loudness.gated(subBlocks: kBlocks[i0..<i1]).lufs
     }
 
-    /// Highest sample magnitude in a range, straight off the drawing envelope (which already
-    /// stores a per-bucket peak). Sample peak, not true peak — true peak needs oversampling and
-    /// is always a little higher, so treating this as headroom is optimistic by a few tenths.
+    /// Highest sample magnitude in a range **across every channel** — what the limiter sees,
+    /// because the gain is applied to all of them. Sample peak, not true peak: true peak needs
+    /// oversampling and is always a little higher, so this is optimistic by a few tenths.
+    func peakAllChannels(_ t0: Double, _ t1: Double) -> Float {
+        guard !peakBlocks.isEmpty, t1 > t0 else { return 0 }
+        let i0 = max(0, min(peakBlocks.count, Int((t0 / kBlockSec).rounded(.down))))
+        let i1 = max(i0, min(peakBlocks.count, Int((t1 / kBlockSec).rounded(.up))))
+        guard i1 > i0 else { return 0 }
+        var m: Float = 0
+        for i in i0..<i1 where peakBlocks[i] > m { m = peakBlocks[i] }
+        return m
+    }
+
+    /// Channel 0 only, from the drawing envelope. Kept for anything that is about the drawn
+    /// waveform; `peakAllChannels` is the one to use for headroom.
     func peak(_ t0: Double, _ t1: Double) -> Float {
         guard !env.isEmpty else { return 0 }
         let i0 = max(0, min(env.count, Int((t0 * bucketHz).rounded(.down))))
@@ -233,9 +264,12 @@ final class Analysis {
         let a = min(c.introStart, c.introEnd), b = max(c.introStart, c.introEnd)
         if b - a < Analysis.minScopeSec { return whole() }
         let v = lufs(a, b)
-        // A silent lead-in would otherwise divide into the maximum boost. -70 LUFS is BS.1770's
-        // own absolute gate: below it there is nothing to measure.
-        if !v.isFinite || v < Loudness.absoluteGate { return whole() }
+        // A silent lead-in would otherwise divide into the maximum boost. The old RMS path fell
+        // back at 0.005 ≈ −46 dBFS; −70 LUFS (BS.1770's absolute BLOCK gate, for excluding
+        // silence from an average) is not the same thing and loosened this safety net by ~24 dB.
+        // An intro at −55 LUFS is inaudible, would ask for +40 dB, and would be clamped to +12
+        // and crushed instead of falling back to the whole song.
+        if !v.isFinite || v < Analysis.minUsableLufs { return whole() }
         return (v, .intro)
     }
 

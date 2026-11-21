@@ -30,7 +30,7 @@ struct SetupPanel: View {
     private func body(for c: SongConfig) -> some View {
         wideButton(c.played ? "✓ เล่นแล้ว — กดเพื่อยกเลิก" : "ทำเครื่องหมายว่าเล่นแล้ว",
                    bg: c.played ? Palette.tintWarn : Palette.panel2,
-                   fg: c.played ? Palette.amber : Palette.text,
+                   fg: c.played ? Palette.amberOnTint : Palette.text,
                    border: c.played ? Palette.amber : Palette.line) {
             model.updateConfigQuiet { $0.played.toggle() }
         }
@@ -38,7 +38,7 @@ struct SetupPanel: View {
         if let d = model.current.flatMap({ model.donor(for: $0) }), !c.isConfigured {
             wideButton("⤵ ดึงค่าจากรอบ \"\(Library.playlist(of: d).isEmpty ? Library.rootLabel : Library.playlist(of: d))\"",
                        bg: Palette.tintCyan,
-                       fg: Palette.cyan, border: Palette.tintCyanLine) {
+                       fg: Palette.cyanOnTint, border: Palette.tintCyanLine) {
                 model.copyConfig(from: d)
             }
         }
@@ -52,7 +52,7 @@ struct SetupPanel: View {
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: c.ignoreEnd ? "checkmark.square.fill" : "square")
-                    .foregroundStyle(c.ignoreEnd ? Palette.amber : Palette.muted)
+                    .foregroundStyle(c.ignoreEnd ? Palette.amberOnTint : Palette.muted)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Ignore Intro End").font(Typo.font(13))
                     Text("เล่นเลยจุดจบ ไม่หยุดอัตโนมัติ").font(Typo.font(11))
@@ -76,7 +76,7 @@ struct SetupPanel: View {
 
         loudnessBlock(c)
 
-        Text("เล่นเพลงฟัง พอถึงจุด กดปุ่ม Mark หรือคีย์ I / O / H ได้เลยขณะเล่น · พิมพ์เวลาลงช่องได้ตรงๆ (1:23.45 หรือ 83.45) · Shift+←/→ ขยับ marker ที่เลือกทีละ 0.01s, M สลับ marker · G ฟัง Hook แล้วหยุดเอง · บนคลื่นเสียง: คลิก = เลื่อนหัวเล่น, ลากเส้นสี = ปรับ marker, ลากที่ว่าง = เลื่อนดู · หมุนล้อ = ซูม · แถบล่างสุด = ทั้งเพลง ลากเพื่อเลื่อนช่วงที่ดู · Space เล่นต่อจากตรงที่ค้างอยู่ ถ้าจะกลับต้น Intro กด S")
+        Text("เล่นเพลงฟัง พอถึงจุด กดปุ่ม Mark หรือคีย์ I / O / H ได้เลยขณะเล่น · พิมพ์เวลาลงช่องได้ตรงๆ (1:23.45 หรือ 83.45) · Shift+←/→ ขยับ marker ที่เลือกทีละ 0.01s, M สลับ marker · บนคลื่นเสียง: คลิก = เลื่อนหัวเล่น, กดเส้นสีให้ขึ้นก่อน แล้วลากถึงจะขยับ, ลากที่ว่าง = เลื่อนดู · หมุนล้อ = ซูม · แถบล่างสุด = ทั้งเพลง ลากเพื่อเลื่อนช่วงที่ดู · Space เล่นต่อจากตรงที่ค้างอยู่ ถ้าจะกลับต้น Intro กด S")
             .font(Typo.font(11)).foregroundStyle(Palette.muted)
             .padding(.top, 4)
     }
@@ -131,11 +131,30 @@ struct SetupPanel: View {
                         // pre-flight found was being skipped in practice (§8e: 8 of 9 songs
                         // still sat on the 60 s default), so the button that offers to guess
                         // has to offer to guess THAT.
-                        if !model.applyAutoStart(p, analysis: a, manual: true) {
-                            model.flash("หาจุดเริ่มไม่เจอ — เพลงนี้อาจดังตั้งแต่วินาทีแรก")
+                        //
+                        // Which also makes it destructive on a song somebody has already
+                        // reviewed — three signed-off markers, from a 38 pt button sitting 8 pt
+                        // from the `−`/`+` nudges. Ask first in that case only; on an
+                        // unreviewed song it is pure help and a dialog would be friction.
+                        let run = {
+                            if !model.applyAutoStart(p, analysis: a, manual: true) {
+                                // One flash per press: a second `flash` in the same main-actor
+                                // turn replaces the first before it renders a frame, so this
+                                // message used to be impossible to see.
+                                model.flash("หาจุดเริ่มไม่เจอ — เพลงนี้อาจดังตั้งแต่วินาทีแรก")
+                            } else {
+                                model.flash("กำลังหา Intro End กับ Hook… (ไม่กี่วินาที)")
+                            }
+                            model.guessRest(p, duration: a.duration, manual: true)
                         }
-                        model.flash("กำลังหา Intro End กับ Hook…")
-                        model.guessRest(p, duration: a.duration, manual: true)
+                        if !c.isConfigured
+                            || confirmDestructive(
+                                title: "ให้โปรแกรมเดาใหม่ทั้ง 3 จุด?",
+                                body: "เพลงนี้ตั้งค่าไว้แล้ว — Intro Start / Intro End / Hook "
+                                    + "จะถูกเขียนทับด้วยค่าที่โปรแกรมเดา (กด Cmd+Z ย้อนได้)",
+                                ok: "เดาใหม่") {
+                            run()
+                        }
                     } label: { Text("🎯").frame(width: 38, height: 38).contentShape(Rectangle()) }
                     .buttonStyle(PressStyle())
                     .background(Palette.tintCyan)
@@ -295,7 +314,7 @@ struct SetupPanel: View {
                 if model.store.normalize {
                     let ax = gx(auto)
                     ctx.fill(Path(CGRect(x: ax - 1, y: 1, width: 2, height: h - 2)),
-                             with: .color(.white.opacity(0.85)))
+                             with: .color(Palette.onWave.opacity(0.85)))
                 }
             }
             .frame(height: 16)
@@ -309,7 +328,8 @@ struct SetupPanel: View {
         return Button {
             model.store.loudnessScope = s; model.store.settingsChanged(); model.refreshGain()
         } label: {
-            Text(t).font(.system(size: 11, weight: on ? .semibold : .regular))
+            Text(t).font(Typo.font(11, on ? .semibold : .regular))
+                .foregroundStyle(on ? Palette.cyanOnTint : Palette.text)
                 .frame(maxWidth: .infinity).padding(.vertical, 6)
                 .contentShape(Rectangle())
         }

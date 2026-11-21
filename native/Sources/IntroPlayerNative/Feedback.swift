@@ -6,14 +6,26 @@ import SwiftUI
 /// driving a live taping and needs to know the press registered.
 struct PressStyle: ButtonStyle {
     var corner: CGFloat = 8
-    /// The press wash and the brightness shift both have to reverse with the theme. A white wash
-    /// and a POSITIVE brightness on a light theme's near-white button is no feedback at all —
-    /// and in a taping the difference between "the press registered" and "nothing happened" is
-    /// the only thing telling the operator whether to press it again.
-    @Environment(\.colorScheme) private var scheme
     func makeBody(configuration: Configuration) -> some View {
-        let light = scheme == .light
-        return configuration.label
+        // The environment is read inside a real View, NOT via an `@Environment` property on the
+        // style itself. SwiftUI installs dynamic properties on Views and ViewModifiers; a
+        // `ButtonStyle` is neither, so the property can silently read the EnvironmentValues
+        // default (`.light`) — which would have given every button in the dark theme a black
+        // wash and a negative brightness, i.e. no visible press at all.
+        PressBody(corner: corner, configuration: configuration)
+    }
+
+    private struct PressBody: View {
+        let corner: CGFloat
+        let configuration: Configuration
+        /// The press wash and the brightness shift both reverse with the theme. A white wash
+        /// and a POSITIVE brightness on a light theme's near-white button is no feedback — and
+        /// in a taping the difference between "the press registered" and "nothing happened" is
+        /// the only thing telling the operator whether to press it again.
+        @Environment(\.colorScheme) private var scheme
+        var body: some View {
+            let light = scheme == .light
+            return configuration.label
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
             .brightness(configuration.isPressed ? (light ? -0.10 : 0.16) : 0)
             .overlay(
@@ -25,6 +37,7 @@ struct PressStyle: ButtonStyle {
                         .opacity(configuration.isPressed ? 0.10 : 0))
             )
             .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+        }
     }
 }
 
@@ -62,6 +75,10 @@ private struct PulseTarget: ViewModifier {
                     // against both in dark. A fixed white ring simply vanished in light.
                     .stroke((light ? Color.black : Color.white).opacity(on ? 0.85 : 0),
                             lineWidth: on ? 2.5 : 0)
+                    // §6c: an overlay is hit-testable. This one covers the button's edge for
+                    // 260 ms after every shortcut — i.e. exactly while the operator may be
+                    // reaching for it with the mouse.
+                    .allowsHitTesting(false)
             )
             .brightness(on ? (light ? -0.14 : 0.22) : 0)
             .scaleEffect(on ? 0.975 : 1)

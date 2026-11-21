@@ -22,9 +22,10 @@ enum Loudness {
         let lufs: Double
         /// 400 ms blocks that survived both gates.
         let blocks: Int
-        /// True when the range was long enough to gate properly. A range under ~1.2 s has fewer
-        /// than 3 blocks, where the relative gate is meaningless, so the figure falls back to an
-        /// ungated energy mean and this says so.
+        /// True when the range was long enough to gate properly. Three 400 ms blocks need six
+        /// 100 ms sub-blocks, i.e. **0.6 s** — not the 1.2 s this used to claim. Below that the
+        /// relative gate is meaningless and the figure falls back to an ungated energy mean.
+        /// `Analysis.minScopeSec` is 0.5, so the band that actually takes it is 0.5–0.6 s.
         let gated: Bool
         /// Max |sample| across every channel, linear. This is SAMPLE peak, not true peak — true
         /// peak needs 4x oversampling and is always >= this, so treating it as a headroom figure
@@ -97,12 +98,24 @@ enum Loudness {
     static let absoluteGate = -70.0     // LUFS
     static let relativeGate = -10.0     // LU below the ungated mean
 
-    /// Channel weights from BS.1770 table 3. L/R/C are 1.0; the surrounds are +1.5 dB. Our files
-    /// are stereo, so the surround branch is there only so a stray multichannel file is not
-    /// measured wrongly without saying so.
+    /// Channel weights from BS.1770-4 table 3: L/R/C are 1.0, the surrounds +1.5 dB (1.41),
+    /// and **LFE is excluded entirely**.
+    ///
+    /// The previous `i >= 3 ? 1.41 : 1.0` got both wrong for the layouts it claimed to cover:
+    /// in 5.1 it gave the LFE — usually the hottest channel — a +1.5 dB weight instead of
+    /// zero, so loudness over-reported, the auto-gain under-boosted and the song went out
+    /// quiet; in quad it weighted Ls at 1.0 and Rs at 1.41. An unknown layout now gets 1.0
+    /// across the board, which is the honest answer rather than a guess at channel order.
     static func channelWeight(_ i: Int, of total: Int) -> Double {
-        guard total > 3 else { return 1.0 }
-        return i >= 3 ? 1.41 : 1.0
+        switch total {
+        case 6:                              // L R C LFE Ls Rs — LFE is EXCLUDED, not weighted
+            if i == 3 { return 0 }
+            return i >= 4 ? 1.41 : 1.0
+        case 5:                              // L R C Ls Rs
+            return i >= 3 ? 1.41 : 1.0
+        default:
+            return 1.0
+        }
     }
 
     /// Gated loudness from pre-computed 100 ms sub-blocks (BS.1770's channel-weighted mean
@@ -123,7 +136,7 @@ enum Loudness {
                 z.append(acc / Double(perBlock))
             }
         }
-        // Under ~1.2 s there are fewer than 3 blocks and the relative gate is meaningless.
+        // Under 0.6 s there are fewer than 3 blocks and the relative gate is meaningless.
         if z.count < 3 {
             return (lkfs(subs.reduce(0, +) / Double(subs.count)), z.count, false)
         }

@@ -33,6 +33,13 @@ enum AutoDetect {
     static let framesPerSecond = 4
 
     /// One pass over the file producing a 1 Hz chromagram and a 1 Hz loudness curve.
+    ///
+    /// **Cancellable, and it has to be.** ~0.25 s per song in release (~5 s in a debug build —
+    /// do not read the figure off a debug diagnostic), with the whole file held as `[Float]`,
+    /// ~45 MB for four minutes. Without cooperative checks, cancelling the task only
+    /// discarded the RESULT, so holding ↓ through a 60-song round would start sixty
+    /// concurrent five-second FFT passes. §12 records exactly that shape for the old
+    /// uncancelled per-song decode.
     static func extract(url: URL) -> Features? {
         guard let file = try? AVAudioFile(forReading: url) else { return nil }
         let fmt = file.processingFormat
@@ -40,7 +47,12 @@ enum AutoDetect {
         let channels = Int(fmt.channelCount)
         guard rate > 0, channels > 0, file.length > 0 else { return nil }
         let duration = Double(file.length) / rate
-        guard duration > 5, duration < 4 * 3600 else { return nil }
+        // 20 minutes, NOT `Analysis`'s 4 hours. That bound was copied across without noticing
+        // the cost changed: `Analysis` keeps ~12 bytes per claimed millisecond, this holds the
+        // whole file as `[Float]` — 176 KB per second, so a 4-hour file would reserve ~2.5 GB.
+        // Nothing in a quiz round is 20 minutes long; a full-episode rip dropped into songs/ is
+        // the realistic trigger and it should simply not get a guess.
+        guard duration > 5, duration < 20 * 60 else { return nil }
 
         // Mono mix, read in one streamed pass. A 4-minute track is ~42 MB of Float32 — the same
         // order as the decode `Analysis` already does and dropped immediately after.
@@ -57,12 +69,14 @@ enum AutoDetect {
             if got == 0 { break }
             remaining -= Int64(got)
             guard let ch = buf.floatChannelData else { break }
+            if Task.isCancelled { return nil }
             for i in 0..<got {
                 var sum: Float = 0
                 for c in 0..<channels { sum += ch[c][i] }
                 mono.append(sum / Float(channels))
             }
         }
+        if Task.isCancelled { return nil }
         guard mono.count > windowSize else { return nil }
 
         let hop = max(1, Int(rate) / framesPerSecond)
@@ -93,7 +107,15 @@ enum AutoDetect {
         var windowed = [Float](repeating: 0, count: n)
 
         var pos = 0
+        var sinceCheck = 0
         while pos + n <= mono.count {
+            // Every ~16 frames, i.e. ~4 s of audio — often enough that a cancel takes effect
+            // inside a second, rare enough not to matter against an FFT.
+            sinceCheck += 1
+            if sinceCheck >= 16 {
+                sinceCheck = 0
+                if Task.isCancelled { return nil }
+            }
             vDSP_vmul(Array(mono[pos..<(pos + n)]), 1, window, 1, &windowed, 1, vDSP_Length(n))
 
             var sumSq: Float = 0
@@ -174,7 +196,10 @@ enum AutoDetect {
     /// Clamped to 8..30 s from the start. The real library has one human-set intro of 38 s
     /// (202), so the clamp is a guess-bound, not a claim about what a GM may choose.
     static func introEnd(features f: Features, from start: Double) -> Double {
-        let fallback = min(start + 15, max(start + minIntroSec, f.duration - 1))
+        // Clamped INSIDE the song. `max(start + minIntroSec, duration - 1)` could exceed the
+        // file: a 10 s song with `start = 5` returned 13 s. `play(from:)` clamps so nothing
+        // plays past the end, but the value is written to config.json and the countdown reads it.
+        let fallback = min(start + 15, max(start + minIntroSec, f.duration - 1), f.duration)
         let s = Int(start.rounded())
         guard f.seconds > s + Int(minIntroSec) + 2 else { return fallback }
 
@@ -247,6 +272,7 @@ enum AutoDetect {
         var bestT = first
         var bestScore = -Double.infinity
         for t in first...last {
+            if Task.isCancelled { return nil }
             var r: Double = 0
             var u = 0
             while u <= last {

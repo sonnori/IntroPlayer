@@ -64,11 +64,18 @@ final class Player: ObservableObject {
         desc.componentSubType = kAudioUnitSubType_PeakLimiter
         desc.componentManufacturer = kAudioUnitManufacturer_Apple
         limiter = AVAudioUnitEffect(audioComponentDescription: desc)
-        // Match the web chain's brick wall (threshold -1 dB, fast attack). A stock PeakLimiter
-        // limits at 0 dBFS with a 12 ms attack, which lets transients through to the desk.
-        limiter.auAudioUnit.parameterTree?.parameter(withAddress: 0)?.value = 0.003  // attack
-        limiter.auAudioUnit.parameterTree?.parameter(withAddress: 1)?.value = 0.120  // decay
-        limiter.auAudioUnit.parameterTree?.parameter(withAddress: 2)?.value = -1.0   // pre-gain
+        // Attack, release, pre-gain — CLAMPED TO THE UNIT'S OWN REPORTED RANGE. The release
+        // was 0.120 s against a reported maximum of 0.040, and the AUParameter bridge does not
+        // clamp: the value read back as 0.1200 and the resulting behaviour is undefined and
+        // OS-version dependent. The ranges are queried rather than hardcoded because they are
+        // not the ones in the SDK header's comment on this machine.
+        func setParam(_ addr: AUParameterAddress, _ want: AUValue) {
+            guard let p = limiter.auAudioUnit.parameterTree?.parameter(withAddress: addr) else { return }
+            p.value = min(max(want, p.minValue), p.maxValue)
+        }
+        setParam(0, 0.003)   // attack
+        setParam(1, 0.040)   // release — the unit's maximum; 0.120 was out of spec
+        setParam(2, -1.0)    // pre-gain
 
         engine.attach(node); engine.attach(eq); engine.attach(limiter)
         // Keep the Mac awake for as long as the app runs — this is what `caffeinate` did for the
@@ -143,12 +150,20 @@ final class Player: ObservableObject {
                     autoDb = min(max(Analysis.targetLufs - m.lufs, -12), 12)   // same ±12 clamp
                 }
             }
-            let lo = used == .song ? 0 : min(c.introStart, c.introEnd)
-            let hi = used == .song ? a.duration : max(c.introStart, c.introEnd)
-            let pk = Double(a.peak(lo, hi))
+            // ALWAYS the intro range, never the measurement scope. The limiter acts on what is
+            // PLAYED, and that is the intro whatever the gain was measured over — following
+            // `used` meant a `.song` scope took the peak from a mastered track's ~0 dBFS
+            // maximum and reported every song as squashed.
+            let lo = min(c.introStart, c.introEnd)
+            let hi = max(c.introStart, c.introEnd)
+            let pk = Double(hi > lo ? a.peakAllChannels(lo, hi) : 0)
             if pk > 0 { headroom = Player.limiterCeilingDb - 20 * log10(pk) }
         }
-        let total = autoDb + c.trimDb
+        // `min(24, nan)` returns 24 — Swift's min yields its first argument when the second is
+        // NaN — so a non-finite total would apply the MAXIMUM +24 dB to live playback. Every
+        // other guard in this file fails closed; this one failed wide open.
+        let raw = autoDb + c.trimDb
+        let total = raw.isFinite ? raw : 0
         baseGainDb = total
         if !fading { eq.globalGain = Float(max(-96, min(24, total))) }
         gainDb = total
@@ -160,9 +175,18 @@ final class Player: ObservableObject {
                      headroomDb: headroom.isFinite ? headroom : 0)
     }
 
-    /// The limiter's threshold. Gain beyond `peak + this` is taken back by the limiter rather
-    /// than heard.
-    static let limiterCeilingDb: Double = -1.0
+    /// Where limiting actually begins, in nominal dBFS (input + applied gain).
+    ///
+    /// **`kLimiterParam_PreGain` is not a threshold**, which is the trap this constant used to
+    /// fall into. Measured by rendering the real graph offline and sweeping it: output is
+    /// exactly `input + gain − 1.0 dB` right up to a nominal **+1.0 dBFS**, where limiting
+    /// starts. So the pre-gain is a flat 1 dB attenuation, and the knee is at +1, not −1.
+    ///
+    /// Getting this wrong overstated every `limiterEats` figure by exactly 2 dB — enough to
+    /// raise the `squashedIntro` pre-flight warning on song 102, whose true figure is 1.42 dB
+    /// against a 2.0 dB threshold, i.e. a warning fired at a song the limiter never touches.
+    /// §12 already records that lesson once, under `previewArmed`.
+    static let limiterCeilingDb: Double = 1.0
 
     // MARK: - transport
 

@@ -60,10 +60,14 @@ enum Artwork {
     /// Named after the audio file, so a human opening `.covers/` can see what is what — and so
     /// renaming a song orphans its cover exactly the way it orphans its config entry (§9),
     /// rather than leaving a mystery file keyed by a hash.
+    ///
+    /// The FULL basename including the extension, because stripping it collided: `x.mp3` and
+    /// `x.m4a` — the same title in two formats, which is how a re-rip arrives — shared one
+    /// `x.jpg`, so `hasCover` returned true for the second file and it rendered the first
+    /// one's sleeve. This file's own header says wrong art is worse than none.
     static func cacheURL(for path: String) -> URL {
         let base = (path as NSString).lastPathComponent
-        let stem = (base as NSString).deletingPathExtension
-        return cacheDir(for: path).appendingPathComponent(stem + ".jpg")
+        return cacheDir(for: path).appendingPathComponent(base + ".jpg")
     }
 
     /// Artwork embedded in the audio file itself (ID3 `APIC`, MP4 covr, …). Offline, exact,

@@ -186,6 +186,7 @@ struct ContentView: View {
         if model.store.saveFailed {
             HStack(spacing: 12) {
                 Text("⚠ บันทึกไม่สำเร็จ").font(Typo.subhead).foregroundStyle(Palette.red)
+                    .fixedSize()
                 Text(model.store.saveState).font(Typo.caption).foregroundStyle(Palette.text)
                 Text("— เครื่องนี้อาจเขียนไฟล์ไม่ได้ (ดิสก์เต็ม / สิทธิ์โฟลเดอร์) marker ที่แก้ไว้จะหายตอนปิดแอป")
                     .font(Typo.caption).foregroundStyle(Palette.muted)
@@ -202,7 +203,10 @@ struct ContentView: View {
             }
             .padding(.horizontal, 18).padding(.vertical, 8)
             .frame(maxWidth: .infinity)
-            .background(Color(hex: 0x482B39))
+            // A FIXED dark plum under theme-aware text measured 1.25:1 in light — the
+            // explanation and the retry button both unreadable, on the one condition that
+            // silently loses a day of markers. Same mistake as the header bar, one screen over.
+            .background(Palette.tintBad)
             .overlay(alignment: .top) {
                 Rectangle().fill(Palette.red).frame(height: 1).allowsHitTesting(false)
             }
@@ -335,7 +339,6 @@ struct ContentView: View {
             case 35: model.updateConfigQuiet { $0.played.toggle() }; model.pulse(PulseID.played)
             case 36: model.confirmCurrent()                                      // Return
             case 48: model.nextNeedingReview()                                   // Tab
-            // Audition the hook and stop. `R` stays unbounded — that one is on camera.
             case 46: model.cycleFocusMarker()                                              // M
             case 6:  model.zoomIntro(); model.pulse(PulseID.zoomIntro)                     // Z
             case 27, 78: model.zoomBy(1.6); model.pulse(PulseID.zoomOut)                   // -
@@ -437,12 +440,14 @@ struct SongListView: View {
                         // Needs the internet, so it lives with the other deliberate actions
                         // rather than on the toolbar: on a show day nothing in this app should
                         // touch the network by accident (§1).
+                        // While it runs the item becomes the way to STOP it: a round of 60
+                        // with no embedded art is over three minutes of requests.
                         Button(model.coverFetching
-                               ? "กำลังดึงปกเพลง… \(model.coverProgress)"
+                               ? "■ หยุดดึงปก (\(model.coverProgress))"
                                : "🖼 ดึงปกเพลงของรอบนี้ (ต้องต่อเน็ต)") {
-                            model.fetchCoversForRound()
+                            if model.coverFetching { model.cancelCoverFetch() }
+                            else { model.fetchCoversForRound() }
                         }
-                        .disabled(model.coverFetching)
                         Divider()
                         Button("ℹ เกี่ยวกับ / เวอร์ชั่น \(AppVersion.short)") { model.showAbout = true }
                     } label: {
@@ -622,7 +627,10 @@ struct SongRow: View {
                 .font(active ? Typo.bodyEm : Typo.body)
                 .lineLimit(2)
                 .strikethrough(used)
-                .foregroundStyle(active ? .white : Palette.text)
+                // NOT `.white`: the selected row's background is `tintSelect`, which is pale
+                // lavender in light mode — white on it measures 1.40:1, i.e. the title of the
+                // song you are working on disappears. `tintSelectText` is the partner value.
+                .foregroundStyle(active ? Palette.tintSelectText : Palette.text)
                 .frame(maxWidth: .infinity, alignment: .leading)
             // Where it sat in the running order. Songs are never played in list order, so without
             // this the list cannot answer "what did we open first" at all — you had to open the
