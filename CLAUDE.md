@@ -283,7 +283,7 @@ native/
 ./native/build.sh          # release, universal (arm64 + x86_64)
 ./native/build.sh debug    # this machine's arch only, for iterating
 ./native/release.sh        # build + package dist/IntroPlayer-<ver>.zip to hand over — §15
-./native/installer-test.sh # 112 assertions on the installer; needs dist/ — §15
+./native/installer-test.sh # 123 assertions on the installer; needs dist/ — §15
 ```
 
 `build.sh` assembles into `RGF Intro Player.app.new` and swaps at the end, so a failure part-way
@@ -457,8 +457,15 @@ property, not the mechanism: amber is YELLOW against a BLUE accent, and deutan l
 blue-yellow axis intact. The real separation is ΔE 67 in light (74 in dark), and the carrier of
 last resort is still the word next to it.
 
-`--palettetest` measures both themes in Swift — 44 assertions over the ladder, text contrast,
-fill-vs-surface, `ink`-on-fill, and the deutan pairs. It also **pins the accent/purple collision
+`--palettetest` measures both themes in Swift — 64 assertions over the ladder, text contrast,
+fill-vs-surface, `ink`-on-fill, the tinted chips, and the deutan pairs.
+
+> `Palette.audit` is the list it measures, and it must name **every** value. It first shipped
+> naming none of the ten tints the theme added, so the suite passed 44/44 while measuring
+> nothing the change introduced. Completing it immediately found four places at 3.66:1 —
+> accent text on a tint of its own hue, which cannot work: a tint and its accent are close in
+> hue by construction, so only lightness can separate them and the tint has already spent it
+> staying distinct from the surface behind it. Hence `cyanOnTint` / `amberOnTint` / `redOnTint`. It also **pins the accent/purple collision
 as expected** (ΔE < 6), so nobody "fixes" it and quietly re-invites blue-vs-purple to become the
 only carrier of the armed bit.
 
@@ -584,8 +591,25 @@ asked for more than fits under the limiter's −1 dBFS wall and were squashed in
 
 | | asks for | limiter takes back |
 |---|---|---|
-| 102_BOWKYLION | +6.12 dB | **3.4 dB** |
-| 107_PROXIE | +12.0 dB | **11.5 dB** |
+| 102_BOWKYLION | +6.12 dB | 1.4 dB |
+| 107_PROXIE | +12.0 dB | **9.5 dB** |
+
+> **`kLimiterParam_PreGain` is not a threshold**, and assuming it was made every one of these
+> figures 2 dB too big on first writing. Rendering the real graph offline and sweeping it shows
+> the output is exactly `input + gain − 1.0 dB` up to a nominal **+1.0 dBFS**, where limiting
+> begins — so the pre-gain is a flat 1 dB attenuation and the knee is at +1, not −1.
+>
+> The 2 dB mattered: it put song 102 at 3.4 dB against the pre-flight's 2.0 dB threshold, i.e.
+> a `squashedIntro` warning on a song the limiter never touches. §12 already records that
+> lesson under `previewArmed` — a warning that fires when nothing is wrong is one that gets
+> ignored on the day it matters. **If you change the limiter's parameters, re-measure this
+> constant by rendering the graph; do not read it off the parameter names.**
+>
+> Two more in the same place. The headroom peak must come from the **intro range always**, not
+> from the measurement scope — following `loudnessScope: song` took the peak from a mastered
+> track's ~0 dBFS and reported every song as squashed. And it must cover **every channel**:
+> `env` is channel 0 (right for drawing), but the gain is applied to all of them, and a
+> hard-panned transient on the right measured 1.4 dB low on song 106.
 
 The level card said +12.0 and the audience heard about +0.5, plus pumping. The gain is
 deliberately **not capped** — a brief transient meeting a brick wall is what a limiter is for,
@@ -650,8 +674,34 @@ mistake even when the section is right.
 > song, after the intro, and actually repeating.
 
 Everything written stays `auto`, so the song stays in the `Return`/`Tab` review sweep and in the
-pre-flight until a human confirms it. The pass runs only for songs nobody has set up, once per
-path per session, off the main actor — holding ↓ through a round must not start an FFT per song.
+pre-flight until a human confirms it. ~0.25 s per song in release.
+
+> **Measure this in release.** The same pass takes ~5 s in a debug build, and `build.sh debug`
+> is what sits in the tree while iterating — a figure read off a debug diagnostic is 20× out
+> and argues for a design the app does not need.
+
+Five rules constrain when it may write, and each exists because of a specific way it could
+destroy work:
+
+- **Never while that song is playing.** Moving Intro End under live playback is §10's forbidden
+  shape. Song 102's guess is 11.0 s against a stored 15.0, so a guess landing mid-question
+  would have cut the audio and jumped the playhead *backwards*; landing outward instead leaves
+  the node bounded at the old value while the countdown reads the new one.
+- **Through `updateConfig`'s clamps, undo and `remode`,** never `store.set`. It was the only
+  marker write in the app that skipped all three — which also meant it could persist
+  `introEnd <= introStart`, the state §12 calls the worst defect this app has had.
+- **Fill blanks only.** `isConfigured` is false whenever `auto` is true, which is right for the
+  green badge and wrong as a licence to overwrite: song 102 is `auto` only because
+  `Store.decode` repaired its degenerate range, and it carries `hook: 62.03` — a number no
+  default produces. An automatic guess may only write a field still exactly at its default.
+- **Never on a round with a `base`.** A signed-off handover must not acquire "แก้ที่กอง" badges
+  for edits nobody made; the return path would then export them as the operator's decisions and
+  the setter's diff sheet accepts every row by default (§8e).
+- **One task per path, recorded as done only on success.** Marking before the work, with a
+  single shared task slot, meant holding ↓ through a round marked every song guessed while
+  cancelling all but the last — the feature silently not happening. `AutoDetect.extract` has
+  cooperative cancellation points for the same reason: without them a cancel discards the
+  result but not the work.
 
 ### b) Playback graph (`ensureGraph`)
 Created lazily on the **first play** (Web Audio needs a user gesture). Wiring:
@@ -1513,6 +1563,50 @@ the day it does not help.
 - Chroma similarity for hook detection used a raw cosine, which scores 1.41–1.44 for **every**
   candidate in every song — so "the most repeated section" was silently just "the loudest eight
   seconds". Mean-centre before normalising (§7a4).
+- **`kLimiterParam_PreGain` was read as a threshold.** It is a flat attenuation; limiting starts
+  at nominal **+1 dBFS**, not −1. Every "the limiter will eat N dB" figure was 2 dB too big, and
+  that was enough to raise the new pre-flight warning on a song the limiter never touches.
+  Measure an audio unit's behaviour by rendering it, not by reading its parameter names.
+- The headroom peak followed the **measurement scope** instead of what is played, so
+  `loudnessScope: song` reported every song as squashed; and it read channel 0 while the gain is
+  applied to all of them, missing a hard-panned transient by 1.4 dB.
+- BS.1770's **LFE is excluded, not weighted 1.41**. The old index-based rule gave 5.1's loudest
+  channel a +1.5 dB weight, so the file measured loud and the auto-gain under-boosted it.
+- `eq.globalGain`'s clamp **failed open on NaN**: `min(24, nan)` returns 24, i.e. the maximum
+  possible boost to live playback. Everything else in that file fails closed.
+- The limiter's release time was set to 0.120 s against a reported maximum of 0.040, and the
+  `AUParameter` bridge does not clamp — the value read back out of spec, with OS-dependent
+  behaviour. Clamp writes to the unit's own `minValue`/`maxValue`.
+- `kBlockSec` used the nominal 0.1 s rather than `kSubFrames / sampleRate` — the `bucketHz`
+  drift, in a new place, biting only at 11025 Hz.
+- An `@Environment` property on a **`ButtonStyle`** is not reliably injected: SwiftUI installs
+  dynamic properties on Views and ViewModifiers, and a style is neither. It silently reads the
+  default (`.light`), which would have given every dark-theme button an invisible press. Read
+  the environment inside a nested `View` instead.
+- "A press that moves nothing writes nothing" was asserted and not true: the drag wrote the
+  **cursor's** time, so a click anywhere in the 8 pt slop moved the marker — up to a second at
+  full-song zoom. Dragging relative to the grab point makes the claim true by construction.
+- The two-stage marker rule made **Intro Start undraggable when stacked** with Intro End: the
+  `<=` tie-break always returned the later marker, which merely moved focus away, and `M` could
+  not help. The active marker wins a tie now. `--grabtest` had the same blind spot.
+- `rollback` skipped any item that had no backup counterpart — i.e. the one thing a FIRST
+  upgrade had actually installed. The old bundle came back, the new one stayed, and the dialog
+  said the original set was restored. And the loop that moves files aside called `die`, which
+  cannot undo what it had already moved.
+- `pgrep -f` was handed an operator-chosen path as an **extended regex**. A folder named
+  `IntroPlayer (ใหม่)` makes the pattern uncompilable, pgrep exits non-zero with no output, and
+  the running-app check fails **open**. Match `ps` output with `grep -F`.
+- A `backups/<stamp>/` directory passed `valid_target`, and it is reachable: the Dock follows
+  the old bundle when the installer moves it there, so the operator's own icon opens the old app
+  rooted in the backup — which has a `config.json` and no `songs/`. Every later marker edit then
+  lands in a folder `KEEP_BACKUPS` pruning deletes.
+- `"${EMPTY[@]}"` under `set -u` is a fatal error in bash 3.2 (what macOS ships). Inside process
+  substitution the subshell dies quietly and the running-app check returns empty — failing open.
+- The cover cache keyed on the filename **without its extension**, so `x.mp3` and `x.m4a` shared
+  one file and the second song showed the first one's sleeve.
+- A failed cover **write** was reported as "song not found", hiding the cheapest early signal
+  that the folder holding `config.json` cannot be written. Same shape as `saveNow()` reporting
+  "saved ✓" unconditionally.
 
 **Web version:**
 - `loadWaveform` opened with `if(decoding) return;`, which dropped the **newer** request: clicking
@@ -1643,7 +1737,7 @@ $BIN --version                        # ungated
 
 # the release path — no project data is touched, dist/ and a temp dir only
 ./native/release.sh --allow-dirty     # 10 zip checks must all pass
-./native/installer-test.sh            # 112 assertions, 19 cases; data byte-identical
+./native/installer-test.sh            # 123 assertions, 21 cases; data byte-identical
 
 # these WRITE — the cp above is not optional
 INTROPLAYER_DIAG=1 $BIN --resetflow   # must print "✓ ผ่าน" and keep every log event
@@ -1715,7 +1809,7 @@ what ships would then have compared nonsense to nonsense and passed. `release.sh
 does the same rather than hardcoding it, so a future rename cannot leave the harness asserting
 the old name and passing in every possible world.
 
-`installer-test.sh` is **112 assertions** now: the fixture's "previous release" is the
+`installer-test.sh` is **123 assertions over 21 cases** now: the fixture's "previous release" is the
 legacy-named bundle, which makes the ordinary update path the migration path, plus two new
 checks — the legacy bundle is gone from the target, and it is in `backups/` rather than deleted.
 
@@ -1858,7 +1952,7 @@ release, not an executable.
 An app cannot replace its own running bundle, so the last step has to be another process. That
 process is the **same `ติดตั้ง-อัปเดต.command`** run with `--unattended`: the backups, the
 checked `rm`, the full rollback and the "ask the installed binary its version before claiming
-success" check are reused rather than reimplemented, which is why the 112 assertions cover the
+success" check are reused rather than reimplemented, which is why the 123 assertions cover the
 in-app path too.
 
 The chain, and every step of it can refuse:
@@ -2016,9 +2110,9 @@ so the shell aborts rather than running the command if either variable is someho
 ./native/installer-test.sh     # needs dist/ — run ./native/release.sh first
 ```
 
-**112 assertions** against the real script with `osascript`/`pgrep`/`open` stubbed, so
+**123 assertions** against the real script with `osascript`/`pgrep`/`open` stubbed, so
 **production code is tested unmodified**. It proves the promise the feature rests on by hash: `config.json`,
-`log.json`, `songs/` and a customised `se/correct.mp3` come out byte-identical. 14 cases: the
+`log.json`, `songs/` and a customised `se/correct.mp3` come out byte-identical. 16 cases: the
 app-running refusal, the web-server warning (including that Cancel is the default button), the
 cancel, a full update (asserting *every* program file was replaced), a mid-copy failure (asserting
 every program file came *back*), install-onto-itself directly and through a symlink, a stale
