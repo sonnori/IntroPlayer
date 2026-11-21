@@ -101,6 +101,7 @@ struct RoundPackage {
 struct PreflightItem: Identifiable {
     enum Kind {
         case missingFile, neverOpened, stillAuto, shortIntro, hookPastEnd, silentIntro, hookDefault
+        case squashedIntro
         var blocking: Bool {
             switch self {
             case .missingFile, .neverOpened, .silentIntro: return true
@@ -116,6 +117,7 @@ struct PreflightItem: Identifiable {
             case .hookPastEnd:  return "Hook เลยท้ายเพลง"
             case .silentIntro:  return "ช่วง Intro แทบไม่มีเสียง"
             case .hookDefault:  return "Hook ยังเป็นค่าเริ่มต้น"
+            case .squashedIntro: return "หัวเพลงชนเพดาน — เสียงจะโดนบี้"
             }
         }
     }
@@ -130,6 +132,12 @@ enum Preflight {
     /// Below the web version's MIN_USABLE_RMS — at this level there is nothing for the audience
     /// to hear, so the question is unusable however well the markers are placed.
     static let silentRms: Double = 0.005
+    /// How much gain the limiter may take back before it is worth telling the setter. Under a
+    /// couple of dB the limiter is doing its job on transients; past it, it is working
+    /// continuously, the intro does not reach the level the app reports, and it goes out
+    /// squashed. Measured on the real library: two of nine intros, one by 11.5 dB, with nothing
+    /// anywhere saying so.
+    static let maxLimiterEatsDb: Double = 2.0
 
     /// The checks that need no audio decode. Returns instantly, so the handover screen can open
     /// without a spinner; `audioChecks` fills in the rest.
@@ -173,9 +181,27 @@ enum Preflight {
             if Task.isCancelled { return out }
             guard let c = store.songs[p],
                   let a = try? Analysis.analyse(url: Library.url(p)) else { continue }
-            let rms = a.rms(c.introStart, min(c.introEnd, a.duration))
+            let lo = min(c.introStart, c.introEnd), hi = min(max(c.introStart, c.introEnd), a.duration)
+            let rms = a.rms(lo, hi)
             if rms < silentRms {
                 out.append(PreflightItem(kind: .silentIntro, path: p, detail: Library.baseName(p)))
+                continue      // a silent intro is already the louder complaint about this song
+            }
+            // Same arithmetic as `Player.applyGain`, on the same window: how much of the gain
+            // the brick wall will claw back. A high-crest intro (near-silence plus one
+            // transient) asks for a large boost it physically cannot be given.
+            let m = a.measuredLufs(config: c, scope: store.loudnessScope)
+            if m.lufs.isFinite {
+                let gain = min(max(Analysis.targetLufs - m.lufs, -12), 12) + c.trimDb
+                let pk = Double(a.peak(lo, hi))
+                if pk > 0 {
+                    let eats = gain - (Player.limiterCeilingDb - 20 * log10(pk))
+                    if eats > maxLimiterEatsDb {
+                        out.append(PreflightItem(
+                            kind: .squashedIntro, path: p,
+                            detail: String(format: "%@ — กินคืน %.1f dB", Library.baseName(p), eats)))
+                    }
+                }
             }
         }
         return out

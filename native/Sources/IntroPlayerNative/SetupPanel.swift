@@ -206,6 +206,19 @@ struct SetupPanel: View {
                 Text("เกลี่ยชนเพดาน ±12 dB แล้ว — เพลงนี้ยังไม่ดังเท่าเป้า ต้องช่วยด้วย Trim")
                     .font(Typo.font(10)).foregroundStyle(Palette.amber)
             }
+            // The gain is NOT capped at the headroom — a brief transient meeting the brick wall
+            // is what a limiter is for. But past a few dB the limiter is working continuously,
+            // the song does not reach the level the number above claims, and it comes out
+            // squashed. Measured on the real library: two of nine intros, one of them by
+            // 11.5 dB, and nothing anywhere said so.
+            if model.limiterEats > 1.0 {
+                Text(String(format: "⚠ หัวเพลงชนเพดาน — ลิมิตเตอร์จะกินคืน %.1f dB "
+                            + "เสียงจะไม่ดังเท่าตัวเลขข้างบน และจะโดนบี้\n"
+                            + "ช่วงอินโทรนี้อาจมีเสียงแหลมโดดอยู่ ลองขยับ Intro Start/End เลี่ยงมัน",
+                            model.limiterEats))
+                    .font(Typo.font(10)).foregroundStyle(Palette.amber)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             HStack(spacing: 6) {
                 Text("วัดความดังจาก").font(Typo.font(12)).foregroundStyle(Palette.muted)

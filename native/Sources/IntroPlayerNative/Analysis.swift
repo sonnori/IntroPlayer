@@ -10,6 +10,11 @@ final class Analysis {
     static let envHz: Double = 1000          // envelope buckets per second (~1 MB for 4.5 min)
     static let minSpan: Double = 0.2         // deepest zoom
     static let targetRms: Double = 0.13
+    /// Where the auto-gain aims, in LUFS. Chosen as the level the OLD un-weighted-RMS path was
+    /// already delivering on the real library (it landed around −15.2 LUFS on average), so
+    /// switching the metric re-levels the set relative to each other without moving the whole
+    /// show's output level under the operator.
+    static let targetLufs: Double = -15.0
     static let minScopeSec: Double = 0.5     // intro shorter than this can't be measured
     static let minUsableRms: Double = 0.005  // near-silent range → fall back to whole song
 
@@ -29,6 +34,14 @@ final class Analysis {
     private(set) var globalPeak: Float = 1
     private(set) var duration: Double = 0
     private(set) var sampleRate: Double = 44100
+
+    /// K-weighted mean square per 100 ms sub-block, summed over channels with BS.1770's weights.
+    /// Gated LUFS for ANY range is computable from these without re-reading the file, which is
+    /// what makes a per-marker-edit re-level affordable — the window moves every time a marker
+    /// does. ~10 doubles a second: 21 KB for a four-minute song.
+    private(set) var kBlocks: [Double] = []
+    private(set) var kBlockSec: Double = Loudness.stepSec
+    private(set) var channels: Int = 1
 
     private(set) var framesRead: Int = 0
     /// A failed first read still leaves sqPrefix allocated, which used to report "ready" and show
@@ -54,6 +67,14 @@ final class Analysis {
         a.env = [Float](repeating: 0, count: n)
         a.sqPrefix = [Double](repeating: 0, count: n + 1)
 
+        a.channels = max(1, Int(fmt.channelCount))
+        let kw = Loudness.kWeighting(rate: fmt.sampleRate)
+        var kState = [Loudness.FilterState](repeating: .init(), count: a.channels)
+        let kSubFrames = max(1, Int((Loudness.stepSec * fmt.sampleRate).rounded()))
+        var kSum = [Double](repeating: 0, count: a.channels)
+        var kCount = 0
+        a.kBlocks.reserveCapacity(Int(a.duration / Loudness.stepSec) + 2)
+
         let chunk = AVAudioFrameCount(1 << 18)
         guard let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: chunk) else { return a }
 
@@ -78,6 +99,31 @@ final class Analysis {
             guard let ch = buf.floatChannelData else { break }
             let left = ch[0]      // mono-equivalent: channel 0, same as the web version
             for i in 0..<got {
+                // K-weighting runs over EVERY channel — BS.1770 sums channel powers, and the
+                // envelope's channel-0 shortcut is fine for drawing but not for loudness.
+                for c in 0..<a.channels {
+                    let x = Double(ch[c][i])
+                    var st = kState[c]
+                    let y = kw.shelf.b0 * x + kw.shelf.b1 * st.x1 + kw.shelf.b2 * st.x2
+                            - kw.shelf.a1 * st.y1 - kw.shelf.a2 * st.y2
+                    st.x2 = st.x1; st.x1 = x; st.y2 = st.y1; st.y1 = y
+                    let z = kw.highpass.b0 * y + kw.highpass.b1 * st.u1 + kw.highpass.b2 * st.u2
+                            - kw.highpass.a1 * st.v1 - kw.highpass.a2 * st.v2
+                    st.u2 = st.u1; st.u1 = y; st.v2 = st.v1; st.v1 = z
+                    kState[c] = st
+                    kSum[c] += z * z
+                }
+                kCount += 1
+                if kCount == kSubFrames {
+                    var acc = 0.0
+                    for c in 0..<a.channels {
+                        acc += Loudness.channelWeight(c, of: a.channels) * (kSum[c] / Double(kCount))
+                    }
+                    a.kBlocks.append(acc)
+                    for c in 0..<a.channels { kSum[c] = 0 }
+                    kCount = 0
+                }
+
                 let v = left[i]
                 let av = v < 0 ? -v : v
                 if av > peak { peak = av }
@@ -155,6 +201,42 @@ final class Analysis {
         var s = onset
         while s - stepT >= 0 && rms(max(0, s - Analysis.onsetWin), s) > quietThr { s -= stepT }
         return max(0, s - Analysis.preRoll)
+    }
+
+    /// Gated LUFS over a time range, from the sub-blocks built during analysis.
+    func lufs(_ t0: Double, _ t1: Double) -> Double {
+        guard !kBlocks.isEmpty, t1 > t0 else { return -.infinity }
+        let i0 = max(0, min(kBlocks.count, Int((t0 / kBlockSec).rounded(.down))))
+        let i1 = max(i0, min(kBlocks.count, Int((t1 / kBlockSec).rounded(.up))))
+        guard i1 > i0 else { return -.infinity }
+        return Loudness.gated(subBlocks: kBlocks[i0..<i1]).lufs
+    }
+
+    /// Highest sample magnitude in a range, straight off the drawing envelope (which already
+    /// stores a per-bucket peak). Sample peak, not true peak — true peak needs oversampling and
+    /// is always a little higher, so treating this as headroom is optimistic by a few tenths.
+    func peak(_ t0: Double, _ t1: Double) -> Float {
+        guard !env.isEmpty else { return 0 }
+        let i0 = max(0, min(env.count, Int((t0 * bucketHz).rounded(.down))))
+        let i1 = max(i0, min(env.count, Int((t1 * bucketHz).rounded(.up))))
+        guard i1 > i0 else { return 0 }
+        var m: Float = 0
+        for i in i0..<i1 where env[i] > m { m = env[i] }
+        return m
+    }
+
+    /// The loudness the auto-gain works from, with the same scope fallback as `measuredRms`.
+    func measuredLufs(config c: SongConfig, scope: LoudnessScope) -> (lufs: Double, usedScope: LoudnessScope) {
+        guard isReady, !kBlocks.isEmpty else { return (-.infinity, .song) }
+        let whole = { (self.lufs(0, self.duration), LoudnessScope.song) }
+        guard scope == .intro else { return whole() }
+        let a = min(c.introStart, c.introEnd), b = max(c.introStart, c.introEnd)
+        if b - a < Analysis.minScopeSec { return whole() }
+        let v = lufs(a, b)
+        // A silent lead-in would otherwise divide into the maximum boost. -70 LUFS is BS.1770's
+        // own absolute gate: below it there is nothing to measure.
+        if !v.isFinite || v < Loudness.absoluteGate { return whole() }
+        return (v, .intro)
     }
 
     /// Which stretch the auto-gain is measured over. Intro-scoped by default: the GM only plays the

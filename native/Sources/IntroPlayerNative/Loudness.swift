@@ -85,7 +85,7 @@ enum Loudness {
     }
 
     /// Per-channel filter state for the two-stage cascade.
-    private struct State {
+    struct FilterState {
         var x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0   // stage 1
         var u1 = 0.0, u2 = 0.0, v1 = 0.0, v2 = 0.0   // stage 2
     }
@@ -100,9 +100,39 @@ enum Loudness {
     /// Channel weights from BS.1770 table 3. L/R/C are 1.0; the surrounds are +1.5 dB. Our files
     /// are stereo, so the surround branch is there only so a stray multichannel file is not
     /// measured wrongly without saying so.
-    private static func weight(channel i: Int, of total: Int) -> Double {
+    static func channelWeight(_ i: Int, of total: Int) -> Double {
         guard total > 3 else { return 1.0 }
         return i >= 3 ? 1.41 : 1.0
+    }
+
+    /// Gated loudness from pre-computed 100 ms sub-blocks (BS.1770's channel-weighted mean
+    /// square per sub-block). This is the fast path `Analysis` uses: the gate is the same, only
+    /// the source of the sub-blocks differs. `--loudtest` cross-checks it against `measure`,
+    /// which re-reads the file — a reference implementation is only worth having if something
+    /// actually compares against it.
+    static func gated(subBlocks: ArraySlice<Double>) -> (lufs: Double, blocks: Int, gated: Bool) {
+        let perBlock = max(1, Int((blockSec / stepSec).rounded()))
+        func lkfs(_ ms: Double) -> Double { ms > 0 ? -0.691 + 10 * log10(ms) : -.infinity }
+        let subs = Array(subBlocks)
+        guard !subs.isEmpty else { return (-.infinity, 0, false) }
+        var z = [Double]()
+        if subs.count >= perBlock {
+            for start in 0...(subs.count - perBlock) {
+                var acc = 0.0
+                for k in start..<(start + perBlock) { acc += subs[k] }
+                z.append(acc / Double(perBlock))
+            }
+        }
+        // Under ~1.2 s there are fewer than 3 blocks and the relative gate is meaningless.
+        if z.count < 3 {
+            return (lkfs(subs.reduce(0, +) / Double(subs.count)), z.count, false)
+        }
+        let pass1 = z.filter { lkfs($0) > absoluteGate }
+        guard !pass1.isEmpty else { return (-.infinity, 0, true) }
+        let threshold = lkfs(pass1.reduce(0, +) / Double(pass1.count)) + relativeGate
+        let pass2 = pass1.filter { lkfs($0) > threshold }
+        let kept = pass2.isEmpty ? pass1 : pass2
+        return (lkfs(kept.reduce(0, +) / Double(kept.count)), kept.count, true)
     }
 
     /// Measure `[from, to]` of a file. Returns nil only if the file cannot be opened.
@@ -125,7 +155,7 @@ enum Loudness {
         file.framePosition = startFrame
 
         let (shelf, hp) = kWeighting(rate: rate)
-        var state = [State](repeating: State(), count: channels)
+        var state = [FilterState](repeating: FilterState(), count: channels)
 
         let subFrames = max(1, Int((stepSec * rate).rounded()))
         var subSums = [[Double]]()          // per sub-block, per channel: sum of squares (filtered)
@@ -207,7 +237,7 @@ enum Loudness {
             for c in 0..<channels {
                 var sum = 0.0
                 for k in 0..<subSums.count { sum += subSums[k][c] }
-                ungatedAcc += weight(channel: c, of: channels) * (sum / Double(ungatedFrames))
+                ungatedAcc += channelWeight(c, of: channels) * (sum / Double(ungatedFrames))
             }
         }
         let ungatedLufs = lkfs(ungatedAcc)
@@ -224,7 +254,7 @@ enum Loudness {
                 for c in 0..<channels {
                     var s = 0.0
                     for k in start..<(start + perBlock) { s += subSums[k][c] }
-                    acc += weight(channel: c, of: channels) * (s / Double(n))
+                    acc += channelWeight(c, of: channels) * (s / Double(n))
                 }
                 z.append(acc)
             }

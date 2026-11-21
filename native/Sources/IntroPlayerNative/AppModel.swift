@@ -614,12 +614,18 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    /// dB of the applied gain the output limiter will take back, > 0 only when the intro has
+    /// less headroom than the gain asks for. Published so the level card and the pre-flight can
+    /// both read it without recomputing.
+    @Published var limiterEats: Double = 0
+
     func refreshGain() {
         let c = config()
         let r = player.applyGain(analysis: analysis, config: c,
                                  normalize: store.normalize, scope: store.loudnessScope)
+        limiterEats = r.limiterEats
         if !store.normalize { scopeNote = "ปิดการเกลี่ยอยู่" }
-        else if r.usedScope == .intro { scopeNote = "วัดจากช่วง Intro จริง" }
+        else if r.usedScope == .intro { scopeNote = "วัดจากช่วง Intro จริง (LUFS)" }
         else if store.loudnessScope == .intro { scopeNote = "ช่วง Intro สั้น/เงียบเกิน — ใช้ทั้งเพลงแทน" }
         else { scopeNote = "วัดจากทั้งเพลง" }
     }

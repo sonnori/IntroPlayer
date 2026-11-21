@@ -112,25 +112,57 @@ final class Player: ObservableObject {
 
     // MARK: - level
 
+    /// What `applyGain` worked out. `limiterEats` is the part of the figure the output limiter
+    /// will take back, and it exists because the gain used to be computed with no reference to
+    /// the audio's peak at all — so the two quietest intros in the real library, the ones this
+    /// feature exists for, asked for more than fitted under the brick wall and got squashed
+    /// instead of raised. Measured: song 107 asked +12.0 dB with +0.5 dB of headroom.
+    struct Level {
+        var db: Double                 // what is actually applied (auto + trim)
+        var usedScope: LoudnessScope?
+        var limiterEats: Double        // dB of `db` the limiter will claw back; 0 when it fits
+        var headroomDb: Double         // dB available before the -1 dBFS wall
+    }
+
     /// Combined auto-normalise + per-song trim, applied as one dB figure.
+    ///
+    /// Measures **gated LUFS** (BS.1770-4) over the intro, not un-weighted RMS. Measured across
+    /// the real nine-song library, the RMS version left 2.6 LU of spread in what the audience
+    /// hears; targeting LUFS closes it. RMS over-weights bass energy, which is exactly what a
+    /// sparse intro is made of.
     func applyGain(analysis: Analysis?, config c: SongConfig, normalize: Bool, scope: LoudnessScope)
-        -> (db: Double, usedScope: LoudnessScope?) {
+        -> Level {
         var autoDb: Double = 0
         var used: LoudnessScope?
-        if normalize, let a = analysis, a.isReady {
-            let m = a.measuredRms(config: c, scope: scope)
-            used = m.usedScope
-            if m.rms > 0 {
-                let g = min(max(Analysis.targetRms / m.rms, 0.25), 4.0)   // ±12 dB clamp
-                autoDb = 20 * log10(g)
+        var headroom = Double.infinity
+        if let a = analysis, a.isReady {
+            if normalize {
+                let m = a.measuredLufs(config: c, scope: scope)
+                used = m.usedScope
+                if m.lufs.isFinite {
+                    autoDb = min(max(Analysis.targetLufs - m.lufs, -12), 12)   // same ±12 clamp
+                }
             }
+            let lo = used == .song ? 0 : min(c.introStart, c.introEnd)
+            let hi = used == .song ? a.duration : max(c.introStart, c.introEnd)
+            let pk = Double(a.peak(lo, hi))
+            if pk > 0 { headroom = Player.limiterCeilingDb - 20 * log10(pk) }
         }
         let total = autoDb + c.trimDb
         baseGainDb = total
         if !fading { eq.globalGain = Float(max(-96, min(24, total))) }
         gainDb = total
-        return (total, used)
+        // NOT capped. A brief transient meeting a brick wall is what a limiter is for, and
+        // silently lowering what goes on air is not ours to decide — §15's "fail visible, not
+        // shut". The figure is surfaced instead, in the level card and in the pre-flight.
+        let eats = headroom.isFinite ? max(0, total - headroom) : 0
+        return Level(db: total, usedScope: used, limiterEats: eats,
+                     headroomDb: headroom.isFinite ? headroom : 0)
     }
+
+    /// The limiter's threshold. Gain beyond `peak + this` is taken back by the limiter rather
+    /// than heard.
+    static let limiterCeilingDb: Double = -1.0
 
     // MARK: - transport
 

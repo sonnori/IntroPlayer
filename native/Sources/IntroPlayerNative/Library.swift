@@ -905,15 +905,17 @@ enum Diagnostics {
 
     /// Is the intro auto-gain actually levelling what the audience hears?
     ///
-    /// Read-only. Measures every song's intro window two ways — the app's un-weighted RMS and
-    /// BS.1770-4 gated LUFS — and then reports the thing that matters: the SPREAD of on-air
-    /// loudness that each method leaves behind. A normaliser is only as good as that spread.
-    /// It also reports how often the ±12 dB clamp and the output limiter bite, because a gain
-    /// the limiter eats is not a gain the audience hears.
+    /// Read-only. Measures every intro two ways — the app's gated LUFS and, independently, by
+    /// re-reading the file — and reports the SPREAD of on-air loudness left behind. A normaliser
+    /// is only as good as that spread. Also reports how much of each gain the output limiter
+    /// takes back, because a gain the limiter eats is not a gain the audience hears.
     static func loudTest() {
-        // The coefficients are derived for each file's own rate, so prove the derivation against
-        // the one rate BS.1770-4 publishes a table for. Getting this wrong is silent.
-        print("1) K-weighting coefficients at 48 kHz vs the BS.1770-4 table")
+        var pass = 0, fail = 0
+        func assertThat(_ ok: Bool) { if ok { pass += 1 } else { fail += 1 } }
+
+        // The coefficients are derived per file rate, so prove the derivation against the one
+        // rate BS.1770-4 publishes a table for. Getting this wrong is silent.
+        print("1) สัมประสิทธิ์ K-weighting ที่ 48 kHz เทียบตาราง BS.1770-4")
         let (shelf, hp) = Loudness.kWeighting(rate: 48000)
         let want: [(String, Double, Double)] = [
             ("shelf b0", shelf.b0,  1.53512485958697),
@@ -924,14 +926,12 @@ enum Diagnostics {
             ("hp a1",    hp.a1,    -1.99004745483398),
             ("hp a2",    hp.a2,     0.99007225036621),
         ]
-        var coefOk = true
         for (name, got, expect) in want {
-            let d = abs(got - expect)
-            if d > 1e-10 { coefOk = false }
-            print(String(format: "   %-9@ %+.14f  want %+.14f  %@", name as NSString, got, expect,
-                         (d <= 1e-10 ? "ok" : "✗ ต่าง \(d)") as NSString))
+            let ok = abs(got - expect) <= 1e-10
+            assertThat(ok)
+            print(String(format: "   %@ %-9@ %+.14f  want %+.14f",
+                         (ok ? "ok " : "✗  ") as NSString, name as NSString, got, expect))
         }
-        print(coefOk ? "   ✓ ตรงตามมาตรฐาน" : "   ✗ สูตรเพี้ยน — ตัวเลขข้างล่างเชื่อไม่ได้")
 
         let store = Store()
         let songs = Library.scan()
@@ -939,115 +939,103 @@ enum Diagnostics {
         print("\n2) วัดช่วง intro ของทุกเพลง  (songs=\(songs.count) scope=\(scope.rawValue))")
 
         struct Row {
-            let name: String
-            let a: Double, b: Double
-            let rms: Double, rmsAll: Double
-            let lufs: Double
-            let lufsUngated: Double
-            let peakDb: Double
-            let gainRms: Double
-            let clamped: Bool
-            let gated: Bool
+            let name: String, a: Double, b: Double
+            let lufs: Double, peakDb: Double, gain: Double
+            let clamped: Bool, eats: Double
         }
         var rows: [Row] = []
+        var worstDelta = 0.0, worstName = "—"
 
         for s in songs {
-            guard let a = try? Analysis.analyse(url: Library.url(s)) else {
+            guard let an = try? Analysis.analyse(url: Library.url(s)) else {
                 print("   \(Library.baseName(s))  FAILED to analyse"); continue
             }
             let c = store.config(for: s)
-            let m = a.measuredRms(config: c, scope: scope)
-            // the window the gain was measured over, so both methods see the same audio
+            let m = an.measuredLufs(config: c, scope: scope)
             var lo = min(c.introStart, c.introEnd), hi = max(c.introStart, c.introEnd)
-            if m.usedScope == .song { lo = 0; hi = a.duration }
-            guard let L = Loudness.measure(url: Library.url(s), from: lo, to: hi) else {
-                print("   \(Library.baseName(s))  FAILED to measure"); continue
+            if m.usedScope == .song { lo = 0; hi = an.duration }
+
+            // Cross-check: the fast path reads sub-blocks cached during analysis, the reference
+            // re-reads the file. A reference implementation is only worth keeping if something
+            // actually compares against it.
+            //
+            // Snap the reference to the SAME 100 ms grid. The cached sub-blocks are laid out
+            // from frame 0, so `Analysis.lufs` always measures whole sub-blocks; handing the
+            // reference the raw marker times gave it a different block phase, and on song 107
+            // — near-silence with one transient — a shifted grid moves which blocks clear the
+            // gates and the answer moved 0.72 LU. That is two legitimate measurements of
+            // slightly different things, not a defect, but it makes the check meaningless.
+            let step = Loudness.stepSec
+            let snapLo = (lo / step).rounded(.down) * step
+            let snapHi = (hi / step).rounded(.up) * step
+            if let ref = Loudness.measure(url: Library.url(s), from: snapLo, to: snapHi),
+               ref.lufs.isFinite, m.lufs.isFinite {
+                let d = abs(ref.lufs - m.lufs)
+                if d > worstDelta { worstDelta = d; worstName = Library.baseName(s) }
             }
-            let raw = Analysis.targetRms / max(m.rms, 1e-12)
-            let g = min(max(raw, 0.25), 4.0)
-            rows.append(Row(name: String(Library.baseName(s).prefix(26)),
-                            a: lo, b: hi,
-                            rms: m.rms, rmsAll: L.rmsPower,
-                            lufs: L.lufs, lufsUngated: L.lufsUngated, peakDb: L.peakDbfs,
-                            gainRms: 20 * log10(g),
+
+            let raw = Analysis.targetLufs - m.lufs
+            let g = min(max(raw, -12), 12)
+            let pk = Double(an.peak(lo, hi))
+            let peakDb = pk > 0 ? 20 * log10(pk) : -.infinity
+            let headroom = Player.limiterCeilingDb - peakDb
+            rows.append(Row(name: String(Library.baseName(s).prefix(26)), a: lo, b: hi,
+                            lufs: m.lufs, peakDb: peakDb, gain: g,
                             clamped: abs(raw - g) > 1e-9,
-                            gated: L.gated))
+                            eats: headroom.isFinite ? max(0, g - headroom) : 0))
         }
         guard !rows.isEmpty else { print("   ไม่มีเพลงที่วัดได้"); return }
 
-        print(String(format: "   %-26@ %11@ %8@ %8@ %8@ %8@ %8@",
-                     "song" as NSString, "intro" as NSString, "rmsCh0" as NSString,
-                     "rmsL+R" as NSString, "LUFS" as NSString, "peak" as NSString,
-                     "gain" as NSString))
+        print(String(format: "   %-26@ %11@ %8@ %8@ %8@",
+                     "song" as NSString, "intro" as NSString, "LUFS" as NSString,
+                     "peak" as NSString, "gain" as NSString))
         for r in rows {
-            print(String(format: "   %-26@ %5.1f-%5.1f %8.4f %8.4f %8.2f %8.1f %+8.2f%@",
-                         r.name as NSString, r.a, r.b, r.rms, r.rmsAll, r.lufs, r.peakDb,
-                         r.gainRms, (r.clamped ? " CLAMP" : "") as NSString))
+            print(String(format: "   %-26@ %5.1f-%5.1f %8.2f %8.1f %+8.2f%@",
+                         r.name as NSString, r.a, r.b, r.lufs, r.peakDb, r.gain,
+                         (r.clamped ? " CLAMP" : "") as NSString))
         }
 
-        // --- the number the whole feature rests on -----------------------------------------
+        print("\n3) ทางเร็ว (sub-block ที่แคชไว้) ต้องตรงกับการอ่านไฟล์ใหม่")
+        let okFast = worstDelta < 0.15
+        assertThat(okFast)
+        print(String(format: "   %@ต่างมากสุด %.3f LU  (%@)",
+                     (okFast ? "ok  " : "✗   ") as NSString, worstDelta, worstName as NSString))
+
         func spread(_ v: [Double]) -> (lo: Double, hi: Double, span: Double, sd: Double) {
             let lo = v.min() ?? 0, hi = v.max() ?? 0
             let mean = v.reduce(0, +) / Double(v.count)
             let sd = (v.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Double(v.count)).squareRoot()
             return (lo, hi, hi - lo, sd)
         }
-
-        // What the audience hears today: the intro's own loudness plus the gain the app applies.
-        let onAirNow = rows.map { $0.lufs + $0.gainRms }
         let before = spread(rows.map { $0.lufs })
-        let now = spread(onAirNow)
+        let after = spread(rows.map { $0.lufs + $0.gain })
+        // A clamped song CANNOT reach target, so it is reported apart rather than allowed to
+        // swamp the figure for the set.
+        let reachable = rows.filter { !$0.clamped }
+        let afterOK = spread(reachable.map { $0.lufs + $0.gain })
 
-        // A LUFS-targeted alternative, same ±12 dB clamp, target = the library's median so the
-        // average gain stays near 0 and the clamp stays out of the way.
-        let sorted = rows.map { $0.lufs }.sorted()
-        let targetLufs = sorted.count % 2 == 1
-            ? sorted[sorted.count / 2]
-            : (sorted[sorted.count / 2 - 1] + sorted[sorted.count / 2]) / 2
-        var lufsClamped = 0
-        let onAirLufs = rows.map { r -> Double in
-            let raw = targetLufs - r.lufs
-            let g = min(max(raw, -12), 12)
-            if abs(raw - g) > 1e-9 { lufsClamped += 1 }
-            return r.lufs + g
-        }
-        let proposed = spread(onAirLufs)
-
-        print("\n3) ความต่างของความดังที่ออกอากาศ  (LU — ยิ่งน้อยยิ่งเท่ากัน)")
-        print(String(format: "   ไม่ปรับอะไรเลย        %6.2f .. %6.2f   กว้าง %5.2f   sd %4.2f",
+        print("\n4) ความต่างของความดังที่ออกอากาศ (LU — ยิ่งน้อยยิ่งเท่ากัน)")
+        print(String(format: "   ไม่ปรับอะไรเลย      %7.2f .. %7.2f  กว้าง %5.2f  sd %4.2f",
                      before.lo, before.hi, before.span, before.sd))
-        print(String(format: "   RMS (ที่ใช้อยู่)       %6.2f .. %6.2f   กว้าง %5.2f   sd %4.2f   clamp %d/%d",
-                     now.lo, now.hi, now.span, now.sd, rows.filter { $0.clamped }.count, rows.count))
-        print(String(format: "   LUFS (เป้า %.2f)    %6.2f .. %6.2f   กว้าง %5.2f   sd %4.2f   clamp %d/%d",
-                     targetLufs, proposed.lo, proposed.hi, proposed.span, proposed.sd,
-                     lufsClamped, rows.count))
+        print(String(format: "   หลังเกลี่ย          %7.2f .. %7.2f  กว้าง %5.2f  sd %4.2f",
+                     after.lo, after.hi, after.span, after.sd))
+        print(String(format: "   เฉพาะเพลงที่ถึงเป้า  %7.2f .. %7.2f  กว้าง %5.2f  sd %4.2f  (%d/%d เพลง)",
+                     afterOK.lo, afterOK.hi, afterOK.span, afterOK.sd, reachable.count, rows.count))
+        let okSpread = afterOK.span < 0.5
+        assertThat(okSpread)
+        print("   \(okSpread ? "ok  " : "✗   ")เพลงที่ถึงเป้าต้องเท่ากันแทบสนิท")
 
-        // --- how much of the gain survives the limiter ------------------------------------
-        print("\n4) ลิมิตเตอร์กินไปเท่าไหร่  (ขอ gain เท่าไหร่ vs หัวเพลงเหลือที่ให้กี่ dB)")
+        print("\n5) ลิมิตเตอร์กินคืนเท่าไหร่ (gain ที่ขอ เทียบกับที่หัวเพลงเหลือให้)")
         var eaten = 0
-        for r in rows {
-            let headroom = -1.0 - r.peakDb          // what fits under the -1 dB brick wall
-            let over = r.gainRms - headroom
-            if over > 0.1 {
-                eaten += 1
-                print(String(format: "   %-26@ ขอ %+.2f  มีที่ %+.2f  เกิน %.2f dB",
-                             r.name as NSString, r.gainRms, headroom, over))
-            }
+        for r in rows where r.eats > 0.1 {
+            eaten += 1
+            print(String(format: "   %-26@ ขอ %+.2f  กินคืน %.2f dB", r.name as NSString, r.gain, r.eats))
         }
-        if eaten == 0 { print("   ไม่มีเพลงที่เกิน — ลิมิตเตอร์ไม่ทำงานในช่วง intro") }
+        if eaten == 0 { print("   ไม่มี — ลิมิตเตอร์ไม่ทำงานในช่วง intro ของเพลงไหนเลย") }
+        else { print("   \(eaten)/\(rows.count) เพลง — SetupPanel กับ pre-flight จะเตือนให้") }
 
-        // --- channel 0 vs a real downmix ---------------------------------------------------
-        print("\n5) วัดแค่ channel ซ้าย ต่างจากวัดสองข้างแค่ไหน")
-        var worst = 0.0; var worstName = ""
-        for r in rows where r.rms > 0 && r.rmsAll > 0 {
-            let d = abs(20 * log10(r.rmsAll / r.rms))
-            if d > worst { worst = d; worstName = r.name }
-        }
-        print(String(format: "   มากสุด %.2f dB  (%@)", worst, worstName as NSString))
-        let ungated = rows.filter { !$0.gated }
-        if !ungated.isEmpty {
-            print("\n   หมายเหตุ: \(ungated.count) เพลงสั้นเกินกว่าจะ gate ได้ (ใช้ค่าเฉลี่ยตรงๆ): "
-                  + ungated.map { $0.name }.joined(separator: ", "))
-        }
+        print("\nผ่าน \(pass)  ตก \(fail)")
+        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
     }
+
 }
