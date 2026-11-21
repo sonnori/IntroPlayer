@@ -202,7 +202,10 @@ check "web launcher ยัง executable"            '[ -x "$U/IntroPlayer.app/C
 check "ไม่มี config.json ติดไปด้วย"             '[ ! -e "$U/config.json" ]'
 check "ไม่มี log.json ติดไปด้วย"                '[ ! -e "$U/log.json" ]'
 check "ไม่มี songs/ ติดไปด้วย"                  '[ ! -e "$U/songs" ]'
-check "se/ ครบ"                                '[ -f "$U/se/correct.mp3" ] && [ -f "$U/se/wrong.mp3" ]'
+# The folder and its instructions, not the audio: the stings are not redistributed (see
+# .gitignore), so asserting they are present would make every release fail by design.
+check "se/ มีโฟลเดอร์ + คำอธิบาย"                '[ -f "$U/se/README.txt" ]'
+check "ไม่มีไฟล์เสียงที่ไม่รู้ licence ติดไปด้วย"  '[ ! -f "$U/se/correct.mp3" ] && [ ! -f "$U/se/wrong.mp3" ]'
 ARCHS="$(lipo -archs "$U/IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative" 2>/dev/null || echo "")"
 check "universal (arm64 + x86_64) — arch: $ARCHS" '[[ "$ARCHS" == *arm64* && "$ARCHS" == *x86_64* ]]'
 # The strongest check available: ask the unzipped binary what it is.
