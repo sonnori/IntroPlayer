@@ -116,9 +116,11 @@ for item in "${SEEDS[@]}"; do
   [ -e "$ROOT/$item" ] || { echo "✗ SEED '$item' ไม่มีในโปรเจกต์"; exit 1; }
   cp -R "$ROOT/$item" "$STAGE/$item"
 done
-# The stings are untracked and deliberately not redistributed (see .gitignore), so a release
-# built from a fresh clone ships se/ with only its README. Say so rather than shipping a silent
-# gap — an operator whose Correct button makes no sound has no way to guess why.
+# A release must be reproducible from the public repo, so it ships exactly what the repo holds.
+# Without this the stings would reach the public GitHub release from the maintainer's own disk —
+# the one place excluding them from git does not cover. Remove this block together with the two
+# .gitignore lines if their licence is ever confirmed.
+rm -f "$STAGE/se/correct.mp3" "$STAGE/se/wrong.mp3"
 if [ ! -f "$STAGE/se/correct.mp3" ] || [ ! -f "$STAGE/se/wrong.mp3" ]; then
   echo "  ⚠ se/ ไม่มีไฟล์เสียง — ชุดนี้จะไม่มีเสียงตอบถูก/ผิด"
   echo "    (ปกติ ถ้า build จาก clone ใหม่ — ไฟล์เสียงไม่ได้อยู่ใน repo)"
