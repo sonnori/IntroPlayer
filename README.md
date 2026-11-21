@@ -21,6 +21,7 @@
 
 **อัปเดตครั้งต่อไปกดในแอปได้เลย** — ตั้งช่องเช็กเวอร์ชั่นในหน้า *เกี่ยวกับแอป* เป็น `owner/repo`
 ของ repo นี้ครั้งเดียว หลังจากนั้นแอปจะบอกเองเมื่อมีเวอร์ชั่นใหม่ และกดปุ่มเดียวจบ
+(ทางนี้ไม่ติด Gatekeeper เลย เพราะ zip ที่แอปโหลดเองไม่ติดธง quarantine)
 
 ### ต้องเตรียมเองสองอย่าง
 
@@ -49,7 +50,8 @@
 
 ```
 native/          แอปหลัก — SwiftUI + AVAudioEngine (macOS 13+, SwiftPM, ไม่มี .xcodeproj)
-  build.sh         build + ประกอบ IntroPlayerNative.app
+  build.sh         build + ประกอบ "RGF Intro Player.app"
+  change-icon.sh   เปลี่ยนไอคอนจาก PNG 1024×1024
   release.sh       build + แพ็ก zip + ปล่อย GitHub Release
   installer.command  ตัวติดตั้ง/อัปเดต ที่ไม่แตะข้อมูลของผู้ใช้
   installer-test.sh  110 ข้อ ตรวจตัวติดตั้งด้วยสคริปต์ตัวจริง
@@ -65,13 +67,16 @@ index.html       เวอร์ชันเว็บ ทั้งแอปใ�
 ./native/release.sh --github   # build + แพ็ก + ปล่อย release
 ```
 
-มี headless diagnostic หลายตัวสำหรับตรวจ logic ที่สำคัญ (เช่น `--playtest` ยืนยันว่าเสียงหยุดตรง
-Intro End เป๊ะ, `--remodetest` ยืนยันว่าการแก้ marker ตอนเพลงเล่นไม่ทำให้เล่นเลยขอบ) — ดู
-`CLAUDE.md` §6c และ §14
+มี headless diagnostic หลายตัวสำหรับตรวจ logic ที่สำคัญ — ทุกตัวต้องมี `INTROPLAYER_DIAG=1`
+นำหน้า เช่น `--playtest` ยืนยันว่าเสียงหยุดตรง Intro End เป๊ะ, `--remodetest` ยืนยันว่าการแก้
+marker ตอนเพลงเล่นไม่ทำให้เล่นเลยขอบ, `--loudtest` วัดความดังตามมาตรฐาน BS.1770-4,
+`--palettetest` วัด contrast และ ΔE ของสีทั้งสองธีม — ดู `CLAUDE.md` §6c และ §14
+
+เอกสารทุกไฟล์เป็นภาษาไทย เพราะคนใช้งานจริงเป็นทีมงานไทย
 
 ## ข้อมูลของผู้ใช้ ไม่เคยอยู่ใน repo นี้
 
-`config.json` (โจทย์ที่ตั้งไว้) · `log.json` (log การถ่าย) · `songs/` · `se/*.mp3` — ทั้งหมด
+`config.json` (โจทย์ที่ตั้งไว้) · `log.json` (log การถ่าย) · `songs/` (รวม `.covers/`) · `se/*.mp3` — ทั้งหมด
 gitignore ไว้ และตัวติดตั้งไม่แตะไฟล์เหล่านี้เลยตอนอัปเดต เหตุผลอยู่ใน `CLAUDE.md` §5b และ §15
 
 ---
