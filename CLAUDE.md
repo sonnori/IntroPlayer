@@ -639,7 +639,17 @@ A round used to open with every song claiming `hook: 60.00`, a number from nowhe
 song under a minute sent Reveal past the end of the file. §8e measured the real cost: **8 of 9
 songs still sat on the default**, i.e. the hook step was being skipped in practice.
 
-`AutoDetect` builds a 1 Hz chromagram and loudness curve (vDSP FFT).
+`AutoDetect` builds a 1 Hz chromagram and loudness curve (vDSP FFT at 16384 samples /
+`framesPerSecond = 4`, then averaged down to 1 Hz — every index in `introEnd` and `hook` is a
+second, so don't read `framesPerSecond` as the feature rate). Chroma is **mean-centred before
+L2-normalising**, per second rather than per frame, which is what makes a quiet reprise of the
+chorus match the loud one.
+
+> `similarity` returns a mean **correlation**, so its range is **−1…1, not 0…1** — the
+> mean-centring is exactly what buys the negative half. Real music lands in 0.82–0.98, which is
+> why the walk-back threshold sits in such a narrow band: **0.85 is mid-range, not loose.** A
+> comment claiming 0…1 shipped for a while and is the kind that makes the next person "relax"
+> a threshold that is already central.
 
 - **Intro End** — the first clear step up in level after the start, which in practice is the
   beat or the vocal arriving. Clamped 8..30 s. There is no musical truth here: the intro is how
@@ -1607,6 +1617,29 @@ the day it does not help.
 - A failed cover **write** was reported as "song not found", hiding the cheapest early signal
   that the folder holding `config.json` cannot be written. Same shape as `saveNow()` reporting
   "saved ✓" unconditionally.
+- **`--updatestage` could only ever report failure.** Its staged-file loop spelled the bundle
+  name as the literal `"IntroPlayerNative.app"`, and `Updater.stage()` *requires*
+  `Install.bundleName` to be there before that loop runs — so the staged folder definitively
+  never held the old name, and the only diagnostic for the in-app update chain printed
+  `✗ ไม่ผ่าน` against a good release. `Install.bundleName`'s own doc comment names
+  `--updatestage` as the proof that the Swift copy of the name still agrees with a real
+  release: **a check that spells its subject literally is not checking the thing it claims
+  to.** Two reviewers' reports are what found it; running the flag is what would have.
+- **`dist/SHA256SUMS` named the zip beside it and gave the wrong hash.** It was written after
+  the `--github` early `exit 0` and after the refusal for a missing download URL, so both
+  paths left the *previous* run's file in place describing *this* run's zip — measured on
+  1.3.0: `a97f96cd…` claimed for a zip hashing to `1f2ca771…`. The in-app installer checks the
+  **manifest's** `sha256`, so it was never affected; the person verifying a hand-delivered zip
+  is who it misled, and what it told them was that a good release was corrupt. A checksum file
+  that lies is worse than none — the same lesson §7a3 records for a cross-check that compares
+  two slightly different things. The hash is a property of the zip, so compute it as soon as
+  the zip verifies, before any exit can skip it.
+- A failed `release.sh` left its **staging tree** in `dist/` (`rm -rf "$STAGE"` was on the two
+  success paths only), i.e. an unpacked release folder that looks exactly like an install
+  folder. §15 step 3 means the installer would refuse to aim at it, but a human copying into
+  it is not covered by that. Now a `trap`, and the unzip dir's `trap` was **folded into the
+  same line** rather than added: a second `trap … EXIT` **replaces** the first, which is how
+  the new cleanup would have been silently disarmed by the existing one.
 
 **Web version:**
 - `loadWaveform` opened with `if(decoding) return;`, which dropped the **newer** request: clicking
@@ -2041,7 +2074,12 @@ It also refuses to write a manifest with an empty `download` (pass `--no-downloa
 manifest and hand the zip over by hand). An empty one produces a dead-end notice: the operator is
 told there is a new version and then told to unzip a file they have no way to get.
 
-Two checks in it are worth keeping:
+Three checks in it are worth keeping:
+
+- **`SHA256SUMS` is written as soon as the zip verifies**, before any path can exit. It used to
+  be written down in the manifest section, which both `--github` and the no-download refusal
+  skip — leaving the previous run's hash beside this run's zip. See §12; the short version is
+  that a checksum which names the wrong file is worse than no checksum.
 
 - **It verifies the zip, not the staging folder.** Permissions and bundle structure are what
   survive or fail to survive a zip, a Drive upload and Archive Utility; checking the folder you
