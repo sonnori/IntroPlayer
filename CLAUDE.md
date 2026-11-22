@@ -578,6 +578,24 @@ clips the song title off the top and ✓/✗ off the bottom (§15's news-strip n
 clamped at 90 pt and the exact draw size comes from the image's own aspect ratio, so a narrow
 logo does not reserve 90 pt it will not use.
 
+**Transparent margins are cropped on load.** A designer's export is almost always padded, and
+that padding is not decoration here — it is height. The real logo arrived as a 1024x1024 PNG
+whose artwork occupies **1024x508**: half the canvas is empty. Drawn as-is inside the 22 pt box
+that gives a logo **10.9 pt tall** next to 15 pt text, in a 22 pt square that wastes the 90 pt
+of width it was allowed. Trimmed, the same file is 2.02:1 and draws **44 x 22** — full height,
+right proportion, and nobody has to re-export anything. The alpha test is `> 8`, not `> 0`: a
+PNG out of a vector tool carries an antialiased fringe of near-zero alpha, and testing for
+nonzero finds "artwork" in it and trims nothing. A fully transparent file returns nil rather
+than reserving 22 pt for nothing. Measured at 7.2 ms for 1024x1024, once per process.
+
+> **Do not assume the logo needs a white knockout.** Rendered against the real `#BA2616` at
+> the real 44x22, the show's full-colour logo reads *better* than an automatic knockout of it
+> — because its structure comes from heavy black outlines, not from its alpha, so flattening
+> every opaque pixel to white produced one solid white blob with no internal detail at all.
+> Knockout is right for a mark whose shape IS its alpha; it is wrong for anything outlined.
+> Render it on the actual colour at the actual size before deciding — that comparison took one
+> throwaway script and settled a question two people had been reasoning about.
+
 **Loaded once per process**, as a lazy `static let`. `ContentView` is re-initialised on every
 model publish (§6c) and the header re-renders at the player's tick rate, so reading the disk
 from `body` would `stat` 50 times a second — §8f's memoised-cover lesson. The cost is that

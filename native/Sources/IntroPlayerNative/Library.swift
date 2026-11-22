@@ -57,7 +57,47 @@ enum ShowLogo {
               w > 0, h > 0, w <= maxPixels, h <= maxPixels,
               let cg = CGImageSourceCreateImageAtIndex(src, 0, nil)
         else { return nil }
-        return NSImage(cgImage: cg, size: NSSize(width: w, height: h))
+        let art = trimmed(cg) ?? cg
+        return NSImage(cgImage: art, size: NSSize(width: art.width, height: art.height))
+    }
+
+    /// Crop away fully transparent margins.
+    ///
+    /// **A designer's logo export is almost always padded**, and the padding is not decoration
+    /// to us — it is height. The real file here is a 1024x1024 PNG whose artwork occupies
+    /// 1024x508, i.e. half the canvas is empty. Drawn as-is inside a 22 pt box that gives a
+    /// logo **10.9 pt tall** next to 15 pt text, sitting in a 22 pt square that wastes the 90 pt
+    /// width it was allowed. Trimmed, the same file is 2.02:1 and draws 44 x 22 — full height,
+    /// correct proportion, no re-export asked of anyone.
+    ///
+    /// Alpha > 8 rather than > 0: a PNG exported from a vector tool carries a fringe of
+    /// near-zero alpha around the artwork from antialiasing, and testing for nonzero would
+    /// "find" artwork in it and trim nothing.
+    private static func trimmed(_ cg: CGImage) -> CGImage? {
+        let w = cg.width, h = cg.height
+        guard w > 0, h > 0 else { return nil }
+        var px = [UInt8](repeating: 0, count: w * h * 4)
+        guard let ctx = CGContext(data: &px, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        var minX = w, maxX = -1, minY = h, maxY = -1
+        for y in 0..<h {
+            let row = y * w * 4
+            for x in 0..<w where px[row + x * 4 + 3] > 8 {
+                if x < minX { minX = x }
+                if x > maxX { maxX = x }
+                if y < minY { minY = y }
+                if y > maxY { maxY = y }
+            }
+        }
+        // Entirely transparent: there is no logo in this file, and returning the uncropped
+        // image would draw 22 pt of nothing while reserving the space.
+        guard maxX >= minX, maxY >= minY else { return nil }
+        if minX == 0 && minY == 0 && maxX == w - 1 && maxY == h - 1 { return cg }
+        return cg.cropping(to: CGRect(x: minX, y: minY,
+                                      width: maxX - minX + 1, height: maxY - minY + 1))
     }
 
     static var brandFile: URL { AppPaths.brand.appendingPathComponent("logo.png") }
