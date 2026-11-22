@@ -58,6 +58,41 @@ if [ "$ALLOW_DIRTY" = "0" ] && [ -n "$DIRT" ]; then
   exit 1
 fi
 
+# ---- GitHub pre-flight, BEFORE the build ----
+# Every one of these used to be checked at the very END, after ~30 s of building, staging,
+# zipping and verifying. That ordering had a real cost measured on 1.3.0: a second
+# `--github` run rebuilt and RE-ZIPPED, then refused because v1.3.0 already existed — and
+# zip output is not byte-reproducible (it stores timestamps), so the same commit re-zipped
+# gives a different file. `dist/IntroPlayer-1.3.0.zip` and `dist/SHA256SUMS` were left
+# describing a zip that is NOT the one the team downloads, with identical size and version
+# and a different hash. Anyone using SHA256SUMS to check a zip fetched from the release page
+# would conclude a good download was corrupt — the same failure this script was just fixed
+# for, one level up. Refusing before anything is written is what actually prevents it.
+if [ "$GH" = "1" ]; then
+  command -v gh >/dev/null 2>&1 || { echo "✗ ไม่มีคำสั่ง gh — ติดตั้ง GitHub CLI ก่อน"; exit 1; }
+  # Show what `gh` ACTUALLY said. This used to throw stderr away and then assert the cause
+  # ("ยังไม่ได้ login"), which is a guess: `gh auth status` also fails on a locked keyring, an
+  # expired token and missing scopes, and the fix for each is different. Measured on this
+  # machine — the check failed here while `gh auth status` reported a perfectly good
+  # `Logged in to github.com account sonnori (keyring)`, and the message sent the operator off
+  # to re-run `gh auth login` they did not need. Same shape as §12's `saveNow()` reporting
+  # "saved ✓" unconditionally: swallow the real error, print the one you assumed.
+  if ! GH_AUTH="$(gh auth status 2>&1)"; then
+    echo "✗ gh ใช้งานไม่ได้ — ข้างล่างนี้คือสิ่งที่ gh บอกมาจริงๆ:"
+    printf '%s\n' "$GH_AUTH" | sed 's/^/    /'
+    echo "  ถ้ามันบอกว่ายังไม่ได้ login ให้รัน: gh auth login"
+    exit 1
+  fi
+  SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo "")"
+  [ -n "$SLUG" ] || { echo "✗ โฟลเดอร์นี้ยังไม่ได้ผูกกับ repo บน GitHub"; exit 1; }
+  if gh release view "v$VERSION" >/dev/null 2>&1; then
+    echo "✗ มี release v$VERSION อยู่แล้วบน $SLUG — ไม่ได้ build อะไร และไม่ได้แตะ dist/"
+    echo "  ถ้าจะปล่อยซ้ำ: ลบอันเก่าก่อน  gh release delete v$VERSION"
+    echo "  ถ้าจะปล่อยของใหม่: ขยับเลขใน VERSION"
+    exit 1
+  fi
+fi
+
 if [ "$SKIP_BUILD" = "0" ]; then
   "$HERE/build.sh" release
 fi
@@ -256,13 +291,12 @@ ZIPSHA="$(shasum -a 256 "$DIST/$NAME.zip" | awk '{print $1}')"
 # and the zip in one place, and the app reads the release directly — so there is no manifest.json
 # to keep in step with the zip, which is the step most likely to be got wrong by hand.
 if [ "$GH" = "1" ]; then
-  command -v gh >/dev/null 2>&1 || { echo "✗ ไม่มีคำสั่ง gh — ติดตั้ง GitHub CLI ก่อน"; exit 1; }
-  gh auth status >/dev/null 2>&1 || { echo "✗ gh ยังไม่ได้ login — รัน: gh auth login"; exit 1; }
-  SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo "")"
-  [ -n "$SLUG" ] || { echo "✗ โฟลเดอร์นี้ยังไม่ได้ผูกกับ repo บน GitHub"; exit 1; }
+  # `gh`, the login, $SLUG and "does v$VERSION already exist" were all settled in the
+  # pre-flight above, before anything was built — see the comment there for why that
+  # ordering is load-bearing rather than tidy. Re-checked here only because the release
+  # could have been created by someone else while this build was running.
   if gh release view "v$VERSION" >/dev/null 2>&1; then
-    echo "✗ มี release v$VERSION อยู่แล้วบน $SLUG"
-    echo "  ถ้าจะปล่อยซ้ำ ให้ลบอันเก่าก่อน: gh release delete v$VERSION"
+    echo "✗ มี release v$VERSION โผล่ขึ้นมาระหว่างที่ build อยู่ — ไม่ปล่อยทับ"
     exit 1
   fi
   echo "→ gh release create v$VERSION  ($SLUG)"

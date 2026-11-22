@@ -718,7 +718,19 @@ enum Diagnostics {
                 print("  download  \(info.download)")
                 print("  sha256    \(info.sha256.isEmpty ? "— (ไม่มีใน manifest)" : info.sha256)")
                 print("  minMacOS  \(info.minMacOS.isEmpty ? "—" : info.minMacOS)\(info.needsNewerOS ? "  ✗ เครื่องนี้ใช้ไม่ได้" : "")")
-                print("  openable  \(info.openable?.path ?? info.openable?.absoluteString ?? "✗ ถูกบล็อก")")
+                // `.path` FIRST was wrong, and wrong in the one way this line exists to rule
+                // out: for an https URL `.path` is non-empty, so the `??` never reached
+                // `absoluteString` and a GitHub release printed as
+                // `/sonnori/IntroPlayer/releases/download/…` — a remote link displayed as a
+                // local absolute path. `openable` is precisely the gate that tells those two
+                // apart (§15: a remote link must be http/https; a local path must end in
+                // `.zip`), so this was the one line in the diagnostic that could not be
+                // allowed to blur them. Branch on the URL instead of leaning on a nil-coalesce.
+                if let u = info.openable {
+                    print("  openable  \(u.isFileURL ? "ไฟล์ในเครื่อง: \(u.path)" : u.absoluteString)")
+                } else {
+                    print("  openable  ✗ ถูกบล็อก")
+                }
                 guard info.openable != nil else { ok = false; return }
 
                 let dir = try Updater.scratch()

@@ -1634,6 +1634,34 @@ the day it does not help.
   that lies is worse than none — the same lesson §7a3 records for a cross-check that compares
   two slightly different things. The hash is a property of the zip, so compute it as soon as
   the zip verifies, before any exit can skip it.
+- **`--github` checked everything that can refuse at the END, after ~30 s of building,
+  staging, zipping and verifying.** A second `--github` run on an already-published version
+  therefore rebuilt and **re-zipped** before refusing — and **zip output is not
+  byte-reproducible** (it stores timestamps), so the same commit re-zipped is a different
+  file. Measured on 1.3.0: `dist/IntroPlayer-1.3.0.zip` and `dist/SHA256SUMS` were left
+  describing `6acdc855…` while the asset the team downloads is `af8a0ed0…` — same size, same
+  version, same commit stamp, different bytes. Anyone using SHA256SUMS to check a zip fetched
+  from the release page would conclude a good download was corrupt: the lying-checksum defect
+  above, one level up, reintroduced by *ordering* rather than by placement. The whole gh
+  pre-flight (`gh` present, auth, repo slug, "does this tag exist") now runs **before the
+  build**, so a re-run cannot write anything; the tag is re-checked after the build only in
+  case someone else published meanwhile.
+  > So `dist/` is **not** authoritative for a version that has shipped. `gh release download`
+  > is. Hand over the published asset, not a local rebuild of the same commit.
+- `gh auth status >/dev/null 2>&1 || echo "✗ gh ยังไม่ได้ login"` **swallowed the real error and
+  asserted a cause.** That check also fails on a locked keyring, an expired token and missing
+  scopes, and the fix differs for each — observed on this machine, the script refused while
+  `gh auth status` itself reported a perfectly good `Logged in to github.com account sonnori
+  (keyring)`, and the message sent the operator to re-run a `gh auth login` they did not need.
+  Print what the tool actually said. Same shape as `saveNow()` reporting "saved ✓"
+  unconditionally.
+- `--updatestage` printed `info.openable?.path ?? info.openable?.absoluteString`, and for an
+  https URL `.path` is **non-empty** — so the `??` never reached `absoluteString` and a GitHub
+  release displayed as `/sonnori/IntroPlayer/releases/download/…`, i.e. **a remote link shown
+  as a local absolute path**. `openable` is the one gate that distinguishes those (§15: a
+  remote link must be `http`/`https`; a local path must end in `.zip`, and those rules are not
+  interchangeable), so it was the single line in the diagnostic that must not blur them.
+  Branch on `isFileURL`; do not lean on a nil-coalesce to pick a representation.
 - A failed `release.sh` left its **staging tree** in `dist/` (`rm -rf "$STAGE"` was on the two
   success paths only), i.e. an unpacked release folder that looks exactly like an install
   folder. §15 step 3 means the installer would refuse to aim at it, but a human copying into
@@ -2057,6 +2085,16 @@ anything.
 ./native/release.sh --skip-build       # package the bundle as it stands
 ./native/release.sh --allow-dirty      # package from a tree with uncommitted edits
 ```
+
+**Everything that can refuse runs before the build.** With `--github` that means `gh` being
+present, the login, the repo slug and whether `v<VERSION>` already exists — all checked while
+`dist/` is still untouched, because a re-run that builds first **re-zips**, and zip output is
+not byte-reproducible: the same commit packaged twice gives two different files. See §12 for
+what that cost on 1.3.0. The consequence worth remembering is a rule about where truth lives:
+
+> Once a version is published, **`dist/` is not authoritative for it** — `gh release download`
+> is. Hand over the asset from the release page, never a local rebuild of the same commit,
+> even when `git` and the version stamp both say they are identical.
 
 Refuses a dirty tree unless told otherwise, and asserts the bundle's stamped version equals
 `VERSION` — otherwise a release could be cut from a stale app and nobody would find out until a
