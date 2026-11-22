@@ -135,11 +135,14 @@ struct ContentView: View {
             // violation: green has exactly one meaning in this app, "a human answered
             // correctly", and spending it on an ornament is how a palette stops meaning
             // anything. It was not even a `Palette` value. Replacing it fixes both at once.
-            if let logo = ShowLogo.image {
-                let s = ShowLogo.drawSize(logo)
-                Image(nsImage: logo)
+            if let logo = ShowLogo.prepared {
+                // The bitmap is already exactly `size x backingScale` pixels, so this frame is
+                // 1:1 and SwiftUI has no rescaling left to do. `.interpolation(.high)` stays
+                // only to cover the case where the window is dragged to a display of a
+                // different scale than the one resolved at launch.
+                Image(nsImage: logo.image)
                     .resizable().interpolation(.high)
-                    .frame(width: s.width, height: s.height)
+                    .frame(width: logo.size.width, height: logo.size.height)
                     .accessibilityHidden(true)
             }
             // `Palette.onHeader`, not `.white`. They are the same value, but this bar is dark

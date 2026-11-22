@@ -45,9 +45,12 @@ enum ShowLogo {
     /// header BEFORE decoding, so an absurd file costs nothing.
     private static let maxPixels = 4096
 
-    static let image: NSImage? = load()
+    /// The image AND the size to draw it at, resolved together. They have to be, because the
+    /// bitmap is pre-scaled to exactly the pixels that size occupies — see `load`.
+    struct Prepared { let image: NSImage; let size: CGSize }
+    static let prepared: Prepared? = load()
 
-    private static func load() -> NSImage? {
+    private static func load() -> Prepared? {
         let u = brandFile
         guard let d = try? Data(contentsOf: u), !d.isEmpty,
               let src = CGImageSourceCreateWithData(d as CFData, nil),
@@ -58,7 +61,84 @@ enum ShowLogo {
               let cg = CGImageSourceCreateImageAtIndex(src, 0, nil)
         else { return nil }
         let art = trimmed(cg) ?? cg
-        return NSImage(cgImage: art, size: NSSize(width: art.width, height: art.height))
+        guard art.width > 0, art.height > 0 else { return nil }
+
+        let dw = min(maxWidth, height * CGFloat(art.width) / CGFloat(art.height))
+        let pts = CGSize(width: max(1, dw), height: height)
+        // **Resample ONCE, here, to the pixels this will actually occupy** — rather than handing
+        // SwiftUI a 1024 px image and a 44 pt frame and letting it rescale on every draw.
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let pxW = max(1, Int((pts.width * scale).rounded()))
+        let pxH = max(1, Int((pts.height * scale).rounded()))
+        let small = resampled(art, pxW, pxH) ?? art
+        return Prepared(image: NSImage(cgImage: small, size: pts), size: pts)
+    }
+
+    /// High-quality reduction.
+    ///
+    /// **For a big reduction this must average areas, not sample points.** The real logo is
+    /// 1024x508 drawn at 44x22 on this 1x panel (§6d: 2560x1080 at ~81 PPI, `scale = 1.0`), so
+    /// one output pixel covers **23 x 23 = 529** source pixels. `CGContext`'s `.high` samples a
+    /// handful of them, which on artwork carrying a halftone dot pattern aliases the dots into
+    /// a muddy mush — the reported "ภาพมันเละ". Averaging all 529 is what a camera does and
+    /// what the result has to look like.
+    ///
+    /// Measured on the real file at 44x22, zoomed back 7x to inspect the actual pixels:
+    ///
+    /// | | |
+    /// |---|---|
+    /// | `CGContext` `.high`, one step | aliased, the upper text line breaks up — 0.7 ms |
+    /// | successive halving | clean but soft — 1.6 ms |
+    /// | Core Image Lanczos | ringing: purple specks inside the yellow — **82 ms** |
+    /// | **exact area average** | **sharpest and cleanest — 1.3 ms** |
+    ///
+    /// Box averaging is only right when there IS an area to average, so it is used solely for
+    /// reductions of 2x or more on both axes; below that each output pixel would claim one
+    /// source pixel, which is nearest-neighbour and worse than the bilinear it replaced.
+    /// Averaging happens in **premultiplied** space, so a transparent pixel contributes nothing
+    /// but transparency rather than dragging its undefined colour into the result.
+    private static func resampled(_ cg: CGImage, _ w: Int, _ h: Int) -> CGImage? {
+        if cg.width == w && cg.height == h { return cg }
+        let sw = cg.width, sh = cg.height
+        guard sw >= w * 2, sh >= h * 2 else {
+            let c = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                              space: CGColorSpaceCreateDeviceRGB(),
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            c?.interpolationQuality = .high
+            c?.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return c?.makeImage()
+        }
+        var srcPx = [UInt8](repeating: 0, count: sw * sh * 4)
+        guard let sc = CGContext(data: &srcPx, width: sw, height: sh, bitsPerComponent: 8,
+                                 bytesPerRow: sw * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        sc.draw(cg, in: CGRect(x: 0, y: 0, width: sw, height: sh))
+
+        var out = [UInt8](repeating: 0, count: w * h * 4)
+        for oy in 0..<h {
+            let y0 = oy * sh / h, y1 = max(y0 + 1, (oy + 1) * sh / h)
+            for ox in 0..<w {
+                let x0 = ox * sw / w, x1 = max(x0 + 1, (ox + 1) * sw / w)
+                var r = 0, g = 0, b = 0, a = 0, n = 0
+                for y in y0..<y1 {
+                    let row = y * sw * 4
+                    for x in x0..<x1 {
+                        let i = row + x * 4
+                        r += Int(srcPx[i]); g += Int(srcPx[i + 1])
+                        b += Int(srcPx[i + 2]); a += Int(srcPx[i + 3]); n += 1
+                    }
+                }
+                let o = (oy * w + ox) * 4
+                out[o]     = UInt8(r / n)
+                out[o + 1] = UInt8(g / n)
+                out[o + 2] = UInt8(b / n)
+                out[o + 3] = UInt8(a / n)
+            }
+        }
+        return CGContext(data: &out, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                         space: CGColorSpaceCreateDeviceRGB(),
+                         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)?.makeImage()
     }
 
     /// Crop away fully transparent margins.
@@ -102,13 +182,7 @@ enum ShowLogo {
 
     static var brandFile: URL { AppPaths.brand.appendingPathComponent("logo.png") }
 
-    /// Width to draw at, from the image's own aspect ratio. Returning an exact size rather than
-    /// handing SwiftUI a `maxWidth` box keeps a narrow logo from reserving 90 pt of header it
-    /// does not use, and a wide one from letterboxing inside it.
-    static func drawSize(_ img: NSImage) -> CGSize {
-        let w = min(maxWidth, height * img.size.width / max(1, img.size.height))
-        return CGSize(width: max(1, w), height: height)
-    }
+
 }
 
 /// Songs are identified end-to-end by their path relative to `songs/`. A subfolder is a playlist

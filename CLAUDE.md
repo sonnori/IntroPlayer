@@ -596,6 +596,30 @@ than reserving 22 pt for nothing. Measured at 7.2 ms for 1024x1024, once per pro
 > Render it on the actual colour at the actual size before deciding — that comparison took one
 > throwaway script and settled a question two people had been reasoning about.
 
+**A big reduction must average areas, not sample points.** Reported from use as "ภาพมันเละ".
+The logo is 1024x508 drawn at 44x22 on a **1x** panel (§6d), so one output pixel covers
+**23 x 23 = 529** source ones. `CGContext`'s `.high` samples a handful of those, and on artwork
+carrying a halftone dot pattern the dots alias into mush. Measured on the real file at 44x22,
+zoomed back 7x to inspect the pixels that actually reach the screen:
+
+| method | result |
+|---|---|
+| `CGContext` `.high`, one step (what shipped) | aliased, the upper text line breaks up — 0.7 ms |
+| successive halving | clean but soft — 1.6 ms |
+| Core Image Lanczos | **ringing**: purple specks inside the yellow — **82 ms** |
+| **exact area average** | **sharpest and cleanest — 1.3 ms** |
+
+So: box average, in **premultiplied** space (a transparent pixel must contribute transparency,
+not its undefined colour), and **only for reductions of 2x or more on both axes** — below that
+each output pixel claims one source pixel, which is nearest-neighbour and worse than the
+bilinear it replaced. Lanczos is the textbook "high quality" answer and was the worst of the
+four here; this is a case where reaching for the sophisticated filter is the mistake.
+
+It also resamples **once at load, to the exact pixel count the logo will occupy**
+(`points x NSScreen.backingScaleFactor`), instead of handing SwiftUI a 1024 px bitmap and a
+44 pt frame to rescale on every draw. `prepared` therefore carries the image and its point size
+together — they cannot be resolved separately without the 1:1 guarantee breaking.
+
 **Loaded once per process**, as a lazy `static let`. `ContentView` is re-initialised on every
 model publish (§6c) and the header re-renders at the player's tick rate, so reading the disk
 from `body` would `stat` 50 times a second — §8f's memoised-cover lesson. The cost is that
