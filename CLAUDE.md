@@ -308,6 +308,7 @@ INTROPLAYER_DIAG=1 $BIN --grabtest     # the two-stage marker rule, incl. the st
 INTROPLAYER_DIAG=1 $BIN --palettetest  # contrast, ΔL* ladder and deutan ΔE for BOTH themes (§6d)
 INTROPLAYER_DIAG=1 $BIN --loudtest     # BS.1770 coefficients, on-air spread, limiter headroom
 INTROPLAYER_DIAG=1 $BIN --autodetect   # guessed Intro End / Hook vs configured, with evidence
+INTROPLAYER_DIAG=1 $BIN --guesstest    # can the guess feature damage anything? (read-only)
 INTROPLAYER_DIAG=1 $BIN --artwork      # where each cover comes from; never makes a request
 INTROPLAYER_DIAG=1 $BIN --remodetest   # marker edits DURING playback must never outlive Intro End
 INTROPLAYER_DIAG=1 $BIN --takes        # take model self-check, then the real log's running order
@@ -689,6 +690,34 @@ pre-flight until a human confirms it. ~0.25 s per song in release.
 > **Measure this in release.** The same pass takes ~5 s in a debug build, and `build.sh debug`
 > is what sits in the tree while iterating — a figure read off a debug diagnostic is 20× out
 > and argues for a design the app does not need.
+
+**There are two halves to this feature and they must obey one rule, not two.**
+`applyAutoStart` guesses Intro Start (§7a1); `applyGuess` guesses Intro End and Hook. They
+share a trigger, a selection-time callback, a button, and two of the three markers — and they
+shipped with four guards on one half and **none on the other**. Every serious defect found in
+the safety audit was that asymmetry. `AppModel.guessAllowed` is now the single admission rule
+and both halves call it.
+
+> **`isPlaying` is the wrong question, and this was the worst defect the feature has had.**
+> Paused-on-a-buzz is `isPlaying == false` — and that is the most dangerous moment in a taping
+> to move Intro End, because the next Space goes through `modeForPosition`, and a playhead now
+> sitting *past* the new Intro End gives `.free`: no intro bound, the whole song out on camera,
+> from a value nobody typed. §10's "arm only, never disarm" cannot catch it, because that
+> protects `remode` and a guess never reaches `remode` — it only applies when stopped. So the
+> question is whether a *question* is in progress, which makes the playhead's position part of
+> it: a song parked at its own Intro Start is at rest, a song stopped anywhere else is one the
+> operator is in the middle of.
+>
+> And the check belongs at the **write**, not at the trigger. A cancel fired when playback
+> starts can always be raced by a task already inside its main-actor hop.
+
+**A guess is never a review, whoever asked for it.** Both halves end by forcing
+`auto = true, configured = false`. The old code restored the song's previous `configured` flag,
+which looked conservative and was the hole: `applyAutoStart` runs *first* in the same button
+press and stamped `configured = true`, so by the time `applyGuess` read that flag the song had
+been certified on the strength of a machine guess — out of the `Return`/`Tab` sweep **and** out
+of *both* pre-flight warnings (`stillAuto`, and `hookDefault` once the hook moved off 60). An
+unreviewed round then passed the handover check while the toast on screen read "ตรวจดูอีกที".
 
 Five rules constrain when it may write, and each exists because of a specific way it could
 destroy work:
@@ -1617,6 +1646,86 @@ the day it does not help.
 - A failed cover **write** was reported as "song not found", hiding the cheapest early signal
   that the folder holding `config.json` cannot be written. Same shape as `saveNow()` reporting
   "saved ✓" unconditionally.
+> **The safety audit of the auto-guess feature** (accuracy explicitly out of scope — the owner's
+> requirement is that a wrong guess costs nothing and a bug costs a re-shoot). Everything below
+> was found by three parallel reviews plus a corpus of 15 deliberately broken audio files, and
+> `--guesstest` is what holds the conclusions.
+
+- **`applyAutoStart` was `applyGuess`'s unguarded twin** — same trigger, same callback, two of
+  the same markers, and **none** of its four guards, 20 lines below the comment claiming
+  `store.set` direct was the last write in the app to skip the clamps. Consequences, each
+  reachable: it wrote both markers under live playback with no `remode`, so the node stayed
+  scheduled at the OLD Intro End while `tick()` counted down to the new one — the intro cuts
+  dead while the guard strip keeps counting and the button still reads Pause, which on camera
+  is indistinguishable from a hang; via `Store.decode`'s degenerate-range repair the move can
+  be ~32 s *backwards*, cutting the audio instantly; it overwrote a human's `introStart` because
+  `isConfigured` is false whenever `auto` is true, with **no undo entry**; and it ignored `base`,
+  so a reconciled round acquired "แก้ที่กอง" badges for edits nobody made.
+- **The on-air guard tested `isPlaying`.** Paused-on-a-buzz is `isPlaying == false`. See §7a4 —
+  a guess landing in that window changes Intro End, and the next Space derives `.free`.
+- **A guess certified itself as human-reviewed.** See §7a4: the two halves disagreed about the
+  policy inside a single button press, and the half that ran first won.
+- **`wasConfigured` read `existing.configured`, not `existing.isConfigured`** — so a manual 🎯
+  on a song configured *before* the flag existed (badge from the value fallback, §9) wrote
+  `auto = true`, and `isConfigured` checks `auto` first, so the song lost its badge permanently
+  and became eligible for the automatic overwrite above. Moot now: one rule, no flag to restore.
+- **Background guesses evicted the operator's own undo entries.** `pushUndo(coalesce: false)`
+  per guess, a 40-deep stack with `removeFirst` — reviewing a round at a human pace pushed the
+  setter's edits off the bottom, and popping a robot entry runs `undo()`, which can move the
+  selection to a different song. The automatic pass pushes nothing now: `mayWrite*` means every
+  field it can touch is still exactly at its default, so there is no human state to restore.
+- **The task map was cleared without an identity check.** A stale task's main-actor hop erased a
+  NEWER task's handle; that task was then untracked and uncancellable, a further press found
+  `nil` to cancel, and **two full FFT passes ran concurrently on one path and both applied**. The
+  mirror case left a finished task in the slot forever, which made the automatic guess impossible
+  for that song for the rest of the session — the feature silently not happening, which §7a4
+  already records once for the old shared slot. Entries carry a monotonic id now.
+- **A cancelled guess applied half of itself and reported the half it had not written.** A cancel
+  landing after `extract` returns still lets the whole main-actor hop run (measured —
+  `Task.isCancelled` is observable as true inside it); `AutoDetect.hook` then returns nil while
+  `introEnd` has no cancellation check, so Intro End was written alone and the toast printed
+  `Hook = 60.00` — the untouched default, announced as the thing the feature had just worked out.
+- **`AutoDetect.introEnd` / `hook` ran on the main actor.** Measured in release: 2.1 ms for a
+  4-minute track, **34.5 ms at the 20-minute cap**, against `Player.startGuard`'s 20 ms tick —
+  and paid for a song that need not be the one on air. (0.24–8.2 s in a debug build.) Detection
+  happens inside the detached task now; only the write crosses to the main actor.
+- **`Store.decode` and `Handoff` clamped markers with `isFinite` and `max(0, v)` and NO upper
+  bound**, while every in-app edit path clamps to `maxTime` — so a hand-edited, foreign-written
+  or corrupted file was the only way past, and it was enough for two separate kills:
+  `AutoDetect.introEnd` does `Int(start.rounded())`, and `Int(_: Double)` **traps** at >= 2^63,
+  so `{"introStart": 1e19}` killed the process (SIGTRAP, exit 133) the moment that song was
+  selected; and `round2` multiplies by 100, so any finite value >= ~1.8e306 becomes `+infinity`,
+  which `isValidJSONObject` rejects — after which **every** later save fails with nothing naming
+  the song, and a relaunch re-poisons it. `Store.clampMarker` is now the one bound and
+  `AppModel.maxTime` reads it.
+- **`AVAudioFile.framePosition` is a property SETTER that raises an uncatchable Obj-C
+  NSException** — there is nowhere to put a `try` and `try?` cannot help; it is `SIGABRT`. And it
+  raises for an **in-range** value: 50 KB of random bytes named `.mp3` opens with a plausible
+  header (`length` 384 at 11025 Hz) and then throws `'fmt?'` on `framePosition = 0`. Bounds
+  checking is not the fix — prove the format is usable with a `read`, which reports the same
+  failure as a *catchable Swift error*, and only then seek. **This is also why `--loudtest`
+  looked like it always passed: the process died before printing its own verdict.** A suite that
+  cannot print a verdict reads exactly like a suite that passed — the `Palette.audit` lesson in a
+  new costume.
+- The compiler's `will never be executed` on `--loudtest`'s `fail == 0 ? … : …` is a **false
+  positive** — proved by inserting one non-foldable failing assertion, which printed
+  `ผ่าน 9 ตก 1`. The branch must stay; there is a comment there saying so.
+- **`h?.time ?? -1` passed straight into a `CVarArg...` list printed `nan` for `-1.0`.** The `??`
+  resolves to the `(T?, T?) -> T?` overload, because `Optional` itself conforms to `CVarArg`, so
+  an `Optional<Double>` reached the va_list and `%f` read the wrong eight bytes. `type(of:)`
+  reports `Double`, because in a non-variadic context the other overload wins — **so the type
+  checker will not warn you and inspecting the expression lies.** Bind to a typed local first.
+  It was the only occurrence in the project; the safe idiom is
+  `opt.map { String(format: …, $0) } ?? "—"`, where the `??` yields a String.
+- **`--autodetect` counted "declined to guess" as a failure**, so one odd file in the library made
+  the whole run print `✗ ไม่ผ่าน`. Declining is the correct, safe outcome for audio with no usable
+  structure, and the owner's requirement is that an absent guess costs nothing. Skips are printed
+  separately, so a detector that silently stopped guessing everything is still visible.
+- `AutoDetect` hardening from the same audit: the 20-minute cap bounds **seconds, not bytes** —
+  measured, 19 minutes resident is 218 MB at 44.1 kHz and ~876 MB at 192 kHz, so there is a frame
+  cap too; `similarity` had only the upper index bound while its sibling `novelty` had both; and
+  the per-second loudness loop indexed `frameLoud` with a bound derived from `frameChroma.count`,
+  which is safe only because the two appends are unconditional and adjacent.
 - **`--updatestage` could only ever report failure.** Its staged-file loop spelled the bundle
   name as the literal `"IntroPlayerNative.app"`, and `Updater.stage()` *requires*
   `Install.bundleName` to be there before that loop runs — so the staged folder definitively
@@ -1786,6 +1895,7 @@ INTROPLAYER_DIAG=1 $BIN --grabtest    # two-stage marker rule, 10 assertions
 INTROPLAYER_DIAG=1 $BIN --palettetest # both themes: contrast, ladder, deutan ΔE — 44 assertions
 INTROPLAYER_DIAG=1 $BIN --loudtest    # BS.1770 coefficients + on-air spread + limiter headroom
 INTROPLAYER_DIAG=1 $BIN --autodetect  # Intro End / Hook guesses with their evidence
+INTROPLAYER_DIAG=1 $BIN --guesstest   # clamps vs NaN/inf/1e19 + the admission rules per song
 INTROPLAYER_DIAG=1 $BIN --artwork     # cover source per song (offline, makes no request)
 INTROPLAYER_DIAG=1 $BIN --remodetest  # marker edits mid-playback: 3 cases, none may outlive Intro End
 INTROPLAYER_DIAG=1 $BIN --takes       # running order: synthetic self-check + the real log

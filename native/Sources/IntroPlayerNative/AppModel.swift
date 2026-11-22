@@ -99,7 +99,7 @@ final class AppModel: ObservableObject {
     /// `isValidJSONObject` on EVERY later save, so the whole session's markers stop reaching disk
     /// with nothing naming the song at fault. `isFinite` on the input is not enough, because the
     /// input is finite; the multiply is what overflows.
-    static let maxTime: Double = 4 * 3600
+    static let maxTime: Double = Store.maxMarker   // one source, so a clamp cannot drift
     /// 2 s is tight for someone watching the stage rather than the screen; the only cost of a
     /// longer window is a longer-lived ghost marker.
     static let pendingWindow: Double = 2.5
@@ -255,6 +255,7 @@ final class AppModel: ObservableObject {
     }
 
     func setPlaylist(_ p: String) {
+        cancelGuesses()        // nothing in the round you just left is worth finishing
         currentPlaylist = p
         store.lastPlaylist = p
         store.settingsChanged()
@@ -635,7 +636,49 @@ final class AppModel: ObservableObject {
     /// ~5 s in a debug build, and `build.sh debug` is what sits in the tree while iterating —
     /// a figure read off a debug diagnostic is 20x out and would argue for a design this
     /// does not need.
-    private var guessTasks: [String: Task<Void, Never>] = [:]
+    /// Keyed by path AND stamped with a monotonic id. The id is the fix for a confirmed race:
+    /// neither clear used to check that the entry was still *this* task, so a stale task's
+    /// main-actor hop erased a NEWER task's handle — after which that newer task was untracked
+    /// and uncancellable, a further manual press found `nil` to cancel, and two full FFT passes
+    /// ran concurrently on one path and both applied. The mirror case left a finished task in
+    /// the slot forever, which made the automatic guess impossible for that song for the rest
+    /// of the session: the feature silently not happening, which §7a4 already records once.
+    private var guessTasks: [String: (id: Int, task: Task<Void, Never>)] = [:]
+    private var guessSeq = 0
+
+    /// May a guess write to this song *right now*? One rule, shared by both halves of the
+    /// feature, because the two halves are two writes inside a single button press and the way
+    /// they went wrong was by disagreeing: `applyGuess` had four guards and `applyAutoStart`
+    /// had none of them.
+    ///
+    /// **`isPlaying` is the wrong question**, and this is the worst defect this feature has had.
+    /// Paused-on-a-buzz is `isPlaying == false`. That is the single most dangerous moment in a
+    /// taping to move Intro End, because the next Space goes through `modeForPosition`, and for
+    /// a playhead now sitting PAST the new Intro End that returns `.free` — no intro bound, the
+    /// whole song out on camera, from a value nobody typed. §10's "arm only, never disarm" rule
+    /// cannot catch it: that protects `remode`, and a guess never reaches `remode` precisely
+    /// because it only applies when stopped.
+    ///
+    /// So the question is whether a QUESTION is in progress, and the playhead's position is
+    /// part of that. A song parked at its own Intro Start is at rest; a song stopped anywhere
+    /// else is one the operator is in the middle of.
+    ///
+    /// This is checked at the WRITE, not at the trigger. A cancel fired when playback starts
+    /// can always be raced by a task that is already inside its main-actor hop; a guard here
+    /// cannot be.
+    func guessAllowed(_ path: String) -> Bool {
+        guard current == path else { return true }   // off-screen: nothing of it is on air
+        if player.isPlaying { return false }
+        return player.position <= store.config(for: path).introStart + 0.25
+    }
+
+    /// Drop every in-flight guess. Called where the thing a guess would write to has gone away
+    /// or been replaced wholesale; the admission rule above is what makes the feature safe, and
+    /// this just stops useless work and keeps the map from growing for the whole session.
+    func cancelGuesses() {
+        for (_, e) in guessTasks { e.task.cancel() }
+        guessTasks.removeAll()
+    }
 
     /// Intro End and Hook, guessed. Everything it writes stays `auto`, so the song remains in
     /// the `Return`/`Tab` review sweep and in the pre-flight warnings until a human confirms it.
@@ -646,25 +689,49 @@ final class AppModel: ObservableObject {
     func guessRest(_ path: String, duration: Double, manual: Bool = false) {
         if !manual && autoGuessed.contains(path) { return }
         if guessTasks[path] != nil && !manual { return }
-        guessTasks[path]?.cancel()
+        guessTasks[path]?.task.cancel()
+        guessSeq += 1
+        let myID = guessSeq
         let url = Library.url(path)
-        guessTasks[path] = Task.detached(priority: .utility) { [weak self] in
+        // `introStart` is read HERE, on the main actor, so the detached task owns a plain
+        // `Double` instead of reaching back into the store off-actor.
+        let startFrom = store.config(for: path).introStart
+        let task = Task.detached(priority: .utility) { [weak self] in
             let f = AutoDetect.extract(url: url)
             if Task.isCancelled { return }
-            guard let f else {
-                await MainActor.run {
-                    self?.guessTasks[path] = nil
-                    if manual { self?.flash("วิเคราะห์เพลงนี้ไม่ได้") }
-                }
-                return
+            // **Detection runs HERE, not in the main-actor hop.** `AutoDetect.hook` is
+            // O(seconds²); measured in release it is 2.1 ms for a 4-minute track and 34.5 ms
+            // at the 20-minute cap, against `Player.startGuard`'s 20 ms tick — so at the top
+            // of that range it skipped a guard tick outright, and it did so for a song that
+            // may not even be the one on air. (In a debug build the same call is 0.24–8.2 s of
+            // frozen main thread, which is what you would see while iterating.)
+            let guessed: (end: Double, hook: AutoDetect.HookGuess?)? = f.map {
+                let e = AutoDetect.introEnd(features: $0, from: startFrom)
+                return (e, AutoDetect.hook(features: $0, after: e))
             }
+            // Read the weak capture ONCE, here, rather than from inside the concurrently
+            // executing closure below — which is what the Swift 6 "reference to captured var
+            // 'self'" warning on this exact closure was about.
+            let model = self
             await MainActor.run {
-                guard let self else { return }
-                self.guessTasks[path] = nil
-                self.autoGuessed.insert(path)
-                self.applyGuess(path, features: f, duration: duration, manual: manual)
+                guard let model else { return }
+                // Clear only if the slot is still OURS. See `guessTasks`.
+                if model.guessTasks[path]?.id == myID { model.guessTasks[path] = nil }
+                // A cancel can land after `extract` returned and still let this whole hop run
+                // — measured, `Task.isCancelled` is observable as true in here. Applying a
+                // half-computed guess and then reporting the half it did not write is worse
+                // than doing nothing.
+                if Task.isCancelled { return }
+                guard let f, let g = guessed else {
+                    if manual { model.flash("วิเคราะห์เพลงนี้ไม่ได้") }
+                    return
+                }
+                model.autoGuessed.insert(path)
+                model.applyGuess(path, features: f, end: g.end, hook: g.hook,
+                                 duration: duration, manual: manual)
             }
         }
+        guessTasks[path] = (myID, task)
     }
 
     /// The write half, on the main actor.
@@ -677,10 +744,11 @@ final class AppModel: ObservableObject {
     /// while the countdown read the new one (if it moved outward). Either way nobody pressed
     /// anything. A guess is a convenience; there is never a reason to apply one mid-question.
     private func applyGuess(_ path: String, features f: AutoDetect.Features,
+                            end: Double, hook: AutoDetect.HookGuess?,
                             duration: Double, manual: Bool) {
-        if player.isPlaying && current == path {
+        guard guessAllowed(path) else {
             autoGuessed.remove(path)       // try again next time the song is selected
-            if manual { flash("กำลังเล่นอยู่ — หยุดก่อนแล้วกด 🎯 อีกที") }
+            if manual { flash("กำลังเล่นอยู่หรือค้างกลางเพลง — กด S แล้วลองอีกที") }
             return
         }
         // The song may have been set up while the FFT ran. Re-read, and re-check, HERE.
@@ -694,9 +762,6 @@ final class AppModel: ObservableObject {
         // path then exports as the operator's decisions and the setter's diff sheet accepts by
         // default. §8e's whole audit trail, laundered.
         guard existing.base == nil || manual else { return }
-
-        let end = AutoDetect.introEnd(features: f, from: existing.introStart)
-        let hook = AutoDetect.hook(features: f, after: end)
 
         // **Fill blanks only.** `isConfigured` returns false whenever `auto` is true, which is
         // right for the green badge and WRONG as a licence to overwrite: the live config has
@@ -715,29 +780,79 @@ final class AppModel: ObservableObject {
         // `modeForPosition` return `.free` — the whole song on camera), the undo snapshot, and
         // `remode`. `store.set` direct was the only marker write in the app that skipped all
         // three.
-        let wasConfigured = existing.configured
-        withConfig(of: path) { c in
+        // No undo entry for the AUTOMATIC pass. `mayWrite*` above means every field it can
+        // touch is still exactly at its default, so the state an undo would restore is one no
+        // human chose — and the stack is 40 deep with `removeFirst`, so one entry per song
+        // while reviewing a round pushed the setter's own edits off the bottom. Worse, popping
+        // a robot entry runs `undo()`, which can move the selection to another song. A manual
+        // press is a deliberate act and keeps its undo.
+        withConfig(of: path, pushUndo: manual) { c in
             if mayWriteEnd { c.introEnd = (min(duration, end) * 100).rounded() / 100 }
             if mayWriteHook, let h = hook {
                 c.hook = (max(0, min(duration - 1, h.time)) * 100).rounded() / 100
             }
         }
-        // `updateConfig` stamps `configured = true, auto = false` because a human edited. This
-        // is not a human. Restore the truth: a guess leaves the song needing review — and for
-        // a MANUAL run on an already-reviewed song, it must not silently un-review it either.
+        // **A guess is never a review, whoever asked for it.** `withConfig` stamps
+        // `configured = true, auto = false` because its ordinary caller is a human edit; this
+        // is not one. The old code restored `existing.configured`, which looked conservative
+        // and was the hole: `applyAutoStart` runs FIRST in the same button press and used to
+        // stamp `configured = true`, so by the time this read it the song had been certified
+        // on the strength of a machine guess — dropping it out of the `Return`/`Tab` sweep AND
+        // out of BOTH pre-flight warnings (`stillAuto`, and `hookDefault` once the hook moved
+        // off 60). An unreviewed round then passed the handover check, while the toast on
+        // screen said "ตรวจดูอีกที". One rule instead: anything a guess wrote needs a human.
         var after = store.config(for: path)
-        after.auto = !wasConfigured
-        after.configured = wasConfigured
+        after.auto = true
+        after.configured = false
         store.set(after, for: path)
         invalidateStatus()
 
-        // Only when this song is still the one on screen: the pass takes ~5.4 s, so a toast
-        // naming times is otherwise read as describing whatever is in front of the operator now.
+        // Only when this song is still the one on screen — and naming only the fields actually
+        // written. It used to print both numbers unconditionally, so a guess that wrote Intro
+        // End alone reported `Hook = 60.00`: the untouched default, announced as the thing the
+        // feature had just worked out.
         if manual && current == path {
-            flash(String(format: "เดา Intro End = %.2fs · Hook = %.2fs — ตรวจดูอีกที",
-                         after.introEnd, after.hook))
+            var parts: [String] = []
+            if mayWriteEnd { parts.append(String(format: "Intro End = %.2fs", after.introEnd)) }
+            if mayWriteHook, hook != nil { parts.append(String(format: "Hook = %.2fs", after.hook)) }
+            flash(parts.isEmpty ? "ไม่มีอะไรให้เดาเพิ่ม"
+                                : "เดา " + parts.joined(separator: " · ") + " — ตรวจดูอีกที")
         }
         objectWillChange.send()
+    }
+
+    /// The marker clamp chain, as a PURE function of its inputs.
+    ///
+    /// Extracted from `withConfig` for the same reason `MarkerGrab.decide` is a pure function
+    /// (§11): it is the last line of defence before a value reaches `config.json`, and
+    /// `--guesstest` can only prove it holds for every file in the library if it can call it
+    /// without a store, a player or a window. The arithmetic is unchanged.
+    ///
+    /// What it guarantees, and each clause is load-bearing:
+    /// - **every marker is finite.** `Store.set` calls `round2`, which multiplies by 100 with
+    ///   no finiteness check, and a non-finite value reaching `JSONSerialization` raises an
+    ///   **Obj-C** exception that `try?` cannot catch — after which every later save fails with
+    ///   nothing on screen naming the song. NaN is killed by `max(0, …)`: Swift's `max(x, y)`
+    ///   is `y >= x ? y : x`, and `NaN >= 0` is false, so it returns 0. (`min(x, y)` is
+    ///   `y < x ? y : x`, so `min(nan, 5)` returns **nan** — this fails closed only because
+    ///   `max` runs on the inside. Do not reorder them.)
+    /// - **`introEnd >= introStart + minIntro`.** `introStart == introEnd` makes
+    ///   `modeForPosition` return `.free`, which disarms the intro-end stop and plays the whole
+    ///   song on camera — §12 calls that the worst defect this app has had.
+    /// - nothing exceeds `maxTime`, or the file's own duration when it is known.
+    /// `nonisolated` because it is pure and `--guesstest` has to call it without a main actor.
+    nonisolated static func clampMarkers(_ cfg: SongConfig, duration: Double?) -> SongConfig {
+        var c = cfg
+        c.introStart = min(max(0, c.introStart), AppModel.maxTime)
+        c.introEnd = min(max(0, c.introEnd), AppModel.maxTime)
+        c.hook = min(max(0, c.hook), AppModel.maxTime)
+        if let d = duration, d > 0, d.isFinite {
+            c.introStart = min(c.introStart, d)
+            c.introEnd = min(c.introEnd, d)
+            c.hook = min(c.hook, d)
+        }
+        c.introEnd = max(c.introEnd, c.introStart + AppModel.minIntro)
+        return c
     }
 
     /// Duration from the analysis cache, for a path that may no longer be selected.
@@ -748,19 +863,12 @@ final class AppModel: ObservableObject {
     /// `updateConfig`, but for a named path rather than `current`. The guess finishes seconds
     /// after it started, and the selection may have moved on in the meantime — writing to
     /// `current` would then put one song's markers on another.
-    private func withConfig(of path: String, _ mutate: (inout SongConfig) -> Void) {
-        pushUndo(path, coalesce: false)
+    private func withConfig(of path: String, pushUndo wantUndo: Bool = true,
+                            _ mutate: (inout SongConfig) -> Void) {
+        if wantUndo { pushUndo(path, coalesce: false) }
         var c = store.config(for: path)
         mutate(&c)
-        c.introStart = min(max(0, c.introStart), AppModel.maxTime)
-        c.introEnd = min(max(0, c.introEnd), AppModel.maxTime)
-        c.hook = min(max(0, c.hook), AppModel.maxTime)
-        if let d = cachedDuration(path), d > 0 {
-            c.introStart = min(c.introStart, d)
-            c.introEnd = min(c.introEnd, d)
-            c.hook = min(c.hook, d)
-        }
-        c.introEnd = max(c.introEnd, c.introStart + AppModel.minIntro)
+        c = AppModel.clampMarkers(c, duration: cachedDuration(path))
         c.configured = true
         c.auto = false
         store.set(c, for: path)
@@ -771,21 +879,56 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Intro Start, guessed (§7a1) — **`applyGuess`'s twin, and it used to carry none of
+    /// `applyGuess`'s four guards.** Same trigger, same selection-time callback, two of the
+    /// same markers, `store.set` direct. Each guard below is here because of a specific way
+    /// this function could wreck a take or a day of work:
+    ///
+    /// 1. **A question in progress.** It wrote both markers under live playback with no
+    ///    `remode`, so the node stayed scheduled at the OLD Intro End while `tick()` read the
+    ///    new one 50x a second. Select an unconfigured song, press Space before the analysis
+    ///    finishes — which the old comment here explicitly anticipated — and the intro cut
+    ///    dead at the old boundary while the guard strip kept counting down and the button
+    ///    still read Pause. On camera that is indistinguishable from the app hanging. Via the
+    ///    `Store.decode` degenerate-range repair (a real state of song 102) the move can be
+    ///    ~32 s *backwards*, which cuts the audio instantly and parks the playhead behind it.
+    /// 2. **A signed-off round.** Without this, an imported round whose songs are still `auto`
+    ///    — which the pre-flight warns about and deliberately does not block — gets markers a
+    ///    robot moved off `base`, and the setter's diff sheet accepts every row by default on
+    ///    the way back. §8e's audit trail, laundered.
+    /// 3. **Fill blanks only.** It overwrote `introStart` whenever `isConfigured` was false,
+    ///    and `isConfigured` is false whenever `auto` is true — which does NOT mean the value
+    ///    is a default. Song 102 is `auto` only because `Store.decode` repaired its range, and
+    ///    its `introStart: 33.73` is a human's, with no copy anywhere. The automatic pass
+    ///    destroyed it on the next selection, silently, with no undo entry.
+    /// 4. **Through `withConfig`**, for the `maxTime` and `introEnd >= introStart + minIntro`
+    ///    clamps. This was the one marker write still opting out — 20 lines below the comment
+    ///    claiming it was the last one.
     @discardableResult
     func applyAutoStart(_ path: String, analysis a: Analysis, manual: Bool) -> Bool {
+        guard guessAllowed(path) else { return false }
+        let existing = store.config(for: path)
+        guard existing.base == nil || manual else { return false }
+        let d = SongConfig.defaults
+        guard manual || (SongConfig.same(existing.introStart, d.introStart)
+                         && SongConfig.same(existing.introEnd, d.introEnd)) else { return false }
         guard let t = a.detectIntroStart() else { return false }
-        // §12 records `copyConfig(from:)` overwriting signed-off fields "in one click with no
-        // undo entry" as a defect. This writes two markers; a manual run can write them over a
-        // reviewed song, and 🎯 sits 8 pt from the `−`/`+` nudges.
-        if manual { pushUndo(path, coalesce: false) }
-        var c = store.config(for: path)
-        let span = max(0.5, c.introEnd - c.introStart)     // keep the intro's length
-        c.introStart = (t * 100).rounded() / 100
-        c.introEnd = (min(a.duration, t + span) * 100).rounded() / 100
-        if manual { c.auto = false; c.configured = true } else { c.auto = true }
-        store.set(c, for: path)
-        // Don't yank the playhead if the GM already pressed Start while analysis was running.
-        if path == current && !player.isPlaying { player.seek(to: c.introStart, config: c) }
+
+        let span = max(AppModel.minIntro, existing.introEnd - existing.introStart)
+        withConfig(of: path, pushUndo: manual) { c in
+            c.introStart = (t * 100).rounded() / 100
+            c.introEnd = (min(a.duration, t + span) * 100).rounded() / 100
+        }
+        // A guess is never a review — see `applyGuess` for the full reason. This half used to
+        // stamp `configured = true` on a manual press, and because it runs FIRST in the same
+        // button press, `applyGuess` then read that flag and certified three machine guesses
+        // as human-placed: out of the `Return`/`Tab` sweep and out of both pre-flight warnings.
+        var after = store.config(for: path)
+        after.auto = true
+        after.configured = false
+        store.set(after, for: path)
+        invalidateStatus()
+        if path == current { player.seek(to: after.introStart, config: after) }
         objectWillChange.send()
         return true
     }
@@ -1191,8 +1334,12 @@ final class AppModel: ObservableObject {
         coverLoading.insert(path)
         Task.detached(priority: .utility) { [weak self] in
             let img = Artwork.resolve(for: path)
+            // Read the weak capture once, HERE, rather than from inside the concurrently
+            // executing closure below — the same Swift 6 "reference to captured var 'self'"
+            // warning the guess feature's task carried.
+            let model = self
             await MainActor.run {
-                guard let self else { return }
+                guard let self = model else { return }
                 self.coverLoading.remove(path)
                 self.coverCache[path] = img
                 self.trimCoverCache()
@@ -1499,6 +1646,12 @@ final class AppModel: ObservableObject {
     /// After anything rewrites many songs at once: the undo stack describes a world that no
     /// longer exists, so drop it rather than let Cmd+Z restore half a round.
     private func afterBulkChange() {
+        // A guess still in flight was computed against the config as it was BEFORE the import
+        // replaced it wholesale. `applyGuess` would refuse it anyway (the import stamps
+        // `base`), but dropping it here means the refusal is not the only thing standing
+        // between an import and a robot write — and it is the same reasoning as clearing the
+        // undo stack on the line below: `Cmd+Z` must not restore half a round.
+        cancelGuesses()
         undoStack.removeAll()
         canUndo = false
         if let p = current {

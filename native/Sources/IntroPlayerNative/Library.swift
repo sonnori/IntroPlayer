@@ -973,6 +973,99 @@ enum Diagnostics {
         print(bad == 0 ? "\n✓ ผ่าน" : "\n✗ ไม่ผ่าน")
     }
 
+    /// Can the auto-guess feature damage anything? Read-only — it writes no file and calls no
+    /// store mutation.
+    ///
+    /// The owner's requirement for this feature is explicit: **a wrong guess costs nothing, a
+    /// bug costs a re-shoot.** So this asserts nothing about accuracy. It asserts the two things
+    /// that can actually hurt:
+    ///
+    /// 1. **No value the feature can write can harm the program.** Every marker that reaches
+    ///    `config.json` must be finite, inside `0...maxTime`, and satisfy
+    ///    `introEnd >= introStart + minIntro` — the last one because `introStart == introEnd`
+    ///    makes `modeForPosition` return `.free`, which disarms the intro-end stop and plays
+    ///    the whole song on camera. Section 1 feeds `clampMarkers` the inputs that have
+    ///    actually broken this app or a comparable path before: NaN, infinities, `1e19` (which
+    ///    TRAPS in `Int(_:)`), `1e308` (which `round2` turns into infinity, after which every
+    ///    save fails), negatives, and a degenerate range.
+    /// 2. **The admission rules are what the comments claim.** Section 2 reports, per real
+    ///    song, whether each half of the feature would write, and asserts it refuses on a
+    ///    signed-off round (`base != nil`) and on any field a human has moved off its default.
+    static func guessSafety() {
+        var pass = 0, fail = 0
+        func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+            if ok { pass += 1 } else { fail += 1 }
+            print("   \(ok ? "ok  " : "✗   ")\(label)\(detail.isEmpty ? "" : "  — " + detail)")
+        }
+
+        print("1) clampMarkers กับค่าที่เคยทำให้พัง  (ไม่ต้องมีไฟล์เสียง)")
+        let nasty: [(String, Double, Double, Double, Double?)] = [
+            ("NaN ทั้งสามจุด",          .nan, .nan, .nan, 200),
+            ("+infinity",              .infinity, .infinity, .infinity, 200),
+            ("-infinity",              -.infinity, -.infinity, -.infinity, 200),
+            ("1e19 (Int() จะ trap)",    1e19, 1e19, 1e19, 200),
+            ("1e308 (round2 -> inf)",   1e308, 1e308, 1e308, 200),
+            ("ติดลบ",                   -5, -5, -5, 200),
+            ("ช่วงพิการ start==end",     33.73, 33.73, 60, 200),
+            ("end อยู่ก่อน start",       40, 10, 60, 200),
+            ("เกินความยาวเพลง",          500, 600, 700, 200),
+            ("duration เป็น NaN",        10, 25, 60, Double.nan),
+            ("duration เป็น 0",          10, 25, 60, 0),
+            ("ไม่รู้ duration",          10, 25, 60, nil),
+        ]
+        for (name, a, b, h, dur) in nasty {
+            var c = SongConfig()
+            c.introStart = a; c.introEnd = b; c.hook = h
+            let r = AppModel.clampMarkers(c, duration: dur)
+            let finite = r.introStart.isFinite && r.introEnd.isFinite && r.hook.isFinite
+            let inRange = [r.introStart, r.introEnd, r.hook]
+                .allSatisfy { $0 >= 0 && $0 <= AppModel.maxTime }
+            let armed = r.introEnd >= r.introStart + AppModel.minIntro - 1e-9
+            check(name, finite && inRange && armed,
+                  String(format: "start %.2f  end %.2f  hook %.2f", r.introStart, r.introEnd, r.hook))
+            // round2 is what actually reaches the file, so prove THAT is serialisable.
+            let json: [String: Any] = ["introStart": Store.round2(r.introStart),
+                                       "introEnd": Store.round2(r.introEnd),
+                                       "hook": Store.round2(r.hook)]
+            check("  ^ เขียนเป็น JSON ได้", JSONSerialization.isValidJSONObject(json))
+        }
+
+        print("\n2) กฎการรับเข้า ต่อเพลงจริง  (เดา/ตั้งไว้/จะเขียนไหม)")
+        let store = Store()
+        let songs = Library.scan()
+        let d = SongConfig.defaults
+        var admittedFresh = 0
+        for p in songs {
+            let c = store.config(for: p)
+            let startIsDefault = SongConfig.same(c.introStart, d.introStart)
+            let endIsDefault = SongConfig.same(c.introEnd, d.introEnd)
+            let hookIsDefault = SongConfig.same(c.hook, d.hook)
+            let signedOff = c.base != nil
+            // The two halves, exactly as `applyAutoStart` and `applyGuess` decide (minus
+            // `guessAllowed`, which needs a live player and is proven by --remodetest/--playtest).
+            let autoStartWrites = !signedOff && startIsDefault && endIsDefault
+            let autoEndWrites = !signedOff && !c.isConfigured && endIsDefault
+            let autoHookWrites = !signedOff && !c.isConfigured && hookIsDefault
+            if autoStartWrites || autoEndWrites || autoHookWrites { admittedFresh += 1 }
+            print(String(format: "   %-28@ start %7.2f%@  end %7.2f%@  hook %7.2f%@  %@",
+                         String(Library.baseName(p).prefix(28)) as NSString,
+                         c.introStart, (autoStartWrites ? " W" : " ·") as NSString,
+                         c.introEnd, (autoEndWrites ? " W" : " ·") as NSString,
+                         c.hook, (autoHookWrites ? " W" : " ·") as NSString,
+                         (signedOff ? "ส่งต่อแล้ว" : (c.isConfigured ? "ตั้งค่าแล้ว" : "")) as NSString))
+            if signedOff {
+                check("  ^ รอบที่ส่งต่อแล้วต้องไม่ถูกเขียน",
+                      !autoStartWrites && !autoEndWrites && !autoHookWrites)
+            }
+            if !startIsDefault { check("  ^ start ที่คนตั้งต้องไม่ถูกทับ", !autoStartWrites) }
+            if !hookIsDefault { check("  ^ hook ที่คนตั้งต้องไม่ถูกทับ", !autoHookWrites) }
+        }
+        print("\n   เพลงที่ยังรับการเดาได้ \(admittedFresh)/\(songs.count)  (W = จะเขียนช่องนั้น)")
+
+        print("\nผ่าน \(pass)  ตก \(fail)")
+        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+    }
+
     /// What the auto-guess proposes for every song, against whatever is configured. Read-only.
     ///
     /// Ground truth is thin — the real library has three hooks that differ from the 60 s default
@@ -983,7 +1076,7 @@ enum Diagnostics {
     static func autoDetectReport() {
         let store = Store()
         let songs = Library.scan()
-        var pass = 0, fail = 0
+        var pass = 0, fail = 0, skip = 0
         print("เทียบค่าที่เดา กับค่าที่ตั้งไว้ใน config.json  (\(songs.count) เพลง)\n")
         print(String(format: "   %-26@ %17@ %17@ %6@",
                      "song" as NSString, "intro end (เดา/ตั้ง)" as NSString,
@@ -998,22 +1091,47 @@ enum Diagnostics {
             let iEnd = AutoDetect.introEnd(features: f, from: start)
             let h = AutoDetect.hook(features: f, after: iEnd)
             let name = String(Library.baseName(p).prefix(26))
-            print(String(format: "   %-26@  %6.1f / %6.1f   %6.1f / %6.1f  ซ้ำ %4.2f ดัง %4.2f %@",
+            // Bound to `Double` locals FIRST. `h?.time ?? -1` passed STRAIGHT into a
+            // `CVarArg...` list resolves to the `??(T?, T?) -> T?` overload — because
+            // `Optional` itself conforms to `CVarArg` — so what reaches the va_list is an
+            // `Optional<Double>`, not a `Double`, and `%f` reads the wrong eight bytes.
+            // It printed `nan` for a value that was -1.0. `type(of:)` reports `Double`,
+            // because in a non-variadic context the other overload wins — so the type checker
+            // will not warn you and an inspection of the expression lies. This was the only
+            // occurrence in the project; the safe idiom everywhere else is
+            // `opt.map { String(format: …, $0) } ?? "—"`, where the `??` yields a String.
+            let hTime: Double = h?.time ?? -1
+            let hRep: Double = h?.repetition ?? 0
+            let hLoud: Double = h?.loudness ?? 0
+            let hookCol: String = h == nil ? "     —" : String(format: "%6.1f", hTime)
+            print(String(format: "   %-26@  %6.1f / %6.1f   %@ / %6.1f  ซ้ำ %4.2f ดัง %4.2f %@",
                          name as NSString, iEnd, c.introEnd,
-                         h?.time ?? -1, c.hook, h?.repetition ?? 0, h?.loudness ?? 0,
+                         hookCol as NSString, c.hook, hRep, hLoud,
                          ((h?.onBoundary ?? false) ? "รอยต่อ" : "—") as NSString))
 
-            // the objectively checkable part
+            // The objectively checkable part. **No guess at all is a PASS, not a failure.**
+            // Declining is the correct, safe outcome for a file with no usable structure —
+            // silence, a constant tone, a 10-second clip — and the owner's requirement for
+            // this feature is that a wrong or absent guess costs nothing. Counting it as a
+            // failure made one odd file in the library print `✗ ไม่ผ่าน` for the whole run,
+            // which is §12's "a warning that fires when nothing is wrong is a warning that
+            // gets ignored on the day it matters". Skips are printed, so a detector that
+            // silently stopped guessing everything is still visible.
             let okEnd = iEnd > start && iEnd < a.duration
-            let okHook = (h?.time).map { $0 > iEnd && $0 < a.duration - 2 } ?? false
-            let okRep = (h?.repetition ?? 0) > 0.5
-            for (label, ok) in [("intro end อยู่ในเพลง", okEnd),
-                                ("hook อยู่หลัง intro และไม่เลยท้ายเพลง", okHook),
-                                ("hook ที่เลือกซ้ำจริง (correlation > 0.5)", okRep)] {
+            if okEnd { pass += 1 } else { fail += 1; print("      ✗ intro end อยู่ในเพลง") }
+            guard let h else {
+                skip += 2
+                print("      – ไม่เดา hook ให้ (ไม่มีโครงสร้างที่ใช้ได้) — ปลอดภัย ไม่นับตก")
+                continue
+            }
+            for (label, ok) in [("hook อยู่หลัง intro และไม่เลยท้ายเพลง",
+                                 h.time > iEnd && h.time < a.duration - 2),
+                                ("hook ที่เลือกซ้ำจริง (correlation > 0.5)",
+                                 h.repetition > 0.5)] {
                 if ok { pass += 1 } else { fail += 1; print("      ✗ \(label)") }
             }
         }
-        print("\nผ่าน \(pass)  ตก \(fail)")
+        print("\nผ่าน \(pass)  ตก \(fail)\(skip > 0 ? "  ข้าม \(skip) (ไม่เดาให้)" : "")")
         print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
     }
 
@@ -1149,6 +1267,17 @@ enum Diagnostics {
         else { print("   \(eaten)/\(rows.count) เพลง — SetupPanel กับ pre-flight จะเตือนให้") }
 
         print("\nผ่าน \(pass)  ตก \(fail)")
+        // The compiler emits `warning: will never be executed` on the `✗` branch here, with
+        // `note: condition always evaluates to true`. **It is wrong, and the branch must stay.**
+        // Proved by inserting one failing assertion that cannot be constant-folded: the run
+        // printed `ผ่าน 9  ตก 1` and `✗ ไม่ผ่าน`. The false positive comes from the mandatory
+        // pass not seeing `assertThat`'s `fail += 1` as an assignment to the captured var.
+        //
+        // What DID make this suite look like it always passed is unrelated and was real: for a
+        // library containing an unreadable file, `Loudness.measure` died on an uncatchable
+        // Obj-C exception (see `Loudness.measure`) and the process never reached these two
+        // lines at all. A suite that cannot print its own verdict reads exactly like a suite
+        // that passed.
         print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
     }
 

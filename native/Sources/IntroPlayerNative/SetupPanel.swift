@@ -137,6 +137,13 @@ struct SetupPanel: View {
                         // from the `−`/`+` nudges. Ask first in that case only; on an
                         // unreviewed song it is pure help and a dialog would be friction.
                         let run = {
+                            // Checked BEFORE either half runs. Without this the first half
+                            // wrote two markers and the second half then said "stop playing
+                            // and press again", which reads as "nothing was written".
+                            guard model.guessAllowed(p) else {
+                                model.flash("กำลังเล่นอยู่หรือค้างกลางเพลง — กด S แล้วลองอีกที")
+                                return
+                            }
                             if !model.applyAutoStart(p, analysis: a, manual: true) {
                                 // One flash per press: a second `flash` in the same main-actor
                                 // turn replaces the first before it renders a frame, so this

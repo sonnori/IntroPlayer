@@ -45,9 +45,9 @@ struct RoundPackage {
             var e = Entry()
             // Same non-finite guard as Store.decode: a NaN that reaches JSONSerialization raises
             // an Obj-C exception `try?` cannot catch, and it would then recur every launch.
-            if let x = d["introStart"] as? Double, x.isFinite { e.b.introStart = max(0, x) }
-            if let x = d["introEnd"]   as? Double, x.isFinite { e.b.introEnd   = max(0, x) }
-            if let x = d["hook"]       as? Double, x.isFinite { e.b.hook       = max(0, x) }
+            if let x = d["introStart"] as? Double { e.b.introStart = Store.clampMarker(x) }
+            if let x = d["introEnd"]   as? Double { e.b.introEnd   = Store.clampMarker(x) }
+            if let x = d["hook"]       as? Double { e.b.hook       = Store.clampMarker(x) }
             if let x = d["trimDb"]     as? Double, x.isFinite { e.b.trimDb = min(12, max(-12, x)) }
             if let x = d["ignoreEnd"]  as? Bool { e.b.ignoreEnd = x }
             if let x = d["configured"] as? Bool { e.configured = x }

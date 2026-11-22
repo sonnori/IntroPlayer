@@ -319,13 +319,33 @@ final class Store {
         lastRanVersion = String(((s["lastRanVersion"] as? String) ?? "").prefix(24))
     }
 
+    /// Upper bound for any marker on the way IN, equal to `AppModel.maxTime`.
+    ///
+    /// Decode used to guard `isFinite` and `max(0, v)` with **no upper bound**, and every
+    /// in-app edit path clamps to this — so a hand-edited, foreign-written or corrupted file
+    /// was the only way past it. That was enough for two separate failures:
+    ///
+    /// - `AutoDetect.introEnd` does `Int(start.rounded())`, and `Int(_: Double)` **traps** for
+    ///   anything >= 2^63. `{"introStart": 1e19}` therefore killed the process — SIGTRAP,
+    ///   exit 133 — the moment that song was selected. Verified.
+    /// - `round2` multiplies by 100, so any finite value >= ~1.8e306 becomes `+infinity`, and
+    ///   `JSONSerialization.isValidJSONObject` rejects that — after which **every** later save
+    ///   fails with nothing on screen naming the song, and a relaunch re-poisons it.
+    ///
+    /// Clamping here fixes both for every reader at once, which is strictly better than a
+    /// guard in each one. `AppModel.maxTime` reads this value so the two cannot drift.
+    static let maxMarker: Double = 4 * 3600
+    static func clampMarker(_ v: Double) -> Double {
+        v.isFinite ? min(max(0, v), maxMarker) : 0
+    }
+
     private static func decode(_ d: [String: Any]) -> SongConfig {
         var c = SongConfig()
         // NaN/Infinity would crash saveNow(): JSONSerialization raises an Obj-C exception that
         // `try?` cannot catch, and the bad value is already on disk so it recurs every launch.
-        if let v = d["introStart"] as? Double, v.isFinite { c.introStart = max(0, v) }
-        if let v = d["introEnd"] as? Double, v.isFinite { c.introEnd = max(0, v) }
-        if let v = d["hook"] as? Double, v.isFinite { c.hook = max(0, v) }
+        if let v = d["introStart"] as? Double { c.introStart = clampMarker(v) }
+        if let v = d["introEnd"] as? Double { c.introEnd = clampMarker(v) }
+        if let v = d["hook"] as? Double { c.hook = clampMarker(v) }
         if let v = d["ignoreEnd"] as? Bool { c.ignoreEnd = v }
         if let v = d["trimDb"] as? Double, v.isFinite { c.trimDb = min(12, max(-12, v)) }
         if let v = d["played"] as? Bool { c.played = v }
@@ -333,9 +353,9 @@ final class Store {
         if let v = d["auto"] as? Bool { c.auto = v }
         if let bd = d["base"] as? [String: Any] {
             var b = SongBase()
-            if let v = bd["introStart"] as? Double, v.isFinite { b.introStart = max(0, v) }
-            if let v = bd["introEnd"] as? Double, v.isFinite { b.introEnd = max(0, v) }
-            if let v = bd["hook"] as? Double, v.isFinite { b.hook = max(0, v) }
+            if let v = bd["introStart"] as? Double { b.introStart = clampMarker(v) }
+            if let v = bd["introEnd"] as? Double { b.introEnd = clampMarker(v) }
+            if let v = bd["hook"] as? Double { b.hook = clampMarker(v) }
             if let v = bd["trimDb"] as? Double, v.isFinite { b.trimDb = min(12, max(-12, v)) }
             if let v = bd["ignoreEnd"] as? Bool { b.ignoreEnd = v }
             c.base = b
@@ -392,7 +412,11 @@ final class Store {
         return gone.count
     }
 
-    private func round2(_ v: Double) -> Double { (v * 100).rounded() / 100 }
+    /// Internal and static so `--guesstest` can prove that what the clamps produce is still
+    /// serialisable after this multiply. The multiply is the point: any finite input above
+    /// ~1.8e306 comes out of here as +infinity, which `isValidJSONObject` rejects.
+    static func round2(_ v: Double) -> Double { (v * 100).rounded() / 100 }
+    private func round2(_ v: Double) -> Double { Store.round2(v) }
 
     private func writeSettings() {
         var s = (raw["_settings"] as? [String: Any]) ?? [:]

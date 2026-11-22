@@ -165,6 +165,21 @@ enum Loudness {
         let startFrame = max(0, min(total, Int64((from * rate).rounded())))
         let endFrame = max(startFrame, min(total, Int64((to * rate).rounded())))
         guard endFrame > startFrame else { return nil }
+
+        // **`framePosition` is a property SETTER that raises an Obj-C NSException**, so there is
+        // nowhere to put a `try` and `try?` cannot catch it — it is `SIGABRT`, process dead.
+        // And it raises for a perfectly IN-RANGE value: the bounds above are correct, and a
+        // file whose client format cannot be set up (random bytes that parse as an MP3 header —
+        // `file.length` 384 at 11025 Hz, from 50 KB of noise) still threw `'fmt?'` on
+        // `framePosition = 0`. Verified: `--loudtest` died with
+        // `uncaught exception 'com.apple.coreaudio.avfaudio', reason: 'error 1718449215'` and
+        // never printed its summary, which is also why the suite LOOKED like it was passing.
+        //
+        // So prove the format is usable with a read first, because `read(into:frameCount:)`
+        // reports the same failure as a catchable Swift error. After it succeeds the setter is
+        // safe, and the one frame it consumed is undone by the seek that follows.
+        guard let probe = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: 1),
+              (try? file.read(into: probe, frameCount: 1)) != nil else { return nil }
         file.framePosition = startFrame
 
         let (shelf, hp) = kWeighting(rate: rate)

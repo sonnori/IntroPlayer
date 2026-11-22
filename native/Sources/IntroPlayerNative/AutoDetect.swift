@@ -53,6 +53,13 @@ enum AutoDetect {
         // Nothing in a quiz round is 20 minutes long; a full-episode rip dropped into songs/ is
         // the realistic trigger and it should simply not get a guess.
         guard duration > 5, duration < 20 * 60 else { return nil }
+        // …and cap the SAMPLES too. A bound on seconds is a bound on bytes at exactly one
+        // sample rate: `mono` costs `duration x rate x 4` bytes, so the comment above is right
+        // for 44.1 kHz and wrong by 4x at 192 kHz — measured, 19 minutes resident is 218 MB at
+        // 44.1 kHz and ~876 MB at 192 kHz. 64e6 frames is ~256 MB of Float32 and sits ABOVE
+        // 20 minutes at 44.1/48 kHz (52.9e6 / 57.6e6 frames), so no ordinary file changes
+        // behaviour; it only catches the high-rate case the duration cap misses.
+        guard file.length <= 64_000_000 else { return nil }
 
         // Mono mix, read in one streamed pass. A 4-minute track is ~42 MB of Float32 — the same
         // order as the decode `Analysis` already does and dropped immediately after.
@@ -173,8 +180,14 @@ enum AutoDetect {
             if norm > 0 { for b in 0..<12 { acc[b] /= norm } }
             chroma.append(acc)
 
+            // Bounded by `frameLoud`'s OWN count, not only by `frameChroma`'s. The two are
+            // appended unconditionally in the same loop body today, so the counts are always
+            // equal and `j` is safe — but this indexes one array with a bound derived from the
+            // other, which is the exact shape that turns a future `continue` between those two
+            // appends into an out-of-range crash. `Features.seconds` takes the `min` of the two
+            // for the same reason, and cannot help here because this runs BEFORE it is built.
             var best = -Double.infinity
-            for f in i..<j where frameLoud[f] > best { best = frameLoud[f] }
+            for f in i..<min(j, frameLoud.count) where frameLoud[f] > best { best = frameLoud[f] }
             loud.append(best)
             i = j
         }
@@ -195,7 +208,22 @@ enum AutoDetect {
     ///
     /// Clamped to 8..30 s from the start. The real library has one human-set intro of 38 s
     /// (202), so the clamp is a guess-bound, not a claim about what a GM may choose.
-    static func introEnd(features f: Features, from start: Double) -> Double {
+    static func introEnd(features f: Features, from rawStart: Double) -> Double {
+        // **Do not trust the caller's start.** `Int(start.rounded())` below is a
+        // `Int(_: Double)` conversion, which TRAPS — process death, SIGTRAP, exit 133 — for
+        // any value >= 2^63 and for NaN. `start` arrives from `config.json` by way of
+        // `store.config(for:)`, and that file is hand-editable and can be corrupted, so
+        // `"introStart": 1e19` killed the app the moment that song was selected.
+        //
+        // `Store.decode` now clamps markers on load, which fixes it for every reader at once.
+        // This is the second line of defence and not the only one, because a trap here is the
+        // single most expensive failure this feature can produce and it costs one `min`.
+        //
+        // Note the NaN branch must come FIRST: Swift's 3-argument `min` is a left fold over
+        // comparisons that are all false against NaN, so `min(nan, 1, 2)` is **nan** while
+        // `min(1, nan, 2)` is 1.0 — and `fallback` below puts `start + 15` in exactly that
+        // NaN-propagating first slot.
+        let start = min(max(0, rawStart.isFinite ? rawStart : 0), max(0, f.duration))
         // Clamped INSIDE the song. `max(start + minIntroSec, duration - 1)` could exceed the
         // file: a 10 s song with `start = 5` returned 13 s. `play(from:)` clamps so nothing
         // plays past the end, but the value is written to config.json and the countdown reads it.
@@ -337,7 +365,12 @@ enum AutoDetect {
     // MARK: - helpers
 
     private static func similarity(_ c: [[Float]], _ a: Int, _ b: Int, _ len: Int) -> Double {
-        guard a + len <= c.count, b + len <= c.count else { return 0 }
+        // Lower bound as well as upper. `novelty` guards `t - half >= 0`; this had only the
+        // upper half, so a negative `a` or `b` would index `c[a + k]` out of range. Not
+        // reachable today — both call sites pass values at or above `hook`'s `first`, which is
+        // itself `max(..., 0)` — but the asymmetry with its sibling is what makes that an
+        // accident of one caller rather than a property of this function.
+        guard a >= 0, b >= 0, len > 0, a + len <= c.count, b + len <= c.count else { return 0 }
         var dot: Float = 0
         for k in 0..<len {
             for d in 0..<12 { dot += c[a + k][d] * c[b + k][d] }
