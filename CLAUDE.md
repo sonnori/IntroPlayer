@@ -112,6 +112,7 @@ IntroPlayer/
 ├── ตรวจสอบเครื่อง.command # on-site diagnostic: version, perms, quarantine, port — §15
 ├── dist/                # release zips + manifest.json, built by native/release.sh (§15)
 ├── backups/             # written by the installer before a swap: config/log/the old app (§15)
+│   └── snapshots/       # a copy of the questions taken at every launch — §5c
 ├── config.json          # saved settings, keyed by path under songs/ (auto-written)
 ├── log.json             # taping log: correct/wrong events, chronological (§8d, auto-written)
 ├── songs/               # audio files (.mp3/.m4a/.wav/.ogg/.flac/.aac)
@@ -158,6 +159,45 @@ IntroPlayer/
 
 > So git protects the program, **not the questions**. The backup path for the data is still copying
 > the round folder (§8e) — that is the unit the whole handover design is built on.
+
+## 5c. The launch snapshot (`Snapshot.swift`)
+
+§13 named this the one real data gap left, and this is the half of it that is now closed.
+
+`config.json` and `log.json` are deliberately untracked (§5b), which is what stops a code-side
+`git checkout .` from wiping a setter's markers — and the installer's `backups/` only fires
+during an update, which makes it an **undo for the update, not a backup**. Between updates the
+questions lived in exactly one place.
+
+On every launch, `AppModel.init` copies both files into `backups/snapshots/<stamp>/` with a
+plain-text `อ่านก่อน.txt` saying which build wrote it and how to restore. Twenty are kept; the
+oldest are pruned.
+
+| | |
+|---|---|
+| **covers** | `git clean -xdf` (which §5b measures as deleting `config.json`, `log.json` **and** `songs/`), a bad hand-edit, a bug in this app, `🗑 ล้าง log` or `↺ รีเซ็ตเล่นแล้ว` pressed by mistake, an import of the wrong round |
+| **does NOT cover** | losing the folder or the disk — the snapshots sit *inside* the folder whose loss is the risk |
+
+That second row is why `_settings.backupDir` exists: set it to a path in a synced folder and
+every snapshot is copied there too, which is the half that actually survives. It is empty by
+default because where an operator's questions are allowed to travel is their decision.
+
+> §13 warns that anything claiming "it always backs up for you" must be bounded or it makes the
+> gap *feel* closed. `--snapshot` prints both rows of that table every run, for that reason.
+
+Three properties that are load-bearing rather than tidy:
+
+- **The bytes are read synchronously in `init`, before anything else there can save; only the
+  writing is detached.** The point of a launch snapshot is the state *before* this run touched
+  anything, and an async read would race `store`'s own first write — preserving the result
+  instead of the input. Verified on the real app: launching it rewrote `writtenBy`,
+  `lastRanVersion` and `theme`, and the snapshot taken that launch holds the values from before.
+- **A snapshot identical to the newest one is skipped.** Without it, twenty quiet launches would
+  push the twenty real ones out of the ring. Measured: a dozen diagnostic launches produced two
+  snapshots, 24 KB in total.
+- **It never alarms.** A failure appears in About and in `--snapshot`, nowhere else — §8f's rule
+  that on a show day a missing backup must not produce a dialog, a toast or a retry. A snapshot
+  that *did* write is not news worth a banner either.
 
 ## 6. Server (`server.py`)
 
@@ -261,6 +301,7 @@ native/
     ├── Artwork.swift      cover art: embedded first, network only as a guarded fallback (§8f)
     ├── PaletteCheck.swift contrast / ΔL* / deutan ΔE2000 maths for --palettetest (§6d)
     ├── Store.swift        config.json + log.json, same schema as the web app (§9, §8d)
+    ├── Snapshot.swift     a copy of the questions, taken at launch — §5c
     ├── Library.swift      songs/ scan, path helpers, columns, Diagnostics
     ├── Handoff.swift      round.json, pre-flight checks, import plan/diff (§8e)
     ├── HandoverPanel.swift export sheet, diff/accept sheet, receive banner
@@ -309,6 +350,8 @@ INTROPLAYER_DIAG=1 $BIN --palettetest  # contrast, ΔL* ladder and deutan ΔE fo
 INTROPLAYER_DIAG=1 $BIN --loudtest     # BS.1770 coefficients, on-air spread, limiter headroom
 INTROPLAYER_DIAG=1 $BIN --autodetect   # guessed Intro End / Hook vs configured, with evidence
 INTROPLAYER_DIAG=1 $BIN --guesstest    # can the guess feature damage anything? (read-only)
+INTROPLAYER_DIAG=1 $BIN --snapshot     # the launch backup: writes one, prunes, proves the dedup
+INTROPLAYER_DIAG=1 $BIN --guessflow    # the admission rule, with a REAL playing player (§7a4)
 INTROPLAYER_DIAG=1 $BIN --artwork      # where each cover comes from; never makes a request
 INTROPLAYER_DIAG=1 $BIN --remodetest   # marker edits DURING playback must never outlive Intro End
 INTROPLAYER_DIAG=1 $BIN --takes        # take model self-check, then the real log's running order
@@ -1131,7 +1174,8 @@ Keyed by **path relative to `songs/`** (a bare filename for loose files). Exampl
     "lastRanVersion": "1.1.0",// rewritten on every save; a difference on launch means the
                               // update worked, and is the only way to SAY so — §15
     "dismissedUpdate": "",    // version the operator waved off; survives a relaunch — §15
-    "dismissedSchema": 0      // schema number they have already been told about — §15
+    "dismissedSchema": 0,     // schema number they have already been told about — §15
+    "backupDir": ""           // ALSO copy each launch snapshot here; empty = local only — §5c
   },
   "EP01/SongA.m4a": {
     "introStart": 14.2,   // seconds; intro begins here
@@ -1651,6 +1695,18 @@ the day it does not help.
 > was found by three parallel reviews plus a corpus of 15 deliberately broken audio files, and
 > `--guesstest` is what holds the conclusions.
 
+- **A running app can outlive the bundle it was launched from, and §15's "leftover old bundle is
+  a trap" then gets worse.** Found live on the dev machine: a process had been running for 10½
+  hours from `IntroPlayerNative.app/Contents/MacOS/IntroPlayerNative` — a path that **no longer
+  existed**, because `build.sh` had renamed the bundle under it (§15). So it was a pre-1.3.0
+  build holding the config it loaded at 01:00, and `_settings.writtenBy` still read `1.2.0`
+  hours into a session on 1.3.1. Its next `willTerminate` or `willResignActive` would have
+  flushed that stale state over anything written since — §12's two-window clobber, across two
+  bundles instead. The installer's `running_in_target` check does catch it (it matches `ps`
+  output against the target path, and the dead path is still under the target), which is the
+  `LEGACY[]` handling earning its keep. What nothing catches is a *developer* writing
+  `config.json` while it runs: check `ps -Ao command | grep -F IntroPlayerNative` first, not
+  just whether the current bundle is open.
 - **`applyAutoStart` was `applyGuess`'s unguarded twin** — same trigger, same callback, two of
   the same markers, and **none** of its four guards, 20 lines below the comment claiming
   `store.set` direct was the last write in the app to skip the clamps. Consequences, each
@@ -1857,7 +1913,14 @@ Product / UX
   keep an unknown-keys passthrough so a round trip is lossless.
 - **Put the app version in `log.json` events**, so the edit room's index can say which build
   produced a take.
-- **Durable backup of the questions.** `config.json` / `log.json` are deliberately untracked
+- **Durable backup of the questions — the local half is DONE (§5c); the off-machine half is
+  not.** Launch snapshots cover every cause except losing the folder or the disk, and
+  `_settings.backupDir` closes that too — but **there is no UI for it**, so it has to be typed
+  into `config.json` by hand, which means in practice no crew machine will have it set. The
+  About sheet is the obvious home and the obstacle is its fixed 620 pt height (§15's news-strip
+  note: `CenterView`'s only flexible child has a hard floor, so content that overruns centres
+  and clips both ends). Superseded text follows, kept because the reasoning still applies:
+- ~~**Durable backup of the questions.**~~ `config.json` / `log.json` are deliberately untracked
   (§5b) and the installer's `backups/` lives *inside* the folder whose loss is the risk and only
   fires on an update — so it is an undo for the update, not a backup. Between updates the
   questions still live in exactly one place. A snapshot on launch, or a scheduled copy into a
@@ -1896,6 +1959,8 @@ INTROPLAYER_DIAG=1 $BIN --palettetest # both themes: contrast, ladder, deutan Δ
 INTROPLAYER_DIAG=1 $BIN --loudtest    # BS.1770 coefficients + on-air spread + limiter headroom
 INTROPLAYER_DIAG=1 $BIN --autodetect  # Intro End / Hook guesses with their evidence
 INTROPLAYER_DIAG=1 $BIN --guesstest   # clamps vs NaN/inf/1e19 + the admission rules per song
+INTROPLAYER_DIAG=1 $BIN --snapshot    # writes a real snapshot; restores nothing, deletes nothing
+INTROPLAYER_DIAG=1 $BIN --guessflow   # plays a song for real; RESTORES the song it touched
 INTROPLAYER_DIAG=1 $BIN --artwork     # cover source per song (offline, makes no request)
 INTROPLAYER_DIAG=1 $BIN --remodetest  # marker edits mid-playback: 3 cases, none may outlive Intro End
 INTROPLAYER_DIAG=1 $BIN --takes       # running order: synthetic self-check + the real log

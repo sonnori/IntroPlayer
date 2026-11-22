@@ -973,6 +973,142 @@ enum Diagnostics {
         print(bad == 0 ? "\n✓ ผ่าน" : "\n✗ ไม่ผ่าน")
     }
 
+    /// The guess feature's **admission rule**, driven through a real `AppModel` and a real
+    /// playing `Player`. `--guesstest` proves the arithmetic and the data-dependent refusals
+    /// without any of that; this is the half that needs the app actually running.
+    ///
+    /// It exists because the rule it checks replaced `player.isPlaying`, and the case that
+    /// mattered is the one `isPlaying` reports as FALSE: paused on a buzz. A guess landing in
+    /// that window moves Intro End, and the next Space derives `.free` from a playhead now past
+    /// it — no intro bound, the whole song on camera. That cannot be proven by reading the
+    /// config; the playhead has to be somewhere.
+    ///
+    /// **Restores what it writes**, and verifies the restore, so it is safe to run on a real
+    /// library. It still needs `INTROPLAYER_DIAG=1` because it writes at all.
+    @MainActor static func guessFlow() {
+        var pass = 0, fail = 0
+        func check(_ l: String, _ ok: Bool, _ d: String = "") {
+            if ok { pass += 1 } else { fail += 1 }
+            print("   \(ok ? "ok  " : "✗   ")\(l)\(d.isEmpty ? "" : "  — " + d)")
+        }
+        let m = AppModel()
+        guard let song = m.songsIn(m.currentPlaylist).first else { print("no songs"); return }
+        let other = m.songsIn(m.currentPlaylist).dropFirst().first
+        let saved = m.store.config(for: song)
+        print("song: \(Library.baseName(song))")
+        print("  เริ่มต้น: introStart=\(saved.introStart) introEnd=\(saved.introEnd) " +
+              "configured=\(saved.configured) auto=\(saved.auto)\n")
+
+        m.current = song
+        m.player.load(url: Library.url(song))
+        m.player.muteForTest()
+        m.player.seek(to: saved.introStart, config: saved)
+
+        print("1) จอดอยู่ที่ Intro Start ของตัวเอง = พักอยู่ ให้เขียนได้")
+        check("guessAllowed = true", m.guessAllowed(song),
+              String(format: "position %.2f  introStart %.2f", m.player.position, saved.introStart))
+
+        print("\n2) กำลังเล่น = ห้ามเขียน")
+        m.player.toggleStart(config: saved)
+        let t0 = Date()
+        while Date().timeIntervalSince(t0) < 1.2 {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            if m.player.position > saved.introStart + 0.6 { break }
+        }
+        check("guessAllowed = false ขณะเล่น", !m.guessAllowed(song),
+              "playing=\(m.player.isPlaying) " + String(format: "position %.2f", m.player.position))
+
+        print("\n3) กดหยุดกลางคำถาม (isPlaying = false) = ยังห้ามเขียน  ← จุดที่เคยพลาด")
+        m.player.pause()
+        let parked = m.player.position
+        check("isPlaying เป็น false จริง", !m.player.isPlaying)
+        check("guessAllowed ยัง false", !m.guessAllowed(song),
+              String(format: "position %.2f ห่างจาก introStart %.2f", parked, parked - saved.introStart))
+
+        print("\n4) เพลงอื่นที่ไม่ได้อยู่บนจอ = เขียนได้ (ไม่มีอะไรของมันออกอากาศ)")
+        if let o = other {
+            check("guessAllowed = true สำหรับเพลงที่ไม่ใช่ current", m.guessAllowed(o),
+                  Library.baseName(o))
+        } else { print("   — มีเพลงเดียวในรอบนี้ ข้าม") }
+
+        print("\n5) กลับไปจอดที่จุดเริ่ม = เขียนได้อีกครั้ง")
+        m.player.seek(to: saved.introStart, config: saved)
+        check("guessAllowed = true", m.guessAllowed(song))
+
+        print("\n6) การเดาต้องไม่นับเป็นการตรวจ")
+        m.applyAutoStart(song, analysis: Analysis(), manual: false)   // no analysis → refuses
+        var c = m.store.config(for: song)
+        check("analysis ว่าง → ไม่เขียนอะไร", c.introStart == saved.introStart)
+        m.updateConfigQuiet { $0.introEnd = $0.introStart + 9 }       // a human edit, for contrast
+        c = m.store.config(for: song)
+        check("แก้โดยคน → configured=true auto=false", c.configured && !c.auto)
+
+        print("\n7) คืนค่าเดิม")
+        m.store.set(saved, for: song)
+        m.store.saveNow()
+        let back = m.store.config(for: song)
+        check("config ของเพลงนี้กลับเป็นค่าเดิมทุกช่อง", SongConfig.same(back.introStart, saved.introStart)
+              && SongConfig.same(back.introEnd, saved.introEnd)
+              && SongConfig.same(back.hook, saved.hook)
+              && back.configured == saved.configured && back.auto == saved.auto)
+
+        print("\nผ่าน \(pass)  ตก \(fail)")
+        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+    }
+
+    /// The launch snapshot: what it holds, whether it can write, and what it does NOT cover.
+    ///
+    /// Writes a real snapshot (that is the thing being tested) but touches nothing else — the
+    /// operator's `config.json` and `log.json` are READ, never modified.
+    static func snapshotReport() {
+        let store = Store()
+        print("โฟลเดอร์สำรอง: \(Snapshot.dir.path)")
+        print("โฟลเดอร์ sync : \(store.backupDir.isEmpty ? "— (ยังไม่ตั้ง, _settings.backupDir)" : store.backupDir)")
+        var pass = 0, fail = 0
+        func check(_ l: String, _ ok: Bool, _ d: String = "") {
+            if ok { pass += 1 } else { fail += 1 }
+            print("   \(ok ? "ok  " : "✗   ")\(l)\(d.isEmpty ? "" : "  — " + d)")
+        }
+
+        guard let shot = Snapshot.capture() else {
+            print("\n✗ อ่าน config.json ไม่ได้ หรือยังไม่มีโจทย์ — ไม่มีอะไรให้สำรอง")
+            return
+        }
+        print(String(format: "\nจะสำรอง: config.json %d bytes%@",
+                     shot.config.count,
+                     shot.log.map { " · log.json \($0.count) bytes" } ?? " · ไม่มี log.json"))
+
+        let before = Snapshot.existing().count
+        let r = Snapshot.write(shot, version: AppVersion.short, mirrorTo: store.backupDir)
+        let after = Snapshot.existing()
+        print("\nผลการเขียน")
+        if r.skipped { print("   ข้าม — เหมือนชุดล่าสุดเป๊ะ (ถูกต้อง: เปิดแอปเฉย ๆ ไม่ควรกินช่องในวง)") }
+        if let w = r.wrote { print("   เขียน \(w)") }
+        if r.pruned > 0 { print("   ลบของเก่าเกิน \(Snapshot.keep) ชุด: \(r.pruned)") }
+        if let m = r.mirrored { print("   คัดลอกไป \(m)") }
+        for p in r.problems { print("   ⚠ \(p)") }
+
+        check("มีชุดสำรองอยู่อย่างน้อยหนึ่งชุด", !after.isEmpty)
+        check("ไม่เกินเพดาน \(Snapshot.keep) ชุด", after.count <= Snapshot.keep,
+              "มี \(after.count) (ก่อนรัน \(before))")
+        if let newest = after.first {
+            let back = try? Data(contentsOf: newest.appendingPathComponent("config.json"))
+            check("ชุดล่าสุดเท่ากับ config.json ปัจจุบันทุกไบต์", back == shot.config)
+            check("มี อ่านก่อน.txt บอกวิธีคืนค่า",
+                  FileManager.default.fileExists(atPath: newest.appendingPathComponent("อ่านก่อน.txt").path))
+        }
+        // The second run must be a no-op: nothing changed in between.
+        let again = Snapshot.write(shot, version: AppVersion.short, mirrorTo: "")
+        check("รันซ้ำทันทีต้องข้าม ไม่เขียนซ้ำ", again.skipped && again.wrote == nil)
+
+        print("\n   สิ่งที่ครอบคลุม : git clean -xdf · แก้ไฟล์ผิด · บั๊กในแอป · กดปุ่มทำลายพลาด")
+        print("   สิ่งที่ยังไม่ครอบคลุม: โฟลเดอร์หรือดิสก์หายทั้งก้อน")
+        print("                      ← ปิดช่องนี้ด้วยการตั้ง _settings.backupDir เป็น path ในโฟลเดอร์ sync")
+
+        print("\nผ่าน \(pass)  ตก \(fail)")
+        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+    }
+
     /// Can the auto-guess feature damage anything? Read-only — it writes no file and calls no
     /// store mutation.
     ///

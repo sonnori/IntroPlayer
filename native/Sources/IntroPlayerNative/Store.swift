@@ -259,6 +259,12 @@ final class Store {
     /// Where to look for a newer build. Empty = the check is off, which is the default and the
     /// only state that needs no network at all. See §15.
     var updateFeed = ""
+    /// Where launch snapshots of the questions are ALSO copied. Empty = local only, which is
+    /// the default. Point it at a synced folder (Drive, Dropbox, iCloud) and `Snapshot` closes
+    /// the half of §13's data gap that a copy inside this folder cannot: losing the folder or
+    /// the disk. Empty by default because where an operator's questions are allowed to travel
+    /// is their decision — see `Snapshot`.
+    var backupDir = ""
     /// The format number this build writes. Absent in a file means 1, so every config written
     /// before this field existed reads as current and raises nothing.
     ///
@@ -308,6 +314,7 @@ final class Store {
         // every reset stamp in the file.
         resetAt = ((s["resetAt"] as? [String: Any]) ?? [:]).compactMapValues { $0 as? String }
         updateFeed = (s["updateFeed"] as? String) ?? ""
+        backupDir = String(((s["backupDir"] as? String) ?? "").prefix(500))
         // A non-numeric or missing value reads as the current schema rather than 0, so a garbled
         // field cannot make every launch claim the file is from the future.
         schemaOnDisk = (s["schema"] as? Int) ?? Store.schema
@@ -444,6 +451,12 @@ final class Store {
         // wrote it, and overwriting it IS the downgrade this guard exists to prevent.
         if s["schema"] == nil || s["schema"] is Int {
             s["schema"] = max(Store.schema, schemaOnDisk)
+        }
+        // Same read-it-before-you-delete-it rule as `updateFeed` and `resetAt` above.
+        if !backupDir.isEmpty {
+            s["backupDir"] = backupDir
+        } else if s["backupDir"] is String {
+            s.removeValue(forKey: "backupDir")
         }
         s["writtenBy"] = AppVersion.short
         if !dismissedUpdate.isEmpty { s["dismissedUpdate"] = dismissedUpdate }

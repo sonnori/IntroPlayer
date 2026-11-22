@@ -99,7 +99,9 @@ final class AppModel: ObservableObject {
     /// `isValidJSONObject` on EVERY later save, so the whole session's markers stop reaching disk
     /// with nothing naming the song at fault. `isFinite` on the input is not enough, because the
     /// input is finite; the multiply is what overflows.
-    static let maxTime: Double = Store.maxMarker   // one source, so a clamp cannot drift
+    // `nonisolated` for the same reason as `clampMarkers`: these are constants, and the clamp
+    // has to be callable without a main actor so `--guesstest` can prove it.
+    nonisolated static let maxTime: Double = Store.maxMarker   // one source, no drift
     /// 2 s is tight for someone watching the stage rather than the screen; the only cost of a
     /// longer window is a longer-lived ghost marker.
     static let pendingWindow: Double = 2.5
@@ -169,7 +171,15 @@ final class AppModel: ObservableObject {
     private var seNodes: [AVAudioPlayer] = []
     private var bag = Set<AnyCancellable>()
 
+    /// One line about the launch snapshot, for About. nil when there is nothing to say.
+    @Published var snapshotNote: String?
+
     init() {
+        // **Captured FIRST, synchronously, before anything else in this initialiser can save.**
+        // The value of a launch snapshot is the state as it was before this run; reading it
+        // asynchronously would race `store`'s own first write and could preserve the result
+        // instead of the input. Only the WRITING is moved off the main thread.
+        let shot = Snapshot.capture()
         songs = Library.scan()
         let pls = playlists
         currentPlaylist = pls.contains(store.lastPlaylist) ? store.lastPlaylist : (pls.first ?? "")
@@ -186,6 +196,20 @@ final class AppModel: ObservableObject {
             self.objectWillChange.send()
         }
         rebuildResetCache()
+        if let shot {
+            let version = AppVersion.short, mirror = store.backupDir
+            Task.detached(priority: .utility) { [weak self] in
+                let r = Snapshot.write(shot, version: version, mirrorTo: mirror)
+                guard let note = Snapshot.summary(r) else { return }
+                let model = self
+                await MainActor.run {
+                    // About only. §8f's rule: on a show day a backup that cannot write must not
+                    // produce a dialog, a toast or a retry — and a backup that DID write is not
+                    // news worth a banner either.
+                    model?.snapshotNote = note
+                }
+            }
+        }
         // The save is debounced 250 ms. Quitting inside that window — which is exactly what
         // happens when the GM marks a song and immediately hits Cmd+Q — dropped the edit.
         for name in [NSApplication.willTerminateNotification, NSApplication.willResignActiveNotification] {
@@ -360,7 +384,7 @@ final class AppModel: ObservableObject {
 
     /// Shortest intro the app will accept. A zero-length range made modeForPosition return .free
     /// for everything, which silently disarmed the intro-end guard — found in a real config.
-    static let minIntro: Double = 0.5
+    nonisolated static let minIntro: Double = 0.5
 
     /// Marker edits only — trim/played must not count as "the GM configured this".
     /// `commit` is false for the continuous part of a drag: gain must not be rewritten per frame
