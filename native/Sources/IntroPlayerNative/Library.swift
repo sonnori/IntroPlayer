@@ -739,7 +739,13 @@ enum Diagnostics {
                 print(String(format: "\nแตกไฟล์ + ตรวจ  %.2fs", Date().timeIntervalSince(t1)))
                 print("  staged at \(staged.lastPathComponent)")
                 let fm = FileManager.default
-                for f in ["IntroPlayerNative.app", Updater.installerName, "VERSION", "server.py"] {
+                // `Install.bundleName`, NOT a literal. This loop is what `Updater.Install`
+                // calls the proof that the Swift copy of the bundle name still agrees with a
+                // real release — and it was hardcoded to the pre-1.3.0 name, so it proved the
+                // opposite: it never read `bundleName` at all, and would have reported
+                // `✗ ไม่ผ่าน` against a perfectly good zip. A check that names its subject
+                // literally is not checking the thing it claims to.
+                for f in [Updater.Install.bundleName, Updater.installerName, "VERSION", "server.py"] {
                     let there = fm.fileExists(atPath: staged.appendingPathComponent(f).path)
                     print("  \(there ? "ok  " : "✗   ")\(f)")
                     if !there { ok = false }

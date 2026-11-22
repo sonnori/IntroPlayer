@@ -82,6 +82,12 @@ NAME="IntroPlayer-$VERSION"
 STAGE="$DIST/$NAME"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
+# Cleaned on EVERY exit, not just the two success paths. A `--github` run that stops at
+# `gh auth status`, or any run that refuses for a missing download URL, used to leave the
+# unpacked staging tree sitting in dist/ — and that tree looks exactly like an install
+# folder. §15 step 3 means the installer would refuse to aim at it (it carries the release
+# markers), but it is still a thing a human can mistake for the real folder and copy into.
+trap 'rm -rf "$STAGE"' EXIT
 
 # The program, and only the program. config.json / log.json / songs/ are the operator's and are
 # never in a release — that split is the whole reason an update can be safe (§5b, §15).
@@ -141,7 +147,7 @@ done
 rm -f "$STAGE/se/correct.mp3" "$STAGE/se/wrong.mp3"
 if [ ! -f "$STAGE/se/correct.mp3" ] || [ ! -f "$STAGE/se/wrong.mp3" ]; then
   echo "  ⚠ se/ ไม่มีไฟล์เสียง — ชุดนี้จะไม่มีเสียงตอบถูก/ผิด"
-  echo "    (ปกติ ถ้า build จาก clone ใหม่ — ไฟล์เสียงไม่ได้อยู่ใน repo)"
+  echo "    (ปกติ — บรรทัดข้างบนลบออกเองทุกครั้ง เพราะ licence ยังไม่ชัด)"
   echo "    คนที่ลงใหม่ต้องวาง correct.mp3 / wrong.mp3 ใน se/ เอง (มีวิธีใน se/README.txt)"
 fi
 cp "$HERE/installer.command" "$STAGE/ติดตั้ง-อัปเดต.command"
@@ -208,7 +214,9 @@ echo "→ zipping"
 # Drive upload and Archive Utility. Checking the folder we just built proves nothing about that.
 echo "→ verifying the zip round-trips"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+# BOTH, because a second `trap ... EXIT` REPLACES the first — which is how the staging-folder
+# cleanup above would have been silently disarmed by the line that cleans the unzip dir.
+trap 'rm -rf "$TMP" "$STAGE"' EXIT
 ( cd "$TMP" && unzip -qq "$DIST/$NAME.zip" )
 U="$TMP/$NAME"
 fail=0
@@ -229,7 +237,19 @@ check "universal (arm64 + x86_64) — arch: $ARCHS" '[[ "$ARCHS" == *arm64* && "
 # The strongest check available: ask the unzipped binary what it is.
 GOT="$("$U/$APPBUNDLE/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 || echo "")"
 check "แอปที่แตกออกมารายงานเวอร์ชั่น $VERSION — ได้: ${GOT:-ไม่ตอบ}" '[[ "$GOT" == "$VERSION"* ]]'
-[ "$fail" = "0" ] || { echo "✗ zip ไม่ผ่านการตรวจ"; exit 1; }
+# A stale SHA256SUMS beside a zip is worse than none: it names the file sitting next to it,
+# so whoever hands the zip over by hand checks it, gets a mismatch, and concludes a perfectly
+# good release is corrupt. Remove it rather than leave it describing a zip it does not.
+[ "$fail" = "0" ] || { rm -f "$DIST/SHA256SUMS"; echo "✗ zip ไม่ผ่านการตรวจ"; exit 1; }
+
+# ---- checksum, written HERE: it is a property of the ZIP, not of the manifest ----
+# It used to be written further down, after the `--github` early exit and after the refusal for
+# a missing download URL — so both of those paths left the PREVIOUS run's SHA256SUMS in place,
+# naming this run's zip. Measured on 1.3.0: the file claimed a97f96cd… for a zip that hashes
+# to 1f2ca771…. The in-app installer verifies against the MANIFEST's sha256 and so was never
+# affected; the person checking a hand-delivered zip is the one this misled.
+( cd "$DIST" && shasum -a 256 "$NAME.zip" > SHA256SUMS )
+ZIPSHA="$(shasum -a 256 "$DIST/$NAME.zip" | awk '{print $1}')"
 
 # ---- publish to GitHub Releases ----
 # This is the channel with the fewest moving parts: `gh release create` puts the tag, the notes
@@ -263,12 +283,10 @@ if [ "$GH" = "1" ]; then
   exit 0
 fi
 
-# ---- manifest + checksums ----
-# Computed BEFORE the manifest that quotes it. The in-app installer checks this before it
+# ---- manifest ----
+# `ZIPSHA` is computed above, before any early exit. The in-app installer checks it before it
 # unpacks anything, which is what catches the realistic failure: a truncated download or a
 # half-synced Drive file.
-( cd "$DIST" && shasum -a 256 "$NAME.zip" > SHA256SUMS )
-ZIPSHA="$(shasum -a 256 "$DIST/$NAME.zip" | awk '{print $1}')"
 # An empty `download` produces a dead-end banner: the operator is told there is a new version
 # and then told to "unzip the file you were given" — a file they have no way to get. Refuse it
 # rather than publish it, unless explicitly told there is no URL yet.

@@ -402,7 +402,7 @@ enum InstallLocation {
 /// That process is the SAME `ติดตั้ง-อัปเดต.command` the manual path uses, run with
 /// `--unattended`: the backups, the checked `rm`, the full rollback and the
 /// "ask the installed binary its version before claiming success" check are all reused rather
-/// than reimplemented, and they are what the 79 assertions cover.
+/// than reimplemented, and they are what `installer-test.sh`'s 123 assertions cover.
 ///
 /// One happy side effect worth knowing: this path **has no Gatekeeper step at all**. Quarantine
 /// is applied by whatever downloads a file — a browser, Drive's client — not by the kernel. A zip

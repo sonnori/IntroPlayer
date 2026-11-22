@@ -297,13 +297,13 @@ enum AutoDetect {
         var earliest = bestT
         var scan = first
         while scan < bestT {
-            // 0.90, not 0.80. Correlations across a whole song run 0.82-0.98, so a loose
-            // threshold matches almost anything and the walk-back lands on the first VERSE
-            // rather than the first chorus — measured: songs 101 and 301 were picking a hook
-            // three seconds after the intro ended.
-            // 0.85 with a boundary requirement. At 0.80 the walk-back landed on the first
-            // VERSE (songs 101 and 301 picked a hook three seconds after the intro); at 0.90
-            // nothing earlier matched at all for song 106 and it stayed on the final chorus.
+            // 0.85 AND a boundary requirement — three conditions, because similarity alone
+            // cannot carry this. Correlations across a whole song run 0.82-0.98, so the
+            // threshold is working in a narrow band: at 0.80 the walk-back landed on the first
+            // VERSE (songs 101 and 301 picked a hook three seconds after the intro ended), and
+            // at 0.90 nothing earlier matched at all for song 106, which stayed on the final
+            // chorus at 175 s of a 190 s track. `rep[scan]` keeps the earlier window from being
+            // a one-off near-match, and `novelty` keeps it from starting mid-phrase.
             if similarity(f.chroma, scan, bestT, seg) >= 0.85 && rep[scan] >= rep[bestT] * 0.85
                 && novelty(f.chroma, at: scan) > 0.20 {
                 earliest = scan
@@ -342,7 +342,13 @@ enum AutoDetect {
         for k in 0..<len {
             for d in 0..<12 { dot += c[a + k][d] * c[b + k][d] }
         }
-        return Double(dot) / Double(len)      // each vector is unit length, so this is in 0...1
+        // Mean per second of a 12-dim dot product between unit-length vectors, so this is a
+        // mean CORRELATION and its range is -1...1, not 0...1 — the vectors are mean-centred
+        // above, which is exactly what buys the negative half and makes the measure
+        // discriminating. Real music lands in 0.82-0.98, which is why the thresholds here sit
+        // in such a narrow band; a reader who believes the range is 0...1 will think 0.85 is
+        // a loose threshold when it is near the middle of the usable range.
+        return Double(dot) / Double(len)
     }
 
     private static func mean(_ v: [Double], from: Int, to: Int) -> Double {
