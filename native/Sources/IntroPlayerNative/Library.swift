@@ -1,4 +1,6 @@
 import Foundation
+import AppKit
+import ImageIO
 
 /// Where the app's data lives. The bundle sits inside the project folder exactly like the shell
 /// launcher did, so `songs/`, `config.json` and `log.json` stay shared with the web version.
@@ -12,6 +14,61 @@ enum AppPaths {
     static var se: URL { root.appendingPathComponent("se") }
     static var config: URL { root.appendingPathComponent("config.json") }
     static var log: URL { root.appendingPathComponent("log.json") }
+    static var brand: URL { root.appendingPathComponent("brand") }
+}
+
+/// The programme's logo, drawn in the header bar before the app name.
+///
+/// **It lives beside the app, not inside the bundle** — `brand/logo.png`, in the installer's
+/// `SEED[]` next to `se/`. That is the same category as the two stings: it belongs to the
+/// production rather than to this program, it changes on the production's schedule and not on
+/// ours, and this repo is public. Baking it into `Resources/` would mean a rebuild and a
+/// release every time the branding moves, and it would put the show's artwork in git.
+/// `SEED[]` semantics are exactly right: copied on a fresh install, **never overwritten by an
+/// update**, so a crew machine cannot lose its logo to a version bump.
+///
+/// Loaded **once per process** via a lazy `static let`. `ContentView` is re-initialised on
+/// every model publish (§6c) and the header re-renders at the player's tick rate, so anything
+/// that touched the disk from `body` would `stat` 50 times a second — §8f's memoised-cover
+/// lesson, including the memo for "looked, not there". The cost is that swapping the file needs
+/// a relaunch, which `brand/README.txt` says.
+enum ShowLogo {
+    /// Fits inside the header's existing line box, so adding a logo does NOT make the bar
+    /// taller. That matters: `CenterView`'s only flexible child is the waveform and it has a
+    /// hard `minHeight: 160` floor, so every point the header grows comes off content that has
+    /// nowhere to go — §15's news-strip note, where the overflow clips the song title off the
+    /// top and ✓ Correct / ✗ Wrong off the bottom with no scroller.
+    static let height: CGFloat = 22
+    /// Beyond this the logo starts crowding the chips and buttons at the 1900 px breakpoint.
+    static let maxWidth: CGFloat = 90
+    /// A 10000x10000 PNG is ~400 MB once decoded. The dimensions are read from the file's
+    /// header BEFORE decoding, so an absurd file costs nothing.
+    private static let maxPixels = 4096
+
+    static let image: NSImage? = load()
+
+    private static func load() -> NSImage? {
+        let u = brandFile
+        guard let d = try? Data(contentsOf: u), !d.isEmpty,
+              let src = CGImageSourceCreateWithData(d as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let w = props[kCGImagePropertyPixelWidth] as? Int,
+              let h = props[kCGImagePropertyPixelHeight] as? Int,
+              w > 0, h > 0, w <= maxPixels, h <= maxPixels,
+              let cg = CGImageSourceCreateImageAtIndex(src, 0, nil)
+        else { return nil }
+        return NSImage(cgImage: cg, size: NSSize(width: w, height: h))
+    }
+
+    static var brandFile: URL { AppPaths.brand.appendingPathComponent("logo.png") }
+
+    /// Width to draw at, from the image's own aspect ratio. Returning an exact size rather than
+    /// handing SwiftUI a `maxWidth` box keeps a narrow logo from reserving 90 pt of header it
+    /// does not use, and a wide one from letterboxing inside it.
+    static func drawSize(_ img: NSImage) -> CGSize {
+        let w = min(maxWidth, height * img.size.width / max(1, img.size.height))
+        return CGSize(width: max(1, w), height: height)
+    }
 }
 
 /// Songs are identified end-to-end by their path relative to `songs/`. A subfolder is a playlist

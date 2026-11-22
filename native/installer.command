@@ -57,6 +57,7 @@ IntroPlayerNative.app
 # Seeded on a fresh install, never overwritten — an operator may have swapped in their own stings.
 SEED=(
 se
+brand
 )
 # Copied aside before the swap but never replaced. The questions and the taping record.
 DATA=(config.json log.json)

@@ -130,8 +130,23 @@ struct ContentView: View {
 
     private var header: some View {
         HStack(spacing: 14) {
-            Circle().fill(Color(red: 0, green: 0.6, blue: 0.2)).frame(width: 9, height: 9)
-            Text("RGF INTRO PLAYER").font(Typo.font(15, .bold)).foregroundStyle(.white)
+            // The programme's logo, when `brand/logo.png` exists. What used to sit here was a
+            // hardcoded 9 pt GREEN dot with no state behind it — decoration, and a live §6d
+            // violation: green has exactly one meaning in this app, "a human answered
+            // correctly", and spending it on an ornament is how a palette stops meaning
+            // anything. It was not even a `Palette` value. Replacing it fixes both at once.
+            if let logo = ShowLogo.image {
+                let s = ShowLogo.drawSize(logo)
+                Image(nsImage: logo)
+                    .resizable().interpolation(.high)
+                    .frame(width: s.width, height: s.height)
+                    .accessibilityHidden(true)
+            }
+            // `Palette.onHeader`, not `.white`. They are the same value, but this bar is dark
+            // red in BOTH themes, so what sits on it must be a FIXED-light role — §6d records
+            // the save-failure text measuring 1.2:1 in light because it used a theme-flipping
+            // colour here.
+            Text("RGF INTRO PLAYER").font(Typo.font(15, .bold)).foregroundStyle(Palette.onHeader)
             Spacer()
             if model.reviewRemaining > 0 {
                 headerChip("ยังต้องตรวจ \(model.reviewRemaining)", Palette.cyan) {

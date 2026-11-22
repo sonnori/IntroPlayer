@@ -176,14 +176,28 @@ for item in "${SEEDS[@]}"; do
   cp -R "$ROOT/$item" "$STAGE/$item"
 done
 # A release must be reproducible from the public repo, so it ships exactly what the repo holds.
-# Without this the stings would reach the public GitHub release from the maintainer's own disk —
-# the one place excluding them from git does not cover. Remove this block together with the two
-# .gitignore lines if their licence is ever confirmed.
-rm -f "$STAGE/se/correct.mp3" "$STAGE/se/wrong.mp3"
+# A SEED folder's README is the repo's; its PAYLOAD is the production's, and `cp -R` above takes
+# the maintainer's own disk — which is the one place excluding it from git does not cover.
+#
+# **One list, not a hardcoded pair.** This was `rm -f "$STAGE/se/correct.mp3" …`, naming two
+# files, and the day `brand` joined SEED[] the show's logo went straight into a public GitHub
+# release: measured, the zip went from 2.4 MB to 3.9 MB and nothing failed. Same family as the
+# SHIP[]-vs-PROGRAM[] cross-check twenty lines up — a rule that names its subjects literally
+# stops covering the subject that arrives later. Keep this list in step with `.gitignore`.
+SEED_PAYLOAD=(
+se/correct.mp3
+se/wrong.mp3
+brand/logo.png
+)
+for f in "${SEED_PAYLOAD[@]}"; do rm -f "$STAGE/$f"; done
 if [ ! -f "$STAGE/se/correct.mp3" ] || [ ! -f "$STAGE/se/wrong.mp3" ]; then
   echo "  ⚠ se/ ไม่มีไฟล์เสียง — ชุดนี้จะไม่มีเสียงตอบถูก/ผิด"
   echo "    (ปกติ — บรรทัดข้างบนลบออกเองทุกครั้ง เพราะ licence ยังไม่ชัด)"
   echo "    คนที่ลงใหม่ต้องวาง correct.mp3 / wrong.mp3 ใน se/ เอง (มีวิธีใน se/README.txt)"
+fi
+if [ ! -f "$STAGE/brand/logo.png" ]; then
+  echo "  ⚠ brand/ ไม่มีโลโก้ — แถบบนสุดจะขึ้นแต่ตัวหนังสือ (ปกติ ด้วยเหตุผลเดียวกับ se/)"
+  echo "    คนที่ลงใหม่ต้องวาง logo.png ใน brand/ เอง (มีวิธีใน brand/README.txt)"
 fi
 cp "$HERE/installer.command" "$STAGE/ติดตั้ง-อัปเดต.command"
 chmod +x "$STAGE/ติดตั้ง-อัปเดต.command" "$STAGE/ตรวจสอบเครื่อง.command" 2>/dev/null || true
@@ -266,7 +280,12 @@ check "ไม่มี songs/ ติดไปด้วย"                  '[ !
 # The folder and its instructions, not the audio: the stings are not redistributed (see
 # .gitignore), so asserting they are present would make every release fail by design.
 check "se/ มีโฟลเดอร์ + คำอธิบาย"                '[ -f "$U/se/README.txt" ]'
-check "ไม่มีไฟล์เสียงที่ไม่รู้ licence ติดไปด้วย"  '[ ! -f "$U/se/correct.mp3" ] && [ ! -f "$U/se/wrong.mp3" ]'
+check "brand/ มีโฟลเดอร์ + คำอธิบาย"             '[ -f "$U/brand/README.txt" ]'
+# One check per SEED_PAYLOAD entry, driven by the list rather than spelled out, so the day a
+# third seed is added the assertion arrives with it instead of a year later.
+payload_clean=1
+for f in "${SEED_PAYLOAD[@]}"; do [ -e "$U/$f" ] && payload_clean=0; done
+check "ไม่มีไฟล์ของรายการที่ไม่รู้ licence ติดไปด้วย" '[ "$payload_clean" = "1" ]'
 ARCHS="$(lipo -archs "$U/$APPBUNDLE/Contents/MacOS/IntroPlayerNative" 2>/dev/null || echo "")"
 check "universal (arm64 + x86_64) — arch: $ARCHS" '[[ "$ARCHS" == *arm64* && "$ARCHS" == *x86_64* ]]'
 # The strongest check available: ask the unzipped binary what it is.

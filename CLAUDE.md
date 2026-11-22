@@ -120,6 +120,9 @@ IntroPlayer/
 │       ├── round.json   # written by "ส่งต่อ" — the handover unit is this folder (§8e)
 │       └── .covers/     # downloaded cover art, INSIDE the round so it travels (§8f). Hidden,
 │                        # so Library.scan's .skipsHiddenFiles keeps it out of the song list.
+├── brand/               # logo.png — the programme's logo, drawn in the header. Seeded like
+│                        # se/: an update never overwrites it, and it is not in the public
+│                        # repo (README.txt is). See §6e.
 ├── se/                  # correct.mp3, wrong.mp3
 ├── วิธีใช้งาน-SETUP.md   # end-user guide (Thai)
 ├── CLAUDE.md            # this file
@@ -552,6 +555,48 @@ dark teal did not.
 > person who has to watch the stage. Light is for the setter at a desk. An unreadable `theme`
 > value falls back to **dark**, not to the system, so a garbled settings file cannot put a white
 > screen in front of the operator mid-taping.
+
+## 6e. The programme's logo (`ShowLogo`, `brand/logo.png`)
+
+A small logo drawn in the header bar before `RGF INTRO PLAYER`. Three decisions in it are
+worth keeping.
+
+**It lives beside the app, not inside the bundle.** `brand/` is in the installer's `SEED[]`
+alongside `se/`, which means copied on a fresh install and **never overwritten by an update**.
+That is the right category for the same reasons as the stings: the artwork belongs to the
+production rather than to this program, it changes on the production's schedule, and this repo
+is public. Baking it into `Resources/` would mean a rebuild and a release every time the
+branding moves. `brand/README.txt` is tracked so the folder and its spec always exist;
+`brand/*` is otherwise gitignored.
+
+**The spec is set by the bar, not by taste.** `Palette.header` is brick red in BOTH themes
+(`#C8402A` / `#BA2616`) and `onHeader` is fixed white — so the logo must be a light or white
+knockout. A dark logo is invisible there, and no theme setting will rescue it. It draws at
+**22 pt tall**, which fits inside the header's existing line box: a taller bar takes its height
+from `CenterView`, whose only flexible child has a hard `minHeight: 160` floor, so the overflow
+clips the song title off the top and ✓/✗ off the bottom (§15's news-strip note). Width is
+clamped at 90 pt and the exact draw size comes from the image's own aspect ratio, so a narrow
+logo does not reserve 90 pt it will not use.
+
+**Loaded once per process**, as a lazy `static let`. `ContentView` is re-initialised on every
+model publish (§6c) and the header re-renders at the player's tick rate, so reading the disk
+from `body` would `stat` 50 times a second — §8f's memoised-cover lesson. The cost is that
+swapping the file needs a relaunch, which `brand/README.txt` says. Dimensions are read from the
+file header *before* decoding and anything over 4096 px a side is refused; a missing, empty or
+corrupt file draws nothing and raises nothing.
+
+> It replaced a hardcoded 9 pt **green** dot with no state behind it — decoration, and a live
+> §6d violation, since green in this app means "a human answered correctly" and nothing else.
+> It was not even a `Palette` value.
+
+Two things the release path needed and did not have. `release.sh` stripped the payload with a
+hardcoded `rm -f "$STAGE/se/correct.mp3" "$STAGE/se/wrong.mp3"`, so the day `brand` joined
+`SEED[]` the show's logo went into a public GitHub release — measured, the zip went from 2.4 MB
+to 3.9 MB and every check passed. It is a `SEED_PAYLOAD[]` list now, with the zip assertion
+driven by the same list. And `installer-test.sh` only ever proved the promise for
+`se/correct.mp3`: adding a seed left "an update never overwrites this" untested for the new
+one, at 123/123 green. Both are the same shape as the SHIP[]-vs-PROGRAM[] cross-check — **a
+rule that names its subjects literally stops covering the subject that arrives later.**
 
 ## 7. Audio pipeline (important)
 
@@ -2030,7 +2075,7 @@ siblings (§5). So the program and the data are already physically separate:
 | | | |
 |---|---|---|
 | **program** — replaced by an update | `RGF Intro Player.app`, `IntroPlayer.app`, `server.py`, `index.html`, `วิธีใช้งาน-SETUP.md`, `ตรวจสอบเครื่อง.command`, `start.command`, `VERSION` | the release's |
-| **seeded once, never overwritten** | `se/` | an operator may have swapped in their own stings |
+| **seeded once, never overwritten** | `se/`, `brand/` | an operator may have swapped in their own stings, and the programme's logo belongs to the production |
 | **never touched** | `config.json`, `log.json`, `songs/` | the only copy of the questions |
 
 That table is the whole feature. It is the same split as §5b's tracked-vs-untracked, for the same

@@ -91,6 +91,10 @@ fresh_target() {
   printf '{"events":[{"t":"2026-11-01T10:00:00+07:00","playlist":"EP09","path":"EP09/a.mp3","event":"correct"}]}\n' > "$TARGET/log.json"
   printf 'not really audio\n' > "$TARGET/songs/EP09/a.mp3"
   mkdir -p "$TARGET/se"; printf 'CUSTOM STING\n' > "$TARGET/se/correct.mp3"
+  # Every SEED[] entry needs its own fixture, or the promise "an update never overwrites this"
+  # is only tested for whichever seed happened to exist when the test was written. `brand` was
+  # added to SEED[] and the suite still passed 123/123 while proving nothing about it.
+  mkdir -p "$TARGET/brand"; printf 'CUSTOM SHOW LOGO\n' > "$TARGET/brand/logo.png"
   # pretend it is the previous release — every program file present and OLD
   mkdir -p "$TARGET/$LEGACYB/Contents/MacOS"
   printf 'OLD APP\n' > "$TARGET/$LEGACYB/Contents/MacOS/IntroPlayerNative"
@@ -105,6 +109,7 @@ fresh_target() {
   LOG_BEFORE="$(shasum -a 256 < "$TARGET/log.json")"
   SONG_BEFORE="$(shasum -a 256 < "$TARGET/songs/EP09/a.mp3")"
   SE_BEFORE="$(shasum -a 256 < "$TARGET/se/correct.mp3")"
+  LOGO_BEFORE="$(shasum -a 256 < "$TARGET/brand/logo.png")"
 }
 
 run() {  # run <log> <src> [env assignments via globals]
@@ -164,6 +169,7 @@ check "exit 0 (rc=$rc)" '[ "$rc" = "0" ]'
 echo "   --- the promise: data byte-identical ---"
 data_intact
 check "se/ ที่ผู้ใช้เปลี่ยนเอง ไม่ถูกทับ" '[ "$(shasum -a 256 < "$TARGET/se/correct.mp3")" = "$SE_BEFORE" ]'
+check "brand/logo.png ของรายการ ไม่ถูกทับ" '[ "$(shasum -a 256 < "$TARGET/brand/logo.png")" = "$LOGO_BEFORE" ]'
 echo "   --- every program file actually moved ---"
 check "แอปใหม่รันได้ และตอบเวอร์ชั่นถูก" '[ "$("$TARGET/$APPB/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 | cut -d" " -f1)" = "$VER" ]'
 # A leftover bundle under the old name still launches and still reads the same config.json, so
@@ -359,6 +365,7 @@ check "รอ --wait-pid จริง (${EL}s ควร >= 2)" '[ "$EL" -ge 2 ]'
 check "แอปใหม่เข้าที่ และตอบเวอร์ชั่นถูก" '[ "$("$TARGET/$APPB/Contents/MacOS/IntroPlayerNative" --version 2>/dev/null | head -1 | cut -d" " -f1)" = "$VER" ]'
 data_intact
 check "se/ ที่เปลี่ยนเองไม่ถูกทับ" '[ "$(shasum -a 256 < "$TARGET/se/correct.mp3")" = "$SE_BEFORE" ]'
+check "brand/logo.png ไม่ถูกทับ (unattended)" '[ "$(shasum -a 256 < "$TARGET/brand/logo.png")" = "$LOGO_BEFORE" ]'
 check "สำรองไฟล์ชุดเดิมไว้ครบ" '[ -f "$(ls -d "$TARGET/backups"/*/ | head -1)/server.py" ]'
 check "สั่งเปิดแอปใหม่" 'grep -q "$APPB" "$BASE/openlog"'
 check "ไม่เปิด dialog เลย" '[ ! -s "$BASE/log15" ] || ! grep -q "display dialog" "$BASE/log15"'

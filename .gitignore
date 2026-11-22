@@ -30,6 +30,15 @@ songs/*/round.json
 se/correct.mp3
 se/wrong.mp3
 
+# ── show branding ────────────────────────────────────────────────────────
+# Same reasoning as the stings one block up: the programme's logo belongs to
+# the production, not to this program, and this repo is public. brand/
+# README.txt IS tracked so the folder and its spec always exist; the artwork
+# is seeded by hand on each machine and an update never overwrites it (it is
+# in the installer's SEED[], beside se/).
+brand/*
+!brand/README.txt
+
 # ── audio ────────────────────────────────────────────────────────────────
 # The song library (~29 MB of commercial music). The app scans whatever is
 # in songs/ at runtime; nothing here is needed to build.
