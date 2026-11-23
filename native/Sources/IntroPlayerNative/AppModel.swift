@@ -1467,7 +1467,29 @@ final class AppModel: ObservableObject {
                 updateStep = "กำลังปิดแอป — เดี๋ยวมันจะเปิดขึ้นมาใหม่เอง"
                 // Let the child reach its wait loop before we vanish.
                 try? await Task.sleep(nanoseconds: 500_000_000)
+                // Close the sheet FIRST. Reported from a real update that hung here forever:
+                // the message was on screen and the app never went away. `NSApp.terminate` runs
+                // the normal window-closing sequence, and this call is made from inside a
+                // SwiftUI `.sheet` presented on the only window — the most likely thing in the
+                // way, and free to remove.
+                showAbout = false
                 NSApp.terminate(nil)
+                // If we are still here, terminate did not take, and the old code left the
+                // operator looking at "กำลังปิดแอป" with no way out and no explanation: the
+                // installer waits 30 s for this pid and then exits silently, so the screen
+                // stayed like that forever.
+                //
+                // The window is still open at this point, so quitting by hand is what finishes
+                // the update — and it finishes it properly, because `saveNow()` ran before
+                // `apply` and the installer is still counting.
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    guard self.updateInstalling else { return }
+                    self.updateStep = "ปิดแอปเองไม่ได้ — กด Cmd+Q เดี๋ยวนี้ (ตัวติดตั้งรออยู่อีก ~25 วินาที)"
+                    self.updateState = "ถ้ากด Cmd+Q แล้วไม่ปิด ให้ Force Quit (Cmd+Option+Esc) "
+                        + "— โจทย์ถูกบันทึกไปก่อนหน้านี้แล้ว ไม่หาย "
+                        + "ถ้าพลาดช่วงนี้ไป เปิดแอปใหม่แล้วกดอัปเดตอีกครั้งได้เลย"
+                }
             } catch {
                 if let d = scratch { try? FileManager.default.removeItem(at: d) }
                 updateInstalling = false
