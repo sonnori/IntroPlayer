@@ -1162,10 +1162,23 @@ enum Diagnostics {
     static func updateStage() {
         print("this build: \(AppVersion.full)")
         print("macOS:      \(UpdateInfo.runningOS)")
-        let feed = Store().updateFeed
+        // `--feed <path|owner/repo>` overrides `_settings.updateFeed` for this run only.
+        //
+        // It exists because testing the staging chain otherwise means EDITING the operator's own
+        // config.json — and the one thing this diagnostic is for is the update path, which is
+        // exactly where a stray write to their settings would be hardest to notice. It also makes
+        // the chain testable at all: staging requires a feed offering a version HIGHER than the
+        // running build, which the real feed never does right after a release.
+        var feed = Store().updateFeed
+        if let i = CommandLine.arguments.firstIndex(of: "--feed"),
+           CommandLine.arguments.count > i + 1 {
+            feed = CommandLine.arguments[i + 1]
+            print("feed override: ใช้ --feed แทนค่าใน config.json")
+        }
         guard !feed.isEmpty else {
             print("\nยังไม่ได้ตั้ง _settings.updateFeed — ไม่มีอะไรให้ทดสอบ")
             print("ตั้งเป็น path ของโฟลเดอร์ที่มี manifest.json + zip แล้วรันอีกครั้ง")
+            print("หรือรัน: --updatestage --feed <path ของโฟลเดอร์ หรือ owner/repo>")
             return
         }
         print("feed:       \(feed)")
@@ -1231,10 +1244,19 @@ enum Diagnostics {
                 // the opposite — a check that names its subject literally is not checking the
                 // thing it claims to.
                 let staged_app = staged.appendingPathComponent(Updater.Install.bundleName)
-                for f in [Updater.Install.bundleName,
-                          "\(Updater.Install.bundleName)/\(Updater.swapHelper)",
-                          "\(Updater.Install.bundleName)/Contents/Resources/web/server.py",
-                          "\(Updater.Install.bundleName)/Contents/Resources/web/index.html"] {
+                //
+                // This list went stale the moment the web fallback was unshipped: it still named
+                // `Resources/web/server.py`, so a perfectly good 1.5.1 zip reported `✗ ไม่ผ่าน`.
+                // §12's lesson in the mirror — a check that spells its subject literally stops
+                // covering the subject that ARRIVES later, and keeps asserting the one that LEFT.
+                // Driven off `Seeding.scripts` now, so adding or removing a seeded file moves
+                // this with it.
+                var want = [Updater.Install.bundleName,
+                            "\(Updater.Install.bundleName)/\(Updater.swapHelper)"]
+                want += Seeding.scripts.map {
+                    "\(Updater.Install.bundleName)/Contents/Resources/scripts/\($0)"
+                }
+                for f in want {
                     let there = fm.fileExists(atPath: staged.appendingPathComponent(f).path)
                     print("  \(there ? "ok  " : "✗   ")\(f)")
                     if !there { ok = false }
