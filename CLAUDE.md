@@ -3199,6 +3199,45 @@ Three checks in it are worth keeping:
   bundle structure are what survive or fail to survive the packaging — checking the folder you
   just built proves nothing about that.
 
+### v1.5.0 ships the `.dmg` ONLY, and that is a one-release exception
+
+**A 1.4.x machine cannot take the in-app update to 1.5.0, and left alone it would try.** Measured
+on a real 1.4.2 build (`git worktree` at that commit, its own `config.json` pointing at the live
+feed), not reasoned about:
+
+1. 1.4.2's GitHub feed filters the release's assets down to `.zip` and ignores the `.dmg`;
+2. so it reported `→ มีเวอร์ชั่นใหม่ 1.5.0` and offered **อัปเดตเลย**;
+3. pressing it downloads 3.1 MB, verifies the checksum, unpacks, finds the bundle — and then
+   1.4.2's `stage()` does `guard fm.isExecutableFile(ติดตั้ง-อัปเดต.command)`, which the 1.5.0 zip
+   does not contain, and throws **"ในชุดอัปเดตไม่มีตัวติดตั้ง"**.
+
+The working app survives (that check runs before the swap), but it is a button that dies, with a
+message that sounds like the release is broken — while the release notes say to use the `.dmg`.
+The banner contradicts the notes.
+
+So the `.zip` asset was **deleted from the v1.5.0 release by hand**. With no `.zip` attached, the
+old client's check *throws* (`release v1.5.0 ไม่มีไฟล์ .zip แนบมา`), `updateInfo` stays nil,
+`showUpdateNotice` is therefore false, and §15's rule that a failed check never toasts on the
+automatic pass means **old machines go quiet instead of offering something that fails**. Verified
+on the same 1.4.2 build after the deletion.
+
+> **Future releases must carry the `.zip` again.** 1.5.0+ clients fetch the zip — the `.dmg` is for
+> people, the `.zip` is for the updater. `release.sh --github` uploads both by default and needs no
+> change; v1.5.0 is special only because the asset was removed manually *after* publishing. Do not
+> repeat it. Forgetting to put it back is the kind of one-off exception that silently stops every
+> machine from ever updating again.
+
+The cost, stated: **1.4.x machines migrate by hand, once** — download the `.dmg`, drag to
+Applications, open. The new app finds their existing questions folder through the breadcrumb (§5d)
+with nothing to answer. Accepted because the install base is a handful of machines; with more of
+them, the better answer is a migration shim in the zip that the old builds would find and run.
+
+> Measured in passing: **GitHub's unauthenticated API caches a release for roughly a minute.** The
+> first re-check after deleting the asset still reported the old `.zip` URL, from GitHub rather
+> than from us — `Updater` already uses `.reloadIgnoringLocalCacheData` on an `ephemeral` session.
+> Not a defect (the check runs once per launch), but worth knowing before somebody goes looking for
+> a caching bug that is not there.
+
 ### The installer is retired
 
 `native/installer.command` and `native/installer-test.sh` are **deleted**. Everything they did —
