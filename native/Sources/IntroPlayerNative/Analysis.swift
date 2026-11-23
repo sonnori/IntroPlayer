@@ -21,6 +21,16 @@ final class Analysis {
     /// for the audience to hear, so measuring the whole song is the better answer.
     static let minUsableLufs: Double = -46
 
+    /// How much of the song Reveal counts as putting on air, for levelling. Reveal plays until
+    /// the operator stops it, so there is no exact answer; 15 s is about one chorus, which is
+    /// what Reveal exists to show.
+    static let revealScopeSec: Double = 15
+    /// Where Reveal aims. Deliberately the SAME as `targetLufs` today, so the reveal and the
+    /// intro come out at one level — and kept as its own constant because "should the payoff be
+    /// a few dB hotter than the question?" is a production decision, and this is the one number
+    /// that answers it.
+    static let revealTargetLufs: Double = -15.0
+
     // intro-start detection
     static let preRoll: Double = 0.25
     static let onsetWin: Double = 0.03
@@ -271,6 +281,38 @@ final class Analysis {
         // and crushed instead of falling back to the whole song.
         if !v.isFinite || v < Analysis.minUsableLufs { return whole() }
         return (v, .intro)
+    }
+
+    /// The stretch Reveal puts on air. Shared by the level measurement and the headroom check so
+    /// the two cannot drift onto different windows — §7a3 records what it cost when the peak
+    /// followed the measurement scope instead of what is played.
+    func revealRange(config c: SongConfig) -> (Double, Double) {
+        let h0 = min(max(0, c.hook), max(0, duration - 0.5))
+        return (h0, min(duration, h0 + Analysis.revealScopeSec))
+    }
+
+    /// Reveal's own level, because Reveal plays the HOOK and the auto-gain is measured over the
+    /// sparse intro. A pop master puts its loudest 15 seconds in the chorus, so a song whose
+    /// quiet intro earned a boost was sending that boost out on camera.
+    ///
+    /// Measured on the real nine-song library before this existed: the songs' choruses sit
+    /// within 9.93 LU of each other untouched (3.53 LU for eight of the nine — masters are
+    /// already levelled), and applying the intro's gain to them widened that to **15.21 LU**,
+    /// sd 2.82 → 5.02. Song 107's reveal landed at +0.86 LUFS — 15.9 LU over target — with the
+    /// limiter clawing back 10.78 dB, so the reveal was simultaneously the loudest thing in the
+    /// show and the most crushed. Normalising the intro de-normalised the one thing on camera.
+    ///
+    /// `scope == .song` is honoured and returns the whole-file figure: that setting means "one
+    /// number for this file", so there is nothing to re-level.
+    func revealLufs(config c: SongConfig, scope: LoudnessScope) -> (lufs: Double, windowed: Bool) {
+        guard isReady, !kBlocks.isEmpty else { return (-.infinity, false) }
+        let whole = { (self.lufs(0, self.duration), false) }
+        guard scope == .intro else { return whole() }
+        let (h0, h1) = revealRange(config: c)
+        guard h1 - h0 >= Analysis.minScopeSec else { return whole() }
+        let v = lufs(h0, h1)
+        guard v.isFinite, v >= Analysis.minUsableLufs else { return whole() }
+        return (v, true)
     }
 
     /// Which stretch the auto-gain is measured over. Intro-scoped by default: the GM only plays the

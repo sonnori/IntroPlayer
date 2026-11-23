@@ -1108,12 +1108,15 @@ final class AppModel: ObservableObject {
     /// less headroom than the gain asks for. Published so the level card and the pre-flight can
     /// both read it without recomputing.
     @Published var limiterEats: Double = 0
+    /// The same figure for the hook, i.e. for what Reveal puts on camera.
+    @Published var revealLimiterEats: Double = 0
 
     func refreshGain() {
         let c = config()
         let r = player.applyGain(analysis: analysis, config: c,
                                  normalize: store.normalize, scope: store.loudnessScope)
         limiterEats = r.limiterEats
+        revealLimiterEats = r.revealLimiterEats
         if !store.normalize { scopeNote = "ปิดการเกลี่ยอยู่" }
         else if r.usedScope == .intro { scopeNote = "วัดจากช่วง Intro จริง (LUFS)" }
         else if store.loudnessScope == .intro { scopeNote = "ช่วง Intro สั้น/เงียบเกิน — ใช้ทั้งเพลงแทน" }

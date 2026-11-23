@@ -23,6 +23,9 @@ final class Player: ObservableObject {
     @Published private(set) var position: Double = 0
     @Published private(set) var duration: Double = 0
     @Published private(set) var gainDb: Double = 0
+    /// What Reveal will play at. Separate from `gainDb` because they are measured over
+    /// different stretches of the song — see `Analysis.revealLufs`. The level card shows both.
+    @Published private(set) var revealGainDb: Double = 0
 
     private let engine = AVAudioEngine()
     private let node = AVAudioPlayerNode()
@@ -44,6 +47,9 @@ final class Player: ObservableObject {
     private var fadeDur: Double = 0
     private var fadeEndAt: Double = 0
     private var baseGainDb: Double = 0
+    /// The level for `.reveal`, held here so `reveal()` and `play(from:)` can apply it without
+    /// needing the Analysis — `applyGain` already runs at every moment either figure can change.
+    private var revealBaseGainDb: Double = 0
 
     private var guardTimer: Timer?
     private var activity: NSObjectProtocol?
@@ -109,6 +115,7 @@ final class Player: ObservableObject {
         // Never carry the previous song's gain into this one — a +12 dB track followed by a loud
         // master went out 12 dB hot if Start was pressed before analysis finished.
         baseGainDb = 0
+        revealBaseGainDb = 0
         eq.globalGain = 0
     }
 
@@ -129,6 +136,24 @@ final class Player: ObservableObject {
         var usedScope: LoudnessScope?
         var limiterEats: Double        // dB of `db` the limiter will claw back; 0 when it fits
         var headroomDb: Double         // dB available before the -1 dBFS wall
+        var revealDb: Double           // what Reveal will play at, measured over the hook
+        var revealLimiterEats: Double  // the same claw-back figure for the hook
+    }
+
+    /// The level for the stretch a given mode actually plays.
+    ///
+    /// Only Reveal gets its own figure, and that asymmetry is deliberate: a seek can land
+    /// anywhere, so re-deriving the level from wherever the playhead stopped would change the
+    /// loudness under the operator's hand on every waveform click — constant during marker work,
+    /// and with no cut to hide it. Reveal is one jump to one fixed place, so the level change is
+    /// masked by the jump it already makes. `.free` therefore keeps the intro's level: it is a
+    /// setup state, not an on-camera verb.
+    private func levelDb(for m: PlayMode) -> Double {
+        m == .reveal ? revealBaseGainDb : baseGainDb
+    }
+
+    private func applyLevel() {
+        if !fading { eq.globalGain = Float(max(-96, min(24, levelDb(for: mode)))) }
     }
 
     /// Combined auto-normalise + per-song trim, applied as one dB figure.
@@ -140,14 +165,23 @@ final class Player: ObservableObject {
     func applyGain(analysis: Analysis?, config c: SongConfig, normalize: Bool, scope: LoudnessScope)
         -> Level {
         var autoDb: Double = 0
+        var revealAutoDb: Double = 0
         var used: LoudnessScope?
         var headroom = Double.infinity
+        var revealHeadroom = Double.infinity
         if let a = analysis, a.isReady {
             if normalize {
                 let m = a.measuredLufs(config: c, scope: scope)
                 used = m.usedScope
                 if m.lufs.isFinite {
                     autoDb = min(max(Analysis.targetLufs - m.lufs, -12), 12)   // same ±12 clamp
+                }
+                // Reveal plays the hook, not the intro. Same clamp, its own window and its own
+                // target — see `Analysis.revealLufs` for what applying the intro's figure here
+                // measured on the real library.
+                let r = a.revealLufs(config: c, scope: scope)
+                if r.lufs.isFinite {
+                    revealAutoDb = min(max(Analysis.revealTargetLufs - r.lufs, -12), 12)
                 }
             }
             // ALWAYS the intro range, never the measurement scope. The limiter acts on what is
@@ -158,6 +192,11 @@ final class Player: ObservableObject {
             let hi = max(c.introStart, c.introEnd)
             let pk = Double(hi > lo ? a.peakAllChannels(lo, hi) : 0)
             if pk > 0 { headroom = Player.limiterCeilingDb - 20 * log10(pk) }
+            // The hook's own headroom, on the hook's own window — the same rule as above, for
+            // the same reason: the limiter acts on what is PLAYED.
+            let (r0, r1) = a.revealRange(config: c)
+            let rpk = Double(r1 > r0 ? a.peakAllChannels(r0, r1) : 0)
+            if rpk > 0 { revealHeadroom = Player.limiterCeilingDb - 20 * log10(rpk) }
         }
         // `min(24, nan)` returns 24 — Swift's min yields its first argument when the second is
         // NaN — so a non-finite total would apply the MAXIMUM +24 dB to live playback. Every
@@ -165,14 +204,21 @@ final class Player: ObservableObject {
         let raw = autoDb + c.trimDb
         let total = raw.isFinite ? raw : 0
         baseGainDb = total
-        if !fading { eq.globalGain = Float(max(-96, min(24, total))) }
+        // Trim is a human decision about the SONG, so it applies to both stretches. With
+        // normalize off both figures collapse to the trim and Reveal behaves exactly as before.
+        let rawReveal = revealAutoDb + c.trimDb
+        revealBaseGainDb = rawReveal.isFinite ? rawReveal : 0
+        applyLevel()
         gainDb = total
+        revealGainDb = revealBaseGainDb
         // NOT capped. A brief transient meeting a brick wall is what a limiter is for, and
         // silently lowering what goes on air is not ours to decide — §15's "fail visible, not
         // shut". The figure is surfaced instead, in the level card and in the pre-flight.
         let eats = headroom.isFinite ? max(0, total - headroom) : 0
+        let revealEats = revealHeadroom.isFinite ? max(0, revealBaseGainDb - revealHeadroom) : 0
         return Level(db: total, usedScope: used, limiterEats: eats,
-                     headroomDb: headroom.isFinite ? headroom : 0)
+                     headroomDb: headroom.isFinite ? headroom : 0,
+                     revealDb: revealBaseGainDb, revealLimiterEats: revealEats)
     }
 
     /// Where limiting actually begins, in nominal dBFS (input + applied gain).
@@ -275,7 +321,10 @@ final class Player: ObservableObject {
         scheduledEndFrame = endFrame
         node.scheduleSegment(f, startingFrame: startFrame, frameCount: frames, at: nil,
                              completionHandler: nil)
-        eq.globalGain = Float(max(-96, min(24, baseGainDb)))   // restore level after any fade
+        // Restore the level after any fade — for the mode being played, not unconditionally the
+        // intro's. Every transport verb assigns `mode` before calling this (§12: a seek that
+        // assigned it afterwards was a real defect), so `reveal()` needs nothing of its own.
+        eq.globalGain = Float(max(-96, min(24, levelDb(for: mode))))
         node.play()
         isPlaying = true
         position = seekOffset

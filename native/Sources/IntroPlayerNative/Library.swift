@@ -1530,7 +1530,12 @@ enum Diagnostics {
 
             let raw = Analysis.targetLufs - m.lufs
             let g = min(max(raw, -12), 12)
-            let pk = Double(an.peak(lo, hi))
+            // EVERY channel, because the gain is applied to all of them. `an.peak` is channel 0
+            // — right for drawing the waveform, wrong here, and it is what `applyGain` was
+            // changed away from for this exact reason (§7a3). Keeping the old call in the test
+            // made the suite under-report headroom by 1.41 dB on song 106, i.e. it compared two
+            // slightly different things, which §7a3 itself calls worse than not comparing.
+            let pk = Double(an.peakAllChannels(lo, hi))
             let peakDb = pk > 0 ? 20 * log10(pk) : -.infinity
             let headroom = Player.limiterCeilingDb - peakDb
             rows.append(Row(name: String(Library.baseName(s).prefix(26)), a: lo, b: hi,
@@ -1587,6 +1592,70 @@ enum Diagnostics {
         }
         if eaten == 0 { print("   ไม่มี — ลิมิตเตอร์ไม่ทำงานในช่วง intro ของเพลงไหนเลย") }
         else { print("   \(eaten)/\(rows.count) เพลง — SetupPanel กับ pre-flight จะเตือนให้") }
+
+        // Reveal puts the HOOK on air, and a pop master's loudest 15 seconds is its chorus. So
+        // this measures Reveal's own window, and asserts the two things that were measurably
+        // wrong when Reveal inherited the intro's gain: the reveals must land ON target, and the
+        // limiter must not be eating them. Before `Analysis.revealLufs` existed the real library
+        // gave a 15.21 LU spread here (sd 5.02) against 9.93 untouched — i.e. levelling the
+        // intro made the on-camera moment LESS even than doing nothing — with song 107 at
+        // +0.86 LUFS, 15.9 LU over target, and 10.78 dB of claw-back.
+        print("\n6) ระดับตอน Reveal (วัดจากช่วง hook เอง)")
+        print(String(format: "   %-26@ %9@ %8@ %8@ %7@ %7@",
+                     "song" as NSString, "hook LUFS" as NSString, "gain" as NSString,
+                     "on-air" as NSString, "peak" as NSString, "eats" as NSString))
+        var airs: [Double] = []
+        var revealSquashed = 0
+        var worstOffTarget = 0.0
+        for s in songs {
+            guard let an = try? Analysis.analyse(url: Library.url(s)) else { continue }
+            let c = store.config(for: s)
+            let r = an.revealLufs(config: c, scope: scope)
+            guard r.lufs.isFinite else { continue }
+            let g = min(max(Analysis.revealTargetLufs - r.lufs, -12), 12) + c.trimDb
+            let (h0, h1) = an.revealRange(config: c)
+            let pk = Double(h1 > h0 ? an.peakAllChannels(h0, h1) : 0)
+            let pkDb = pk > 0 ? 20 * log10(pk) : -.infinity
+            let head = Player.limiterCeilingDb - pkDb
+            let eats = head.isFinite ? max(0, g - head) : 0
+            let air = r.lufs + g
+            airs.append(air)
+            if eats > 1 { revealSquashed += 1 }
+            // Only songs the clamp did not bite can be expected to land on target.
+            if abs(g - c.trimDb) < 11.9 {
+                worstOffTarget = max(worstOffTarget, abs(air - Analysis.revealTargetLufs - c.trimDb))
+            }
+            print(String(format: "   %-26@ %9.2f %+8.2f %8.2f %7.1f %7.2f",
+                         String(Library.baseName(s).prefix(26)) as NSString,
+                         r.lufs, g, air, pkDb, eats))
+        }
+        if airs.isEmpty { print("   ไม่มีเพลงที่วัดได้") } else {
+            let spread = (airs.max() ?? 0) - (airs.min() ?? 0)
+            print(String(format: "   กว้าง %.2f LU · ห่างเป้ามากสุด %.2f LU · ลิมิตเตอร์กินคืน >1 dB %d เพลง",
+                         spread, worstOffTarget, revealSquashed))
+            assertThat(worstOffTarget <= 0.01)
+            print(worstOffTarget <= 0.01
+                  ? "   ok  เพลงที่ไม่ติด clamp ต้องลงตรงเป้าทุกเพลง"
+                  : "   ✗   เฉลยไม่ลงเป้า — gain ของ Reveal ไม่ได้วัดจาก hook")
+            assertThat(revealSquashed == 0)
+            print(revealSquashed == 0
+                  ? "   ok  ไม่มีเพลงไหนที่ท่อนเฉลยชนลิมิตเตอร์"
+                  : "   ✗   ยังมีเฉลยที่โดนบี้ \(revealSquashed) เพลง")
+        }
+
+        // Reveal must not have quietly changed what the INTRO plays at. Same graph, two figures.
+        print("\n7) เปิด/ปิดการเกลี่ย — ค่าที่ใช้จริงต้องมาจากโหมดที่กำลังเล่น")
+        let p = Player()
+        if let first = songs.first, let an = try? Analysis.analyse(url: Library.url(first)) {
+            let c = store.config(for: first)
+            let on = p.applyGain(analysis: an, config: c, normalize: true, scope: .intro)
+            let off = p.applyGain(analysis: an, config: c, normalize: false, scope: .intro)
+            assertThat(abs(off.db - c.trimDb) < 1e-9 && abs(off.revealDb - c.trimDb) < 1e-9)
+            print(String(format: "   %@ ปิดเกลี่ย: intro %+.2f  เฉลย %+.2f  (ต้องเท่ากับ trim %+.2f)",
+                         (abs(off.db - c.trimDb) < 1e-9 && abs(off.revealDb - c.trimDb) < 1e-9
+                          ? "ok " : "✗  ") as NSString, off.db, off.revealDb, c.trimDb))
+            print(String(format: "       เปิดเกลี่ย: intro %+.2f  เฉลย %+.2f", on.db, on.revealDb))
+        }
 
         print("\nผ่าน \(pass)  ตก \(fail)")
         // The compiler emits `warning: will never be executed` on the `✗` branch here, with

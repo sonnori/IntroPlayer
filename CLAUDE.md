@@ -367,7 +367,7 @@ INTROPLAYER_DIAG=1 $BIN --handoff      # export → on-site edit → plan → ac
 INTROPLAYER_DIAG=1 $BIN --revealtest   # Reveal plays on; the intro guard RE-ARMS afterwards (§10)
 INTROPLAYER_DIAG=1 $BIN --grabtest     # the two-stage marker rule, incl. the stacked-marker case
 INTROPLAYER_DIAG=1 $BIN --palettetest  # contrast, ΔL* ladder and deutan ΔE for BOTH themes (§6d)
-INTROPLAYER_DIAG=1 $BIN --loudtest     # BS.1770 coefficients, on-air spread, limiter headroom
+INTROPLAYER_DIAG=1 $BIN --loudtest     # BS.1770 coeffs, on-air spread, headroom, REVEAL level
 INTROPLAYER_DIAG=1 $BIN --autodetect   # guessed Intro End / Hook vs configured, with evidence
 INTROPLAYER_DIAG=1 $BIN --guesstest    # can the guess feature damage anything? (read-only)
 INTROPLAYER_DIAG=1 $BIN --snapshot     # the launch backup: writes one, prunes, proves the dedup
@@ -891,6 +891,58 @@ destroy work:
   cancelling all but the last — the feature silently not happening. `AutoDetect.extract` has
   cooperative cancellation points for the same reason: without them a cancel discards the
   result but not the work.
+
+### a5) Reveal is levelled on its own window (`Analysis.revealLufs`)
+
+The auto-gain measures the **intro** (§7a2) and that is still right — but the figure was then
+applied to everything the node plays, and **Reveal plays the hook**. A pop master puts its
+loudest fifteen seconds in the chorus, so every song whose sparse intro earned a boost sent that
+boost out on camera.
+
+Measured on the real nine songs, before and after:
+
+| | spread | sd |
+|---|---|---|
+| the songs' hooks, untouched | 9.93 LU (**3.53** for 8 of the 9) | 2.82 |
+| hooks under the intro's gain — **what shipped** | **15.21 LU** | **5.02** |
+| hooks under their own gain | **0.00 LU** | 0.00 |
+
+So the feature was taking material the mastering engineers had **already levelled** and making
+the one moment that goes on camera *less* even than doing nothing at all. The worst case is the
+whole bug in one line: song 107's intro measures −35.9 LUFS and earns +12 dB, its hook measures
+−11.1, so Reveal went out at **+0.86 LUFS — 15.9 LU over target — with the limiter clawing back
+10.78 dB.** The reveal was simultaneously the loudest thing in the show and the most crushed.
+
+Three things about the fix are load-bearing:
+
+- **Only Reveal gets its own figure.** `Player.levelDb(for:)` is keyed on the mode, and `.free`
+  deliberately keeps the intro's level. A seek can land anywhere, so re-deriving the level from
+  wherever the playhead stopped would change loudness under the operator's hand on **every
+  waveform click** — constant during marker work, and with no cut to hide it. Reveal is one jump
+  to one fixed place, so the level change is masked by the jump it already makes.
+- **The headroom check uses the hook's window too.** §7a3 records what it cost when the peak
+  followed the measurement scope instead of what is played; `Analysis.revealRange` exists so the
+  level and the peak cannot drift onto different windows.
+- **`scope: song` is honoured.** That setting means "one number for this file", so `revealLufs`
+  returns the whole-file figure and there is nothing to re-level. With normalize **off** both
+  figures collapse to the trim, so Reveal behaves exactly as it did.
+
+`Analysis.revealTargetLufs` is deliberately **equal to `targetLufs`**, and is its own constant
+because "should the payoff be a few dB hotter than the question?" is a production decision, and
+that is the one number which answers it. Trim applies to both stretches — it is a human decision
+about the song, not about a stretch of it.
+
+> **The fix moves the show's reveal level down.** The old behaviour averaged roughly −10 LUFS
+> across the reveals; they now land on −15, same as the intro. That is the point — the old
+> number was not a choice, it was the intro's gain leaking — but it is a 5 dB change to what
+> the room hears at the reveal, so it is a thing to listen to before a taping, not just a
+> green test.
+
+**Why nothing caught it.** All three places that should have were scoped to the intro:
+`--loudtest` measured only the intro range, the level card showed one number, and the
+pre-flight's `squashedIntro` looks only at the intro. `--loudtest` sections 6 and 7 are the
+cover now — 6 asserts every reveal lands on target with no claw-back, 7 asserts that turning
+normalize off collapses both figures to the trim.
 
 ### b) Playback graph (`ensureGraph`)
 Created lazily on the **first play** (Web Audio needs a user gesture). Wiring:
@@ -2118,6 +2170,20 @@ the day it does not help.
 - A failed cover **write** was reported as "song not found", hiding the cheapest early signal
   that the folder holding `config.json` cannot be written. Same shape as `saveNow()` reporting
   "saved ✓" unconditionally.
+- **The auto-gain was measured on the intro and applied to Reveal**, which plays the hook. It
+  took hooks the masters had already levelled to within 3.53 LU and spread them to 15.21 LU —
+  the feature made the on-camera moment *less* even than doing nothing — with song 107's reveal
+  at 15.9 LU over target and 10.78 dB into the limiter. All three things that should have caught
+  it were scoped to the intro: `--loudtest`, the level card's single number, and the pre-flight's
+  `squashedIntro`. **A measurement window is part of a feature's contract: when a second verb
+  plays a different stretch, the window has to follow it or the levelling runs backwards.** See
+  §7a5.
+- `--loudtest` measured the intro peak with `an.peak()` — **channel 0 only** — while the shipping
+  `applyGain` uses `peakAllChannels`, which §7a3 records as a deliberate fix after channel 0
+  missed a hard-panned transient by 1.4 dB. The test kept the old call, so it under-reported
+  headroom by **1.41 dB on song 106**: the cross-check was comparing something slightly
+  different from the code it was checking, which §7a3 itself calls worse than not comparing. It
+  happened not to change any verdict on this library, which is exactly how it survived.
 > **The safety audit of the auto-guess feature** (accuracy explicitly out of scope — the owner's
 > requirement is that a wrong guess costs nothing and a bug costs a re-shoot). Everything below
 > was found by three parallel reviews plus a corpus of 15 deliberately broken audio files, and
@@ -2448,7 +2514,7 @@ INTROPLAYER_DIAG=1 $BIN --playtest    # overshoot must be 0.000, ignoreEnd must 
 INTROPLAYER_DIAG=1 $BIN --revealtest  # Reveal plays on, and the intro guard re-arms after it
 INTROPLAYER_DIAG=1 $BIN --grabtest    # two-stage marker rule, 10 assertions
 INTROPLAYER_DIAG=1 $BIN --palettetest # both themes: contrast, ladder, deutan ΔE — 144 assertions
-INTROPLAYER_DIAG=1 $BIN --loudtest    # BS.1770 coefficients + on-air spread + limiter headroom
+INTROPLAYER_DIAG=1 $BIN --loudtest    # + the reveal lands on target, 12 assertions — §7a5
 INTROPLAYER_DIAG=1 $BIN --autodetect  # Intro End / Hook guesses with their evidence
 INTROPLAYER_DIAG=1 $BIN --guesstest   # clamps vs NaN/inf/1e19 + the admission rules per song
 INTROPLAYER_DIAG=1 $BIN --snapshot    # writes a real snapshot; restores nothing, deletes nothing

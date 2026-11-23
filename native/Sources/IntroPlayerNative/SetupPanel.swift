@@ -367,6 +367,23 @@ struct SetupPanel: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            // Reveal is levelled on its OWN window, because it plays the hook. Shown because
+            // the number above is no longer the whole story, and because the gap between the two
+            // is a real fact about the song: a big one means a sparse intro under a loud chorus.
+            if model.store.normalize,
+               abs(model.player.revealGainDb - model.player.gainDb) > 0.05 {
+                Text(String(format: "ท่อนเฉลย (Hook) วัดแยก %+.1f dB · ต่างจากอินโทร %+.1f dB",
+                            model.player.revealGainDb,
+                            model.player.revealGainDb - model.player.gainDb))
+                    .font(Typo.font(10)).foregroundStyle(Palette.muted)
+            }
+            if model.revealLimiterEats > 1.0 {
+                Text(String(format: "⚠ ท่อนเฉลยชนเพดาน — ลิมิตเตอร์จะกินคืน %.1f dB "
+                            + "ตอนกด Reveal เสียงจะโดนบี้", model.revealLimiterEats))
+                    .font(Typo.font(10)).foregroundStyle(Palette.amber)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             HStack(spacing: 6) {
                 Text("วัดความดังจาก").font(Typo.font(12)).foregroundStyle(Palette.muted)
                 scopeButton("ช่วง Intro", .intro)
