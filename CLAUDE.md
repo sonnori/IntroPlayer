@@ -202,6 +202,146 @@ Three properties that are load-bearing rather than tidy:
   that on a show day a missing backup must not produce a dialog, a toast or a retry. A snapshot
   that *did* write is not news worth a banner either.
 
+## 5d. Where the questions live (`AppPaths`) — the DMG groundwork
+
+Asked for as "ทำเป็น dmg แล้วลากลง Applications ได้ป่ะ แล้วให้เลือก Browse Folder ที่เก็บไฟล์เพลง".
+**Those are one change, not two.** `AppPaths.root` used to be the bundle's parent, so an app in
+`/Applications` would look for `/Applications/songs/` and try to write `/Applications/config.json`.
+Making the data folder choosable is what lets the bundle move; the DMG is then packaging.
+
+This section is **step ก**: the data root is explicit and choosable, while the app still sits beside
+the data by default. Nothing about an existing install changes — see the resolution order.
+
+### `programRoot` vs `root`, and why the names are the only defence
+
+| | what it is | who reads it |
+|---|---|---|
+| `AppPaths.programRoot` | the folder the `.app` sits in. Derived, never stored | the installer target, `InstallLocation`, `launchedFromRelease` |
+| `AppPaths.root` | where the questions are. Resolved, cacheable, choosable | `songs/`, `config.json`, `log.json`, `se/`, `brand/`, `Snapshot` |
+
+They were one value, so **every call site had to be read and classified by hand**. Get one wrong
+and the failure is silent and severe in both directions: `Updater.apply` handed the data root would
+tell the installer to replace program files *inside the operator's questions folder*; `Store` handed
+the program root would look for a library beside the app and find none. There is no test that
+catches this — only the names. `--roottest` section 4 at least pins that the five data accessors
+all hang off one root.
+
+### The resolution order (`AppPaths.resolveRoot`)
+
+1. **what the operator chose** — `UserDefaults`, key `dataRoot`;
+2. **the bundle's sibling** — the classic layout. **This is why nothing breaks today:** the folder
+   beside the app wins before any prompt;
+3. **the breadcrumb** the app already writes (§15), so a machine that has been running the classic
+   layout keeps working after the app moves to `/Applications`, with nobody asked anything;
+4. **nothing** → `.none`.
+
+> **`beside` must come before `breadcrumb`, and the first draft had it the other way round.**
+> `InstallLocation.record()` rewrites the breadcrumb from the program folder on every launch — but
+> it runs in `AppModel.init` *after* the root has been resolved. So with the breadcrumb first,
+> copying a whole classic-layout folder somewhere new and opening it read the **old** folder for
+> one entire launch before the breadcrumb caught up: a session of marker edits landing in the copy
+> the operator thought they had left behind. Found by running `--whereami` in the project folder
+> and seeing `source: breadcrumb` where `beside` was the honest answer — the two happened to be
+> the same path, so nothing looked wrong. In `/Applications` there is no library beside the app,
+> so step 2 falls through and the breadcrumb still does the migration it exists for.
+
+Each candidate must pass `looksLikeLibrary`: it has `songs/` (as a *directory*) or a `config.json`,
+and is not in a temp root, not on `/Volumes`, not inside `backups/`, and not an unzipped release
+(§15's `ติดตั้ง-อัปเดต.command` / `อ่านก่อน.txt` markers). Those exclusions are lifted out of
+`InstallLocation`, which had the identical list private — and that mattered, because **the resolver
+reads the very file `InstallLocation` writes**, so a breadcrumb the writer rejects could otherwise
+still be adopted by the reader.
+
+> **The chosen root is in `UserDefaults`, not in `config.json`.** It cannot be in `config.json`:
+> that file lives *inside* the root. Chicken and egg. It is the one setting in this app that is not
+> in `_settings`, and that is structural rather than a style slip.
+
+### `.none` must stay inert — the most important guard in this change
+
+With nothing resolved, `AppPaths.root` falls back to the bundle's parent. So a save in that state
+would write `config.json` next to the app — i.e. `/Applications/config.json` once the app lives
+there. That is not just a failed save: `looksLikeLibrary` tests for exactly that file, so **the next
+launch would adopt `/Applications` as the library** and the operator's real folder would never be
+looked at again. An empty second library that the app *prefers* is strictly worse than no library.
+
+`Store.saveNow`, `Store.scheduleSave`, `LogStore.save` and `Snapshot.write` therefore all refuse
+while `!AppPaths.hasRoot`, and the resolver refuses to guess or to create anything.
+
+Verified end to end rather than argued — on the **second** attempt, and the first one is the part
+worth keeping:
+
+> **`HOME` does not isolate this, and a test that thinks it does proves nothing.**
+> `InstallLocation.file` goes through
+> `FileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)`, which reads the
+> user record, **not** `$HOME`. A first run with `HOME` pointed at an empty directory therefore
+> still found the real breadcrumb, resolved `.breadcrumb`, and was never in the `.none` state the
+> test claimed to be exercising — it wrote nothing for an entirely different reason. The isolation
+> that works is `CFFIXED_USER_HOME`, which CoreFoundation does honour. Same family as §7a3's
+> cross-check that compared two slightly different things: the run was green and measured nothing.
+
+With `CFFIXED_USER_HOME` set, `--whereami` reports `source: none` and `data: — ยังไม่ได้เลือก`,
+and the app run in that state for seven seconds with its window up wrote **no `config.json`, no
+`log.json`, no `backups/snapshots`** into the folder holding the bundle, and did not touch the
+fixture library it was not pointed at.
+
+What the operator sees instead is a non-dismissible amber strip — `NewsBanner`'s `.noLibrary`, ahead
+of every other item — with both verbs on it. It has to explain itself, because an empty song list is
+§8c's "the app can't find my songs", which was reported from real use when the cause was merely a
+remembered playlist.
+
+### Opening vs creating are separate verbs
+
+`AppPaths.setRoot` only accepts a folder that already looks like a library; `AppPaths.createLibrary`
+is the only thing that may make one, and it creates **`songs/` only**. An "open" that quietly
+creates `songs/` wherever you pointed it is how an empty second library appears and a day of markers
+looks lost. `se/` and `brand/` are not created: they are the production's own files (§6e, §15's
+`SEED[]`), and this build may not be carrying them at all.
+
+### Switching at runtime (`AppModel.switchDataRoot`)
+
+Four things in it, three of them about not damaging the library you are *leaving*:
+
+- **Refused while playing.** It tears down the song list and reloads the store; §10 is the reason.
+- **The old store is flushed FIRST, to the old root.** The save is debounced 250 ms, so a marker
+  edited a moment ago is still pending — after `setRoot` it would land in the *new* folder, writing
+  one library's markers into another. Same debounce §12 records losing an edit at quit.
+  (`LogStore.append` writes immediately and re-reads first, so it has nothing pending. Do not add a
+  flush there that does not exist.)
+- **Guesses are cancelled.** An in-flight `AutoDetect` finishes with a main-actor hop that writes by
+  *path*, and a path means a different song once the root moves (§7a4).
+- **Every per-path cache is dropped.** `analysisCache` and `coverCache` key on the path under
+  `songs/`, which is **not unique across libraries** — `EP01/101.mp3` exists in both — so keeping
+  them would draw one library's waveform for another's audio. §8f records the same defect from the
+  cover cache dropping the file extension.
+
+It also takes a §5c snapshot of the library it moved *into*: otherwise the only pre-run copy the
+session holds is of the library it left, and §5c's promise is "the state before this run touched
+anything" — which, right after a switch, is still true of the new one.
+
+`rescan(force:)` exists for this and nothing else. The two guards in `rescan` — bail when the list is
+unchanged, keep the old list when the scan comes back empty — are right for a routine rescan (§12)
+and wrong after a switch, where the new library legitimately holds different songs or none.
+
+### Verify
+
+```bash
+INTROPLAYER_DIAG=1 $BIN --roottest   # 27 assertions, read-only, temp fixtures only
+$BIN --whereami                      # NOT gated: program folder, data folder, and WHICH
+                                     # fallback answered. The second question of every support
+                                     # call, now that those are two places.
+```
+
+It never reads or writes the stored root or the breadcrumb — `resolveRoot` takes its three inputs as
+parameters for exactly that reason. A diagnostic that had to write the real "chosen folder" key in
+order to test it would be the one flag capable of pointing the app at the wrong library.
+
+> `hasLibraryMarkers` is split out from `looksLikeLibrary` so the test can build fixtures in the
+> system temp dir — which `isTransient` rejects by design — and still check the marks. There is no
+> flag that turns an exclusion off. Negative control: deleting the exclusion `guard` fails exactly
+> the two assertions that are about it (23/25), which is how you know they are not decorative.
+
+---
+
 ## 6. Server (`server.py`)
 
 A single threaded `http.server` handler. Key points:
@@ -300,14 +440,28 @@ away entirely rather than leaving nicks.
 
 ## 6c. `RGF Intro Player.app` — the native rewrite (`native/`)
 
-A full SwiftUI/AppKit port of the GM app. **It is now the primary way the tool is run**; the web
-version (§6, §8) is kept working as the fallback, and both read and write the *same*
-`config.json` / `log.json` in the project root, so the operator can switch mid-taping.
+A full SwiftUI/AppKit port of the GM app. **It is the way the tool is run.**
+
+> **Superseded: the web version is no longer a shipped fallback.** It is kept in the repo, still
+> reads and writes the same `config.json` / `log.json`, and `server.py --root <folder>` makes it
+> work from anywhere — but it is not in the bundle, not seeded, and not something a crew machine
+> has. The owner's call, in one line: *"เวอร์ชั่นเว็บสำรองไม่จำเป็นก็ได้นะ ทำให้ Mac OS Active App
+> Stable มากมายก็พอ"*. Effort spent making the native app solid beats a second half-maintained
+> implementation of it, and §8g had already stopped the web version from being able to EDIT the
+> fields the native app owns, for the same reason.
+>
+> What that costs, said plainly: there is no longer a mid-taping fallback if the native app
+> becomes unusable on set. The recovery is the native app itself — which is why §5d's launch
+> snapshot, the `.none` guard and `--whereami` matter more than they would have otherwise.
 
 ```
 native/
 ├── Package.swift                  # SwiftPM executable, macOS 13 target, no .xcodeproj on purpose
 ├── build.sh                       # builds + assembles "RGF Intro Player.app"
+│                                  #   --with-payload bundles se/ + brand/ as first-run seed (§5d)
+├── dmg.sh                         # the drag-to-Applications disk image (§15)
+├── swap-app.sh                    # replaces an installed bundle, in-app updates (§15)
+├── swap-test.sh                   # 29 assertions against it, production script unmodified
 ├── Info.plist
 └── Sources/IntroPlayerNative/
     ├── App.swift          @main, headless diagnostic flags
@@ -380,11 +534,15 @@ INTROPLAYER_DIAG=1 $BIN --overview     # overview strip: same data as columnPeak
 INTROPLAYER_DIAG=1 $BIN --notetest     # the note: clamps, merge rule, measured layout, the ※ (§8g)
 INTROPLAYER_DIAG=1 $BIN --tagtest      # tags: registry, UNION merge, the chosen colour, the box (§8g)
 INTROPLAYER_DIAG=1 $BIN --filtertest   # the tag filter narrows the LIST and nothing else (§8g)
+INTROPLAYER_DIAG=1 $BIN --roottest     # where the questions live: order, exclusions, .none (§5d)
 INTROPLAYER_DIAG=1 $BIN --updatecheck  # semver compare, feed resolution, blocked URL schemes (§15)
 INTROPLAYER_DIAG=1 $BIN --updatestage  # download + unpack + verify a real release, then delete (§15)
 $BIN --version                         # NOT gated: writes nothing, and is the flag a support
                                        # call asks for
 ```
+
+`--whereami` is **not** gated — it writes nothing, and "which folder is the app reading" is the
+second question of every support call now that the program and the questions are two places (§5d).
 
 `--handoff` is the only end-to-end proof that `base` is stamped by the handover and not by
 editing, and that a rejected row keeps the local value while an accepted one takes the sender's.
@@ -2677,14 +2835,18 @@ INTROPLAYER_DIAG=1 $BIN --overview    # strip data matches columnPeaks; caches s
 INTROPLAYER_DIAG=1 $BIN --notetest    # note: 66 assertions. Writes NOTHING — Store(rawForTest:)
 INTROPLAYER_DIAG=1 $BIN --tagtest     # tags: 89 assertions, the registry, the chosen colour, the handover
 INTROPLAYER_DIAG=1 $BIN --filtertest  # the filter cannot reach the handover or the pre-flight
+INTROPLAYER_DIAG=1 $BIN --roottest    # data root: 25 assertions, temp fixtures, touches no setting
 INTROPLAYER_DIAG=1 $BIN --preflight   # the handover checklist
 INTROPLAYER_DIAG=1 $BIN --updatecheck # semver compare + the configured feed (§15)
 INTROPLAYER_DIAG=1 $BIN --updatestage # the in-app chain minus the swap (needs a feed) (§15)
+INTROPLAYER_DIAG=1 $BIN --roottest    # data root: 27 assertions, temp fixtures, touches no setting
 $BIN --version                        # ungated
+$BIN --whereami                       # ungated — program folder, data folder, which fallback won
 
 # the release path — no project data is touched, dist/ and a temp dir only
-./native/release.sh --allow-dirty     # 10 zip checks must all pass
-./native/installer-test.sh            # 123 assertions, 21 cases; data byte-identical
+./native/release.sh --allow-dirty --no-download   # zip + dmg, every check must pass
+./native/swap-test.sh                 # 29 assertions on the in-app swap helper
+./native/dmg.sh --skip-build          # the disk image on its own, 11 checks on the MOUNTED image
 
 # these WRITE — the cp above is not optional
 INTROPLAYER_DIAG=1 $BIN --resetflow   # must print "✓ ผ่าน" and keep every log event
@@ -2719,17 +2881,24 @@ makes replacing the program safe while the questions stay put.
 
 ### Why the swap can be surgical at all
 
-The bundle sits **inside** the project folder, with `songs/`, `config.json` and `log.json` as its
-siblings (§5). So the program and the data are already physically separate:
+**Since the DMG migration (§5d) the program and the questions are two different places**, so a
+program swap cannot reach the questions even in principle. That is a much stronger version of what
+this section used to claim, and it is what let ~600 lines of installer and 123 assertions retire.
 
 | | | |
 |---|---|---|
-| **program** — replaced by an update | `RGF Intro Player.app`, `IntroPlayer.app`, `server.py`, `index.html`, `วิธีใช้งาน-SETUP.md`, `ตรวจสอบเครื่อง.command`, `start.command`, `VERSION` | the release's |
-| **seeded once, never overwritten** | `se/`, `brand/` | an operator may have swapped in their own stings, and the programme's logo belongs to the production |
-| **never touched** | `config.json`, `log.json`, `songs/` | the only copy of the questions |
+| **program** — replaced by an update | `/Applications/RGF Intro Player.app` (`AppPaths.programRoot`) | the release's |
+| **seeded once, never overwritten** | `se/`, `brand/` — copied out of the bundle's `Resources/seed/` on first run, only if absent, and only present in a `--crew` build | `Seeding.run()` |
+| **never touched** | `config.json`, `log.json`, `songs/` in the questions folder (`AppPaths.root`) | the only copy of the questions |
 
-That table is the whole feature. It is the same split as §5b's tracked-vs-untracked, for the same
-reason: git protects the program, not the questions — and so does the installer.
+The middle row is the one that changed shape rather than meaning. §15's `SEED[]` promise was
+"copied on a fresh install, never overwritten by an update", and the installer kept it by copying
+out of the release zip. With nothing sitting next to the app, the files travel inside the bundle
+and `Seeding` copies them out — **under exactly the same rule**, and still absent from every public
+build, because `build.sh --with-payload` is the only thing that puts them there and
+`release.sh --crew` is the only thing that passes it. §15 records the day `brand` joined `SEED[]`
+and the logo went into a public GitHub release before anyone noticed; baking it into every bundle
+would do that permanently instead of once.
 
 ### The bundle is `RGF Intro Player.app` (renamed in 1.3.0)
 
@@ -2891,77 +3060,72 @@ release, not an executable.
 
 ### Installing from inside the app
 
-> Superseded: this used to read "it never downloads and never installs — the check raises a
-> banner; the swap is a deliberate double-click." That was a misreading of the scope, not a
-> safety finding. The constraints below are what the original caution was actually about, and
-> they are all still enforced.
+An app cannot replace its own running bundle, so the last step is another process. That process is
+`swap-app.sh`, which **travels inside the new bundle** — the version being installed brings its own
+swap logic, so a fix to that logic ships with the release that needs it rather than depending on
+whatever the operator already has.
 
-An app cannot replace its own running bundle, so the last step has to be another process. That
-process is the **same `ติดตั้ง-อัปเดต.command`** run with `--unattended`: the backups, the
-checked `rm`, the full rollback and the "ask the installed binary its version before claiming
-success" check are reused rather than reimplemented, which is why the 123 assertions cover the
-in-app path too.
-
-The chain, and every step of it can refuse:
+The chain, and every step can refuse:
 
 1. **Three refusals before anything is downloaded.** Not while `player.isPlaying` — the swap ends
-   in quitting the app, and a song may be on camera. Not when `needsNewerOS`. Not from an unzipped
-   release folder (`launchedFromRelease`), where there is no install to update.
-2. **Confirm**, through `confirmDestructive`, so Return and Space land on Cancel (§12). It names
-   the version and says the app will close and reopen itself.
-3. **Download** to a fresh dir under the system temp root, so a crash mid-way leaves nothing in
-   the operator's folder. A feed in a synced folder is already on disk, so that case is a copy and
-   needs no network. Progress is throttled to ~10 updates/s.
-4. **Verify, in three independent ways**, before anything is swapped: the zip's SHA-256 against
-   the manifest's (catches a truncated download or a half-synced Drive file — not an attacker,
-   since whoever can replace the zip can replace the manifest beside it); the bundle and installer
-   are present; and then it **runs the staged binary's `--version` and requires it to equal the
-   manifest's version**. That last one is what makes a one-click update defensible, and it is not
-   hypothetical — the first test of this chain used a manifest claiming 9.9.9 over a 1.1.0 zip and
-   the whole thing stopped there with the working app untouched.
-5. **Hand off and quit.** `Updater.apply` launches the installer detached with
-   `--wait-pid <our pid>`; `store.saveNow()` flushes first, because the debounced save would
-   otherwise still be pending. The installer waits for that pid to disappear (bounded at 30 s,
-   plus 0.5 s for the terminate-time write to land), swaps, and relaunches.
+   in quitting, and a song may be on camera. Not when `needsNewerOS`. Not from an unzipped release
+   folder or the mounted image, where there is no install to update.
+2. **Confirm**, through `confirmDestructive`, so Return and Space land on Cancel (§12).
+3. **Download** to a fresh dir under the system temp root, so a crash mid-way leaves nothing in the
+   operator's folder. Progress throttled to ~10 updates/s.
+4. **Verify, three independent ways**, before anything is swapped: the zip's SHA-256 against the
+   manifest's; the bundle and its `Contents/Resources/swap-app.sh` are present and executable; and
+   then **the staged binary's `--version` must equal the manifest's version**. That last one is
+   what makes a one-click update defensible, and it is not hypothetical — the first test of this
+   chain used a manifest claiming 9.9.9 over a 1.1.0 zip and stopped there.
+5. **Hand off and quit.** `Updater.apply` launches the staged helper detached with
+   `--target <installed .app> --source <staged .app> --expect <version> --wait-pid <our pid>
+   --relaunch`; `store.saveNow()` flushes first, because the debounced save would otherwise still
+   be pending. The helper waits for that pid (bounded 30 s, plus 0.5 s for the terminate-time
+   write), swaps, and relaunches.
 
-**This path has no Gatekeeper step at all** — worth knowing, because it removes the most repeated
-friction in the whole feature. Quarantine is applied by whatever *downloads* a file (a browser,
-Drive's client), not by the kernel; a zip written by this app's own `URLSession` carries no flag.
-So the staged bundle runs and the installed one opens with no right-click → Open and no trip to
-System Settings. A release delivered as a hand-passed zip still needs that dance every time.
+**`target` is the installed `.app` bundle, not the folder holding it.** Handing a folder to
+something whose job is `rm -rf` plus `cp -R` is how a program swap reaches the questions, and it is
+the single most important difference from the installer this replaces.
 
-`_settings.lastRanVersion` closes the loop. It is rewritten on every save, so a difference on
-launch means this is the first run of a new build — which is the only way the operator gets told
-the update *worked*. Without it the sole evidence is a notice that failed to appear, which is not
-something anybody can check.
+**This path has no Gatekeeper step at all.** Quarantine is applied by whatever *downloads* a file,
+not by the kernel; a zip written by this app's own `URLSession` carries no flag. A `.dmg` passed
+around by hand still needs right-click → Open each time.
 
-Three things that were wrong on the way here, all of which looked fine:
+`_settings.lastRanVersion` closes the loop: rewritten on every save, so a difference on launch means
+this is the first run of a new build — the only way the operator gets told the update *worked*.
 
-- **The running check was too broad.** `pgrep -f "$APPEXE"` matches any instance anywhere, so the
-  unattended run refused whenever *another* copy was open — and in the in-app flow the app it was
-  refusing for was the one that had just quit. There are two scopes now: `running_anywhere` is an
-  early courtesy refusal in the attended flow, and `running_in_target` is the load-bearing one,
-  checked after the target is known. A different install elsewhere on the disk is none of our
-  business; two folders have two `config.json`s, so §12's clobber does not apply.
-- **The progress callback was `@MainActor`.** `fetchZip` is a non-isolated async func, so it runs
-  on the generic executor — and a main-actor callback from there deadlocks any caller blocking the
-  main thread, which is exactly what a headless diagnostic does. The callback is plain now and the
-  UI hops to main itself.
-- **Unattended answered its own dialogs with the wrong button.** `say` returned the *first*
-  argument, which is the cancel slot by this script's convention, so the unattended run cancelled
-  itself; and the confirm block ran regardless of mode, so it reached a dialog at all. It returns
-  `${!#}` — the default, what Return would do — and both target-resolution dialogs are gated on
-  attended.
+### The swap helper (`native/swap-app.sh`)
+
+~130 lines where the installer was ~600, because the questions are no longer in the blast radius.
+In order, and the order is the point — everything that can refuse runs before anything moves, for
+the reason §15 records about `--github`: a check placed after the destructive step turns a refusal
+into damage.
+
+1. Both ends are real `.app` bundles with a binary inside, and are not the same directory —
+   compared with `-ef` (inode + device), because §15 records a string compare letting one directory
+   through under two spellings and the installer installing over its own source.
+2. The target's parent is writable. A standard (non-admin) user cannot write `/Applications`, and
+   saying so beats failing halfway.
+3. The staged binary answers `--version`, and it matches `--expect`.
+4. `--wait-pid` disappears (bounded 30 s), then nothing is still running from the target — matched
+   with `grep -F` on `ps` output, never `pgrep -f`, because §12 records a folder named
+   `IntroPlayer (ใหม่)` making pgrep's pattern uncompilable and the check failing **open**.
+5. The old bundle moves **aside as a sibling** (`<name>.app.old-<stamp>`), which is a rename on the
+   same filesystem by construction and cannot half-copy. The destination is then asserted gone
+   before `cp -R`, because §15 records `cp -R src dst` copying *into* a dst that survived an `rm`
+   and nesting the new bundle inside the old one while reporting success.
+6. Quarantine stripped from what was installed, never from the folder around it.
+7. **The installed app is asked its version before success is claimed**, and anything else rolls
+   back.
 
 ```bash
-INTROPLAYER_DIAG=1 $BIN --updatestage   # fetch → download → unpack → verify, then delete
+./native/swap-test.sh     # 29 assertions, 6 cases, real directories, production script unmodified
 ```
 
-`--updatestage` is the whole chain except the swap, against whatever `_settings.updateFeed`
-points at. It needs a feed holding a real `manifest.json` + zip whose version is higher than the
-running build; point it at a folder and it prints exactly what the installer *would* be invoked
-as. The swap itself is covered by `installer-test.sh`, which can test it without quitting
-anything.
+Each refusal asserts the **reason**, not just a non-zero exit: several of these cases would exit 1
+for a completely different reason — a typo in a path, a missing fixture — and the suite would still
+read green. §12 records that shape twice.
 
 ### Cutting a release
 
@@ -2970,7 +3134,22 @@ anything.
 ./native/release.sh --download <url>   # also fill in manifest.json's download field
 ./native/release.sh --skip-build       # package the bundle as it stands
 ./native/release.sh --allow-dirty      # package from a tree with uncommitted edits
+./native/release.sh --crew             # build the bundle WITH the stings and the logo inside
+./native/dmg.sh                        # the disk image on its own (release.sh builds it too)
 ```
+
+**Two artifacts, one build, different readers.**
+
+| | who reads it | what it holds |
+|---|---|---|
+| `IntroPlayer-<ver>.dmg` | a person installing for the first time | the app, a `/Applications` symlink, `อ่านก่อน.txt` |
+| `IntroPlayer-<ver>.zip` | the in-app updater | the bundle, nothing else |
+
+The zip used to carry `server.py`, `index.html`, `ตรวจสอบเครื่อง.command`, `start.command`,
+`VERSION`, the installer, `se/` and `brand/`. All of that either moved inside the bundle (§5d) or
+stopped being something a release has to *place*. `release.sh` builds the image with
+`dmg.sh --skip-build`, from the exact bundle the zip was just verified against — never from a
+rebuild, for the same byte-reproducibility reason the pre-flight ordering exists for.
 
 **Everything that can refuse runs before the build.** With `--github` that means `gh` being
 present, the login, the repo slug and whether `v<VERSION>` already exists — all checked while
@@ -3010,93 +3189,47 @@ Three checks in it are worth keeping:
   just built proves nothing about that. It unzips to a temp dir and asserts the `.command` files
   are still executable, the binary is still universal, no `config.json`/`log.json`/`songs/` rode
   along — and runs the unzipped binary's `--version` to confirm it reports the right number.
-- **It asserts `SHIP[]` and the installer's `PROGRAM[]` name the same files**, and reads `SEED[]`
-  out of the installer rather than hardcoding `se/`. release.sh decides what ships and the
-  installer decides what lands; a file in one list and not the other goes stale in place. This
-  was a real miss — `ตรวจสอบเครื่อง.command` shipped in the zip and was never copied out of it,
-  so a team member would have had a new app reporting through the previous release's diagnostic
-  script.
+- **It asserts the BUNDLE's own contents**, which is what the retired `SHIP[]`-vs-`PROGRAM[]`
+  cross-check turned into: the swap helper is present and executable (the updater refuses a zip
+  without it, and a release that cannot be installed is worse than no release), the seeded
+  diagnostic is present and executable, and the payload is absent — or, under `--crew`, present.
+  **Inverted rather than skipped**, so a crew artifact that LOST a sting fails as hard as a public
+  one that gained it: a check that switches off is a check that stops covering the case it was
+  added for. `dmg.sh` asserts the same list against the mounted image, because permissions and
+  bundle structure are what survive or fail to survive the packaging — checking the folder you
+  just built proves nothing about that.
 
-### The installer (`native/installer.command` → `ติดตั้ง-อัปเดต.command` in the zip)
+### The installer is retired
 
-Double-clicked by the operator. In order, and the order is the point:
+`native/installer.command` and `native/installer-test.sh` are **deleted**. Everything they did —
+backups of `config.json`/`log.json`, the checked `rm`, the full rollback, the `mkdir` lock, the
+`LEGACY[]` bundle list, `valid_target`, the quarantine strip, the seeding pass — existed because
+the bundle it replaced sat in the same folder as the operator's questions. With the app in
+`/Applications` it cannot reach them, and the remaining job is `swap-app.sh` above.
 
-1. **Refuses while the app is running** — matched on the executable path, not the word
-   "IntroPlayer", so the script's own argv cannot look like a running app. Warns separately if
-   `server.py` is up, because the web fallback holds `config.json` in memory (§12) — and that
-   dialog defaults to **Cancel**, per §12's `confirmDestructive` lesson: the destructive choice
-   must never be what Return or Space activates, least of all on the one dialog whose wrong
-   answer can cost a day of markers.
-2. **Finds the folder with no questions asked**, from a breadcrumb the app writes at
-   `~/Library/Application Support/IntroPlayer/location` (the folder can move, so it is rewritten
-   on every launch — but never from a temp root and never from a folder with no `songs/` or
-   `config.json`, so a trial launch from a download cannot poison a good breadcrumb). A folder
-   picker is the fallback, and **it confirms the picked path too** — that branch used to go
-   straight from the picker to the swap, which was backwards: the branch where a non-technical
-   operator navigates by hand is the one that most needs confirming.
-3. **Knows what is not an install.** The target must contain `config.json` or `songs/` *and* must
-   not contain the release markers (`ติดตั้ง-อัปเดต.command`, `อ่านก่อน.txt`). The earlier
-   "songs/ OR config.json OR the bundle" was wrong twice: any folder with a subdirectory called
-   `songs` qualified — and `index.html`, `server.py` and `start.command` have generic names, so a
-   wrong answer destroyed the operator's own files of those names — while an unzipped *release*
-   qualified via the bundle clause, which is how the installer could aim at `~/Downloads` and
-   leave the real install untouched. `[ "$TARGET" -ef "$SRCP" ]` is the second line of defence;
-   a string compare let the same directory through under two spellings (a symlinked
-   Desktop/Documents, `/tmp` vs `/private/tmp`, a case difference on a case-insensitive volume)
-   and the installer then installed over its own source.
-4. **One at a time**, via a `mkdir` lock. An operator who sees nothing happen double-clicks
-   again, and two concurrent runs raced into the state below where rollback was disarmed.
-5. **Backs up before anything moves** — `config.json` and `log.json` **copied** (not ours to take
-   away), and then **every program file it is about to replace moved** into `backups/<timestamp>/`.
-   It stops if the data copy failed. Backing up only the bundle meant a failure part-way restored
-   the bundle, announced "คืนแอปตัวเดิมให้แล้ว", and left `index.html`, `server.py` and the
-   diagnostic **deleted with no copy anywhere** — i.e. the mid-taping web fallback (§6c) and the
-   tool you would ask them to run next.
-6. **Swaps with every exit status checked, and rolls everything back on any failure.**
-   `rollback` **always** dies; it used to `return 0` when there was nothing to restore, so on a
-   *fresh* install `cp -R … || rollback` was satisfied by the rollback itself — the loop carried
-   on past a failed copy and the operator was shown "เรียบร้อย" over a bundle with no executable
-   in it. `rm -rf`'s status is checked and the destination asserted gone before the copy, because
-   when `rm` fails on a *directory* `cp -R src dst` copies *into* dst and returns 0 — one locked
-   or sync-held file nested the new bundle inside the old one and reported success.
-7. **Strips `com.apple.quarantine` from what it copied**, never the whole folder — the operator's
-   own files are not ours to relabel.
-8. **Proves the installed app runs** before reporting success: it asks the new binary
-   `--version` and rolls back if the answer is not the version it just installed. `release.sh`
-   makes the same check against the zip; the thing the operator ends up with deserves it more.
+What was load-bearing and survives, in a smaller place:
 
-Only three `rm -rf`s exist in the script and all write their target as `"${TARGET:?}/${item:?}"`,
-so the shell aborts rather than running the command if either variable is somehow empty.
+| the installer's rule | where it lives now |
+|---|---|
+| never swap while the app is running | `swap-app.sh` step 4, `grep -F` on `ps` |
+| prove the installed app runs before claiming success | `swap-app.sh` step 7 |
+| roll back on any failure | `swap-app.sh`, sibling move + asserted-gone destination |
+| don't aim at a download or a release folder | `AppPaths.looksLikeLibrary` (§5d) |
+| `se/` and `brand/` seeded once, never overwritten | `Seeding.run()` (§5d) |
+| find the folder without asking | `AppPaths.resolveRoot`, breadcrumb step (§5d) |
+| the release ships what the installer lands | the bundle-content checks in `release.sh`/`dmg.sh` |
 
-```bash
-./native/installer-test.sh     # needs dist/ — run ./native/release.sh first
-```
+That last row is the one to watch. The `SHIP[]`-vs-`PROGRAM[]` cross-check is gone with its other
+half, and what replaced it asserts the **bundle's own contents** — the swap helper, the seeded
+diagnostic, and the presence or absence of the payload. Those are now the things that can go stale
+in place, and §15's lesson stands: a rule that names its subjects literally stops covering the
+subject that arrives later.
 
-**123 assertions** against the real script with `osascript`/`pgrep`/`open` stubbed, so
-**production code is tested unmodified**. It proves the promise the feature rests on by hash: `config.json`,
-`log.json`, `songs/` and a customised `se/correct.mp3` come out byte-identical. 16 cases: the
-app-running refusal, the web-server warning (including that Cancel is the default button), the
-cancel, a full update (asserting *every* program file was replaced), a mid-copy failure (asserting
-every program file came *back*), install-onto-itself directly and through a symlink, a stale
-breadcrumb pointing at a download, a folder that merely contains `songs/`, a fresh install that
-completes, a fresh install whose source is unreadable, a path with spaces + Thai + a quote,
-the concurrency lock, dialogs denied by TCC, backup pruning — and five for `--unattended`: the
-in-app swap (data by hash, relaunch called, no dialog opened, log written), a missing `--target`,
-a `--target` that is not an install, an app still running *in the target*, and a `--wait-pid`
-that is already gone.
-
-> The stub answers dialogs from a **queue**, which matters: a single fixed answer meant any flow
-> with two questions — the entire fresh-install branch, the branch where rollback was disarmed —
-> fell through to cancel, and its assertions then passed in every possible world.
-
-> **Gatekeeper is not solved, and it is not once-per-machine.** The installer strips the flag from
-> what it copies *into the target*, which cannot help the **next** release's own
-> `ติดตั้ง-อัปเดต.command`: that file arrives later, in a new download, and Gatekeeper records
-> approval per file. So a release delivered as a downloaded zip needs right-click → Open (or
-> System Settings → Privacy & Security → "Open Anyway", which is the reliable route on recent
-> macOS) **every time**. A release delivered through a *synced* Drive/Dropbox folder avoids the
-> browser quarantine path entirely, which is the better channel for that reason as well as the
-> offline one. Signing would need a paid Developer ID.
+> **Not solved: signing and notarization.** Unchanged by any of this, and the DMG does not make it
+> worse — a `.dmg` from a browser is quarantined exactly like the zip was, so a first install needs
+> right-click → Open (or Privacy & Security → "Open Anyway"). What the DMG *does* remove is the
+> per-release `.command` dance, because the in-app update path has no Gatekeeper step at all.
+> `อ่านก่อน.txt` on the image says all of this in Thai.
 
 ### `ตรวจสอบเครื่อง.command`
 

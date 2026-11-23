@@ -83,6 +83,9 @@ enum Snapshot {
                       mirrorTo mirror: String) -> Report {
         var r = Report()
         let fm = FileManager.default
+        // Nothing to snapshot, and nowhere safe to put it: with no library resolved this would
+        // create `backups/snapshots/` beside the app. See `Store.saveNow`.
+        guard AppPaths.hasRoot else { r.skipped = true; return r }
 
         // Identical to the newest one we already hold? Then this launch changed nothing.
         if let newest = existing().first,

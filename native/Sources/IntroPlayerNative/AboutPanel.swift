@@ -1,6 +1,40 @@
 import AppKit
 import SwiftUI
 
+/// Choosing the folder the questions live in — one implementation, two call sites.
+///
+/// Shared on purpose: the About row and the "ยังไม่ได้เลือกโฟลเดอร์งาน" strip ask the same
+/// question, and two copies of a flow that ends in `switchDataRoot` would be two places for the
+/// "stop the audio first" and "that folder is not a library" answers to drift apart.
+enum DataRootPicker {
+    /// `create` picks the verb, not just the panel's buttons. Opening an existing library and
+    /// making a new one are deliberately separate — an "open" that quietly creates `songs/` in
+    /// whatever folder you pointed at is how an empty second library appears and a day of markers
+    /// looks lost. `AppPaths.createLibrary` is the only thing that may create anything.
+    @MainActor
+    static func run(_ model: AppModel, create: Bool) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = create
+        panel.prompt = create ? "สร้างที่นี่" : "ใช้โฟลเดอร์นี้"
+        panel.message = create
+            ? "เลือกโฟลเดอร์เปล่าสำหรับงานใหม่ — จะสร้าง songs/ ให้"
+            : "เลือกโฟลเดอร์งานที่มีอยู่ (ต้องมี songs/ หรือ config.json)"
+        if AppPaths.hasRoot { panel.directoryURL = AppPaths.root }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        if let err = model.switchDataRoot(to: url, create: create) {
+            let a = NSAlert()
+            a.messageText = "ใช้โฟลเดอร์นี้ไม่ได้"
+            a.informativeText = err + "\n\n" + url.path
+            a.addButton(withTitle: "ตกลง")
+            a.alertStyle = .warning
+            a.runModal()
+        }
+    }
+}
+
 /// One strip, one message at a time, most-actionable first.
 ///
 /// This replaces two stacked banners, for three measured reasons:
@@ -27,11 +61,20 @@ import SwiftUI
 struct NewsBanner: View {
     @EnvironmentObject var model: AppModel
 
-    private enum Item { case wrongFolder, update, justUpdated, schema }
+    private enum Item { case onDMG, noLibrary, wrongFolder, update, justUpdated, schema }
 
     /// Priority order. Only the first is shown; the rest are a count.
     private var items: [Item] {
         var out: [Item] = []
+        // Ahead of everything, including `.noLibrary`: an app running off the mounted image has
+        // BOTH problems, and telling the operator to pick a questions folder for a copy that
+        // disappears on eject is advice that makes things worse.
+        if model.launchedFromDMG { out.append(.onDMG) }
+        // Then this, and not dismissible either. With no library resolved there is nothing to show in the
+        // song list, and an empty song list is §8c's "the app can't find my songs" — reported
+        // from real use when the cause was only a remembered playlist. This is the state a fresh
+        // drag-to-Applications install starts in, so it has to explain itself.
+        if !AppPaths.hasRoot { out.append(.noLibrary) }
         if model.launchedFromRelease { out.append(.wrongFolder) }
         if model.updateInstalling || model.showUpdateNotice { out.append(.update) }
         if model.justUpdatedFrom != nil { out.append(.justUpdated) }
@@ -46,7 +89,7 @@ struct NewsBanner: View {
     }
 
     @ViewBuilder private func strip(_ item: Item, more: Int) -> some View {
-        let amber = item == .wrongFolder
+        let amber = item == .wrongFolder || item == .noLibrary || item == .onDMG
         HStack(spacing: 12) {
             Text(glyph(item)).font(Typo.font(14))
             content(item)
@@ -70,6 +113,8 @@ struct NewsBanner: View {
 
     private func glyph(_ i: Item) -> String {
         switch i {
+        case .onDMG: return "⚠"
+        case .noLibrary: return "⚠"
         case .wrongFolder: return "⚠"
         case .update: return model.updateInstalling ? "⟳" : "⬆"
         case .justUpdated: return "✓"
@@ -79,6 +124,17 @@ struct NewsBanner: View {
 
     @ViewBuilder private func buttons(_ i: Item) -> some View {
         switch i {
+        case .onDMG:
+            // Nothing to press. Any action offered here would act on the copy that is about to
+            // be ejected, which is the opposite of what the message says to do.
+            EmptyView()
+        case .noLibrary:
+            // No dismiss, for the same reason as `.wrongFolder` below: with no library there is
+            // nothing to work on, so hiding the explanation leaves an empty song list and no
+            // cause. Both verbs are here rather than behind About, because this is the first
+            // thing a brand-new install sees and it should take one press.
+            pill("เลือกโฟลเดอร์งาน…", prominent: true) { DataRootPicker.run(model, create: false) }
+            pill("สร้างใหม่…", prominent: false) { DataRootPicker.run(model, create: true) }
         case .wrongFolder:
             // No dismiss: nothing in the app works from that folder, so hiding the only thing
             // that explains why would be the worst possible kindness.
@@ -127,10 +183,22 @@ struct NewsBanner: View {
 
     @ViewBuilder private func content(_ i: Item) -> some View {
         switch i {
+        case .onDMG:
+            Text("กำลังเปิดจากตัวติดตั้ง ไม่ใช่จาก Applications")
+                .font(Typo.font(13, .bold)).foregroundStyle(Palette.amber)
+            Text("ปิดแอปนี้ ลากไปใส่ Applications ก่อน แล้วเปิดจากที่นั่น — ที่เปิดอยู่นี้จะหายไปตอน eject")
+                .font(Typo.font(12)).foregroundStyle(Palette.text)
+                .layoutPriority(-1).lineLimit(1)
+        case .noLibrary:
+            Text("ยังไม่ได้เลือกโฟลเดอร์งาน")
+                .font(Typo.font(13, .bold)).foregroundStyle(Palette.amber)
+            Text("แอปยังไม่รู้ว่าเพลงและโจทย์อยู่ที่ไหน — เลือกโฟลเดอร์ที่มี songs/ อยู่แล้ว หรือสร้างใหม่")
+                .font(Typo.font(12)).foregroundStyle(Palette.text)
+                .layoutPriority(-1).lineLimit(1)
         case .wrongFolder:
             Text("นี่คือโฟลเดอร์ที่แตก zip ออกมา ไม่ใช่ที่ติดตั้ง")
                 .font(Typo.font(13, .bold)).foregroundStyle(Palette.amber)
-            Text("ปิดแอปนี้ แล้วดับเบิลคลิก ติดตั้ง-อัปเดต.command — โจทย์และเพลงของคุณอยู่ในโฟลเดอร์เดิม")
+            Text("ปิดแอปนี้ ลากแอปไปใส่ Applications แล้วเปิดจากที่นั่น — โจทย์และเพลงยังอยู่ที่เดิม")
                 .font(Typo.font(12)).foregroundStyle(Palette.text)
                 .layoutPriority(-1).lineLimit(1)
         case .update:
@@ -259,8 +327,8 @@ struct AboutPanel: View {
             Text("⚠ แอปนี้กำลังอ่านข้อมูลจากโฟลเดอร์ที่แตก zip ออกมา")
                 .font(Typo.font(14, .bold)).foregroundStyle(Palette.amber)
             Text("โฟลเดอร์นี้มีแค่ตัวโปรแกรม ไม่มีเพลงและไม่มีโจทย์ของคุณ — ที่เห็นว่างเปล่าเป็นเรื่องปกติ\n"
-                 + "ปิดแอปนี้ แล้วดับเบิลคลิก ติดตั้ง-อัปเดต.command ในโฟลเดอร์เดียวกัน "
-                 + "มันจะเอาตัวโปรแกรมใหม่ไปวางในโฟลเดอร์จริงของคุณให้")
+                 + "ปิดแอปนี้ ลากแอปไปใส่ Applications แล้วเปิดจากที่นั่น "
+                 + "มันจะหาโฟลเดอร์งานเดิมของคุณเจอเอง")
                 .font(Typo.caption).foregroundStyle(Palette.text)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -285,8 +353,16 @@ struct AboutPanel: View {
                 : [AppVersion.commit, AppVersion.date].filter { !$0.isEmpty }.joined(separator: " · "))
             row("macOS", UpdateInfo.runningOS)
             // The single most useful line on a support call: an app reading the wrong folder looks
-            // exactly like an app that lost its settings.
-            row("โฟลเดอร์ข้อมูล", AppPaths.root.path, mono: true)
+            // exactly like an app that lost its settings. It now says WHERE the answer came from
+            // too, because with three fallbacks "why is it reading that folder" is a real
+            // question — and a stale breadcrumb winning over the folder beside the app is
+            // exactly the shape that needs naming rather than guessing at.
+            row("โฟลเดอร์ข้อมูล", AppPaths.hasRoot
+                ? AppPaths.root.path + "  (" + rootSourceLabel + ")"
+                : "— ยังไม่ได้เลือก", mono: true)
+            if AppPaths.programRoot.standardizedFileURL != AppPaths.root.standardizedFileURL {
+                row("โฟลเดอร์โปรแกรม", AppPaths.programRoot.path, mono: true)
+            }
             // "เขียนล่าสุดโดย" was false within a second of launch: `openedBy` is captured at
             // load, but selecting the first song saves, which rewrites `writtenBy` as this
             // build. What the field actually answers is "was this folder touched by another
@@ -325,7 +401,32 @@ struct AboutPanel: View {
                 .foregroundStyle(Palette.text)
             }
             .padding(.top, 2)
+            HStack(spacing: 8) {
+                smallButton("เปลี่ยนโฟลเดอร์งาน…") { DataRootPicker.run(model, create: false) }
+                smallButton("สร้างโฟลเดอร์งานใหม่…") { DataRootPicker.run(model, create: true) }
+            }
         }
+    }
+
+    /// Which of `resolveRoot`'s three fallbacks answered. Plain words, not the enum's name: the
+    /// person reading this line out loud on a support call is not a programmer.
+    private var rootSourceLabel: String {
+        switch AppPaths.rootSource {
+        case .chosen: return "เลือกไว้เอง"
+        case .breadcrumb: return "จำจากที่ติดตั้ง"
+        case .beside: return "อยู่ข้างตัวแอป"
+        case .none: return "ยังไม่ได้เลือก"
+        }
+    }
+
+    private func smallButton(_ t: String, _ act: @escaping () -> Void) -> some View {
+        Button(action: act) {
+            Text(t).font(Typo.font(12))
+                .padding(.horizontal, 10).padding(.vertical, 5).contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle(corner: 6))
+        .background(Palette.panel3).clipShape(RoundedRectangle(cornerRadius: 6))
+        .foregroundStyle(Palette.text)
     }
 
     /// One paste that answers every question a report from the field raises.
@@ -333,8 +434,9 @@ struct AboutPanel: View {
         """
         RGF Intro Player \(AppVersion.full)
         macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)
-        โฟลเดอร์: \(AppPaths.root.path)\
+        โฟลเดอร์ข้อมูล: \(AppPaths.hasRoot ? AppPaths.root.path : "— ยังไม่ได้เลือก") (\(AppPaths.rootSource.rawValue))\
         \(model.launchedFromRelease ? "  ⚠ (โฟลเดอร์ที่แตก zip ไม่ใช่ที่ติดตั้ง)" : "")
+        โฟลเดอร์โปรแกรม: \(AppPaths.programRoot.path)
         schema: \(model.store.schemaOnDisk) (แอปรู้จัก \(Store.schema))\
         \(model.store.openedBy.isEmpty ? "" : ", ก่อนเปิดครั้งนี้เขียนโดย v\(model.store.openedBy)")
         เพลง: \(model.songs.count) · รอบ: \(model.playlists.count)
@@ -574,19 +676,16 @@ struct AboutPanel: View {
             Text("โจทย์ที่ตั้งไว้ · log การถ่าย · ไฟล์เพลง — ไม่ถูกแตะเลย ตัวอัปเดตเปลี่ยนแค่ตัวแอป")
                 .font(Typo.font(12, .medium)).foregroundStyle(Palette.cyan)
             step(1, "ปิดแอปก่อน (Cmd+Q) — ห้ามอัปเดตตอนกำลังถ่าย")
-            step(2, "แตกไฟล์ zip ที่ได้มา (ดับเบิลคลิก)")
-            step(3, "ดับเบิลคลิก ติดตั้ง-อัปเดต.command ในโฟลเดอร์ที่แตกออกมา")
-            step(4, "ถ้า macOS เตือนว่าเปิดไม่ได้ → คลิกขวาที่ไฟล์ → Open → Open\n"
+            step(2, "ดับเบิลคลิกไฟล์ .dmg ที่ได้มา")
+            step(3, "ลาก RGF Intro Player ไปทับตัวเดิมในโฟลเดอร์ Applications แล้วกด Replace")
+            step(4, "ถ้า macOS เตือนว่าเปิดไม่ได้ → คลิกขวาที่แอปใน Applications → Open → Open\n"
                  + "ถ้ายังไม่ได้ → System Settings → Privacy & Security → กด \"Open Anyway\"\n"
                  + "(ต้องทำใหม่ทุกครั้งที่ดาวน์โหลดไฟล์ชุดใหม่ — ไม่ใช่ครั้งเดียวจบ)")
-            // The one step where a dialog asks the operator something, and it was the step the
-            // copy physically in front of them left out.
-            step(5, "มันจะถามว่าจะลงที่โฟลเดอร์ไหน — ถ้าเคยใช้แล้วมันหาให้เอง กด \"อัปเดต\"")
-            step(6, "เปิดแอปใหม่ แล้วเช็กที่หน้านี้ว่าเลขเวอร์ชั่นเปลี่ยนแล้ว")
-            Text("ตัวติดตั้งจะคัดลอก config.json กับ log.json เก็บไว้ใน backups/ ให้ก่อนเปลี่ยนเสมอ "
-                 + "พร้อมไฟล์ชุดเดิมทั้งหมด เผื่อต้องย้อนกลับ\n"
-                 + "— แต่นั่นคือการสำรองเฉพาะตอนอัปเดต ไม่ใช่การสำรองประจำวัน "
-                 + "ถ้าอยากได้สำเนาโจทย์ไว้ที่อื่น ให้ก๊อปโฟลเดอร์รอบนั้นเก็บไว้เอง (ดูหัวข้อส่งต่อ)")
+            step(5, "eject ตัวดิสก์ แล้วเปิดแอปจาก Applications")
+            step(6, "เช็กที่หน้านี้ว่าเลขเวอร์ชั่นเปลี่ยนแล้ว")
+            Text("ไม่มีขั้นตอนไหนถามถึงโฟลเดอร์งานเลย เพราะตัวแอปกับโจทย์อยู่คนละที่ — "
+                 + "การเปลี่ยนแอปแตะโจทย์ไม่ได้ตั้งแต่ต้น\n"
+                 + "สำเนาโจทย์ยังต้องก๊อปเองอยู่ดีถ้าอยากเก็บไว้ที่อื่น (ดูหัวข้อส่งต่อ)")
                 .font(Typo.font(11)).foregroundStyle(Palette.muted)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 2)

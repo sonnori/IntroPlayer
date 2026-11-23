@@ -12,6 +12,20 @@ struct IntroPlayerApp: App {
             print(AppVersion.full)
             exit(0)
         }
+        // Also ungated, and for the same reason: it writes nothing, and "which folder is the app
+        // actually reading" is the second question of every support call now that the program
+        // and the questions are two places (§5d). An app pointed at the wrong folder looks
+        // exactly like an app that lost its settings.
+        if CommandLine.arguments.contains("--whereami") {
+            print("program : \(AppPaths.programRoot.path)")
+            print("data    : \(AppPaths.hasRoot ? AppPaths.root.path : "— ยังไม่ได้เลือก")")
+            print("source  : \(AppPaths.rootSource.rawValue)")
+            let fm = FileManager.default
+            print("songs/  : \(fm.fileExists(atPath: AppPaths.songs.path) ? "มี" : "ไม่มี")")
+            print("config  : \(fm.fileExists(atPath: AppPaths.config.path) ? "มี" : "ไม่มี")")
+            print("seed    : \(Seeding.sourceDir != nil ? "มีในแอป (crew build)" : "ไม่มี (บิลด์สาธารณะ)")")
+            exit(0)
+        }
         // Headless diagnostics. Some of these WRITE to the operator's real config.json and
         // log.json, so they are gated behind an env var rather than a bare flag — a stray
         // argument must not be able to reset a taping.
@@ -20,7 +34,7 @@ struct IntroPlayerApp: App {
                      "--columns", "--handoff", "--preflight", "--titles",
                      "--revealtest", "--grabtest", "--palettetest", "--autodetect", "--artwork", "--timefmt", "--overview", "--remodetest", "--takes",
                      "--updatecheck", "--updatestage", "--loudtest", "--guesstest", "--snapshot", "--guessflow",
-                     "--notetest", "--tagtest", "--filtertest"]
+                     "--notetest", "--tagtest", "--filtertest", "--roottest"]
         if !diag, let f = CommandLine.arguments.first(where: flags.contains) {
             FileHandle.standardError.write("\(f) needs INTROPLAYER_DIAG=1\n".data(using: .utf8)!)
             exit(2)
@@ -114,6 +128,11 @@ struct IntroPlayerApp: App {
         // Read-only: every Store it builds is `init(rawForTest:)`, which cannot write.
         if CommandLine.arguments.contains("--notetest") {
             Diagnostics.noteTest()
+            exit(0)
+        }
+        // Read-only: temp fixtures only, and it never reads or writes the stored data root.
+        if CommandLine.arguments.contains("--roottest") {
+            Diagnostics.rootTest()
             exit(0)
         }
         // Read-only, same as --notetest.

@@ -350,37 +350,30 @@ enum InstallLocation {
         return base.appendingPathComponent("location")
     }
 
-    /// Temp roots. A build run from one of these is a test or a throwaway copy, never the
-    /// operator's install — and this is not hypothetical: a sandboxed verification run of this
-    /// very feature pointed the breadcrumb at a scratch folder which, because the fixture had
-    /// both `config.json` and `songs/`, passed the installer's `valid_target` check. The
-    /// installer would then have offered to update a temp directory, written the backup there,
-    /// and left the real folder stale — exactly the "I installed the new one but nothing
-    /// changed" symptom §15 exists to kill.
-    private static let transientRoots = ["/private/tmp/", "/tmp/", "/private/var/folders/",
-                                         "/var/folders/", "/Volumes/"]
-
-    /// True for anything inside a `backups/` directory. The installer moves the previous
-    /// bundle there, and macOS Dock entries follow a same-volume move — so the operator's
-    /// existing icon opens the OLD app with `AppPaths.root` set to the backup folder. That
-    /// folder has a `config.json` (the installer copied one in) but no `songs/`, which looks
-    /// exactly like §8c's "the app can't find my songs". Recording it would then point every
-    /// later marker edit, log event and update at a directory `KEEP_BACKUPS` pruning deletes
-    /// three updates later. `installer.command` rejects the same shape from the other side.
-    private static func inBackups(_ path: String) -> Bool {
-        ("/" + path + "/").contains("/backups/")
-    }
+    // The temp-root and `backups/` exclusions moved to `AppPaths` when the data root became
+    // choosable: the resolver reads this very file, so the two had to apply the same rules or a
+    // breadcrumb this writer rejects could still be adopted by the reader. §15 records why each
+    // exists — a sandboxed verification run once pointed it at a scratch folder that passed
+    // `valid_target`, and the Dock follows the old bundle into `backups/`.
 
     static func record() {
-        let root = AppPaths.root.path
-        guard !transientRoots.contains(where: { root.hasPrefix($0) }) else { return }
-        guard !inBackups(root) else { return }
+        // The PROGRAM's folder, not the data root. Once the app can live in `/Applications`
+        // these are different places, and this breadcrumb exists to tell the installer which
+        // bundle to replace.
+        let root = AppPaths.programRoot.path
+        guard !AppPaths.isTransient(root) else { return }
+        guard !AppPaths.inBackups(root) else { return }
         // A bundle opened from a Downloads folder or an unzipped release has neither of these.
         // The installer writes the breadcrumb itself on a fresh install, so nothing is lost by
         // declining to guess here.
+        // Still the classic-layout test, against the PROGRAM's folder: the breadcrumb's job is
+        // "this is an install, not a download", and in the classic layout that is exactly what
+        // having the library beside the app means. An app in `/Applications` has neither, so it
+        // records nothing — correct, because there is no in-place swap to point at.
         let fm = FileManager.default
-        guard fm.fileExists(atPath: AppPaths.config.path)
-                || fm.fileExists(atPath: AppPaths.songs.path) else { return }
+        guard fm.fileExists(atPath: AppPaths.programRoot.appendingPathComponent("config.json").path)
+                || fm.fileExists(atPath: AppPaths.programRoot.appendingPathComponent("songs").path)
+        else { return }
         let f = file
         do {
             try fm.createDirectory(at: f.deletingLastPathComponent(),
@@ -396,13 +389,19 @@ enum InstallLocation {
 
 // MARK: - installing from inside the app (§15)
 
-/// Download → verify → hand the swap to the installer → quit → it relaunches us.
+/// Download → verify → hand the swap to `swap-app.sh` → quit → it relaunches us.
 ///
 /// The app cannot replace its own running bundle, so the last step has to be another process.
-/// That process is the SAME `ติดตั้ง-อัปเดต.command` the manual path uses, run with
-/// `--unattended`: the backups, the checked `rm`, the full rollback and the
-/// "ask the installed binary its version before claiming success" check are all reused rather
-/// than reimplemented, and they are what `installer-test.sh`'s 123 assertions cover.
+/// That process used to be `ติดตั้ง-อัปเดต.command` — ~600 lines and 123 assertions, because the
+/// bundle it replaced sat in the same folder as `config.json`, `log.json` and `songs/`, so every
+/// one of its backups, locks, legacy lists and "is this really an install" checks existed to stop
+/// a program swap from reaching the operator's questions. With the app in `/Applications` it
+/// cannot reach them at all, and what is left is `swap-app.sh`: one directory moved aside, one
+/// copied in, one version check, roll back on anything else. `swap-test.sh` covers it.
+///
+/// The helper travels INSIDE the new bundle, so the version being installed brings its own swap
+/// logic — a fix to that logic ships with the release that needs it rather than depending on
+/// whatever the operator happens to have.
 ///
 /// One happy side effect worth knowing: this path **has no Gatekeeper step at all**. Quarantine
 /// is applied by whatever downloads a file — a browser, Drive's client — not by the kernel. A zip
@@ -410,17 +409,16 @@ enum InstallLocation {
 /// installed one opens with no right-click → Open and no trip to System Settings.
 extension Updater {
     enum Install: LocalizedError {
-        /// The app bundle's own filename. Must match `APPBUNDLE` in `native/installer.command`
-        /// and therefore `SHIP[]` in `release.sh`, which reads it from the installer — this is
-        /// the one copy that lives in Swift, and `--updatestage` is what proves it still agrees
-        /// with a real release.
+        /// The app bundle's own filename. Must match `APPBUNDLE` in `native/release.sh` — this
+        /// is the one copy that lives in Swift, and `--updatestage` is what proves it still
+        /// agrees with a real release.
         static let bundleName = "RGF Intro Player.app"
 
         case noDownload
         case unpack(String)
         case wrongVersion(got: String, want: String)
         case badChecksum
-        case missingInstaller
+        case missingSwapHelper
         case launch(String)
 
         var errorDescription: String? {
@@ -430,14 +428,17 @@ extension Updater {
             case .wrongVersion(let g, let w):
                 return "ไฟล์ที่โหลดมาเป็นเวอร์ชั่น \(g.isEmpty ? "ที่อ่านไม่ออก" : g) ไม่ใช่ \(w) — ยกเลิกแล้ว"
             case .badChecksum:  return "ไฟล์ที่โหลดมาไม่ครบ (checksum ไม่ตรง) — โหลดใหม่"
-            case .missingInstaller: return "ในชุดอัปเดตไม่มีตัวติดตั้ง"
+            case .missingSwapHelper: return "ในชุดอัปเดตไม่มีตัวสลับโปรแกรม"
             case .launch(let s): return "เรียกตัวติดตั้งไม่ได้ — \(s)"
             }
         }
     }
 
-    static let installerName = "ติดตั้ง-อัปเดต.command"
-    /// Where the installer writes what it did, so a failed unattended run is not silent.
+    /// The swap helper travels INSIDE the new bundle, which is deliberate: the version being
+    /// installed brings its own swap logic, so a fix to that logic ships with the release that
+    /// needs it rather than depending on whatever the operator already has.
+    static let swapHelper = "Contents/Resources/swap-app.sh"
+    /// Where the swap helper writes what it did, so a failed unattended run is not silent.
     static var installLog: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Logs/IntroPlayer-update.log")
@@ -543,10 +544,11 @@ extension Updater {
             }) else { throw Install.unpack("ในไฟล์ไม่มี \(Install.bundleName)") }
             root = hit
         }
-        guard fm.isExecutableFile(atPath: root.appendingPathComponent(installerName).path) else {
-            throw Install.missingInstaller
+        let bundle = root.appendingPathComponent(Install.bundleName)
+        guard fm.isExecutableFile(atPath: bundle.appendingPathComponent(swapHelper).path) else {
+            throw Install.missingSwapHelper
         }
-        let exe = root.appendingPathComponent("\(Install.bundleName)/Contents/MacOS/IntroPlayerNative")
+        let exe = bundle.appendingPathComponent("Contents/MacOS/IntroPlayerNative")
         guard fm.isExecutableFile(atPath: exe.path) else {
             throw Install.unpack("ในไฟล์ไม่มีตัวโปรแกรม")
         }
@@ -556,15 +558,21 @@ extension Updater {
         return root
     }
 
-    /// Launches the staged installer and returns at once. The caller must then quit: the script
+    /// Launches the staged swap helper and returns at once. The caller must then quit: the script
     /// waits for `waitPid` to disappear before it touches anything, so the swap never races a
     /// running app.
-    static func apply(staged: URL, target: URL, waitPid: Int32) throws {
+    ///
+    /// `target` is the installed **.app bundle**, not the folder holding it — the helper replaces
+    /// one directory and nothing else. That is the whole difference from the installer this
+    /// replaces, which had to reach into a folder it shared with the operator's questions.
+    static func apply(staged: URL, target: URL, version: String, waitPid: Int32) throws {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
-        p.arguments = [staged.appendingPathComponent(installerName).path,
-                       "--unattended",
+        let bundle = staged.appendingPathComponent(Install.bundleName)
+        p.arguments = [bundle.appendingPathComponent(swapHelper).path,
                        "--target", target.path,
+                       "--source", bundle.path,
+                       "--expect", version,
                        "--wait-pid", String(waitPid),
                        "--relaunch"]
         // Detached: no pipes to fill and nothing for the dying parent to hold open.

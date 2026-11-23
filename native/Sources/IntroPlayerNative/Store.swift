@@ -826,15 +826,24 @@ final class Store {
     var onSaveStateChange: (() -> Void)?
 
     func scheduleSave() {
-        guard !readOnly else { return }
+        guard !readOnly, AppPaths.hasRoot else { return }
         saveWork?.cancel()
         let w = DispatchWorkItem { [weak self] in self?.saveNow() }
         saveWork = w
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: w)
     }
 
+    /// **`AppPaths.hasRoot` is the most important word in this file.**
+    ///
+    /// With no library resolved, `AppPaths.root` falls back to the bundle's parent — which, once
+    /// the app can live in `/Applications`, means this would write `/Applications/config.json`.
+    /// That is not merely a failed save: `AppPaths.looksLikeLibrary` tests for exactly that file,
+    /// so the NEXT launch would adopt `/Applications` as the library and the operator's real
+    /// folder would never be looked at again. An empty second library that the app prefers is
+    /// strictly worse than no library at all, which is why the resolver refuses to guess and why
+    /// this refuses to write. The `.none` state must stay inert until somebody chooses.
     func saveNow() {
-        guard !readOnly else { return }
+        guard !readOnly, AppPaths.hasRoot else { return }
         writeSettings()
         guard JSONSerialization.isValidJSONObject(raw) else {
             saveFailed = true; saveState = "บันทึกไม่ได้ (ข้อมูลเสีย)"; onSaveStateChange?(); return
@@ -917,6 +926,10 @@ final class LogStore {
         let arr: [[String: Any]] = events.map {
             ["t": $0.t, "playlist": $0.playlist, "path": $0.path, "event": $0.event]
         }
+        // Same reason as `Store.saveNow`: a `log.json` written beside the app would not make the
+        // folder a library on its own, but it is the operator's taping history going to a place
+        // nobody will look for it.
+        guard AppPaths.hasRoot else { return }
         guard let data = try? JSONSerialization.data(
             withJSONObject: ["events": arr],
             options: [.prettyPrinted, .withoutEscapingSlashes]) else { saveFailed = true; return }

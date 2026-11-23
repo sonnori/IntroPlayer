@@ -4,17 +4,297 @@ import ImageIO
 
 /// Where the app's data lives. The bundle sits inside the project folder exactly like the shell
 /// launcher did, so `songs/`, `config.json` and `log.json` stay shared with the web version.
+/// Where the program is, and where the questions are — **two different places now**.
+///
+/// Until this they were one: `root` was the bundle's parent, and `songs/`, `config.json`,
+/// `log.json`, `se/` and `brand/` were its siblings (§5). That is what makes §15's surgical swap
+/// possible and it is not being thrown away — but it also means the app cannot live in
+/// `/Applications`, because it would then look for `/Applications/songs/` and try to write
+/// `/Applications/config.json`. A drag-to-Applications install and a "choose the songs folder"
+/// picker are therefore the SAME change, not two.
+///
+/// **`programRoot` and `root` must not be confused, and the compiler cannot tell them apart.**
+/// `programRoot` is where the bundle sits: it is what the installer replaces, what
+/// `InstallLocation` records, and what `Updater.apply` passes as `--target`. `root` is where the
+/// operator's questions are. Passing the data root to the installer would install the program on
+/// top of the questions; passing the program root to `Store` would look for a library beside the
+/// app. Every call site had to be read and classified by hand when this split landed — there is
+/// no test that can catch getting one wrong, only the names.
 enum AppPaths {
-    static var root: URL {
+    // MARK: the program
+
+    /// The folder the `.app` sits in. Never stored, always derived — this is a fact about where
+    /// the process was launched from, not a preference.
+    static var programRoot: URL {
         var u = Bundle.main.bundleURL
         if u.pathExtension == "app" { u.deleteLastPathComponent() }
         return u
+    }
+
+    // MARK: the questions
+
+    /// Where the operator's questions live. See `resolveRoot` for the order it is found in.
+    ///
+    /// Resolved ONCE per process and cached, because it is read from `body` (the About row, the
+    /// header) and from the save path — the `stat`-50-times-a-second lesson §6e records for the
+    /// logo, in a place where the answer also must not change under a half-finished save.
+    static var root: URL {
+        if let r = cachedRoot { return r }
+        let (url, src) = resolveRoot()
+        cachedRoot = url
+        rootSourceCache = src
+        return url
     }
     static var songs: URL { root.appendingPathComponent("songs") }
     static var se: URL { root.appendingPathComponent("se") }
     static var config: URL { root.appendingPathComponent("config.json") }
     static var log: URL { root.appendingPathComponent("log.json") }
     static var brand: URL { root.appendingPathComponent("brand") }
+
+    /// How `root` was found. `.none` means there is no library anywhere we know to look, which is
+    /// the state a fresh DMG install starts in and the one thing the UI must not render as an
+    /// empty song list — that is §8c's "the app can't find my songs", which was reported from
+    /// real use when the cause was merely a remembered playlist.
+    enum RootSource: String {
+        case chosen      // the operator picked it; stored in UserDefaults
+        case breadcrumb  // ~/Library/Application Support/IntroPlayer/location
+        case beside      // the classic layout: the library is the bundle's sibling
+        case none        // nothing found — ask
+    }
+
+    private static var cachedRoot: URL?
+    private static var rootSourceCache: RootSource?
+    /// Reading this resolves `root` if it has not been resolved yet, so the two can never
+    /// disagree about which candidate won.
+    static var rootSource: RootSource {
+        if rootSourceCache == nil { _ = root }
+        return rootSourceCache ?? .none
+    }
+    static var hasRoot: Bool { rootSource != .none }
+
+    static let dataRootKey = "dataRoot"
+
+    /// Order matters, and every step is a fallback rather than a default:
+    ///
+    /// 1. what the operator CHOSE — survives the app moving, which is the whole point;
+    /// 2. the bundle's sibling — the classic layout, unchanged. **This is why nothing breaks for
+    ///    an existing install:** the folder beside the app wins before anybody is prompted;
+    /// 3. the breadcrumb the app already writes for the installer (§15 step 2), so a machine that
+    ///    has been running the classic layout keeps working after the app moves to `/Applications`
+    ///    without anyone being asked anything;
+    /// 4. nothing. Not a guess, and above all not a freshly created empty folder: inventing a
+    ///    second, empty library is how a day of markers becomes invisible rather than lost.
+    ///
+    /// **`beside` must come before `breadcrumb`, and the first draft had it the other way round.**
+    /// `InstallLocation.record()` rewrites the breadcrumb from the program folder on every launch
+    /// — but it runs in `AppModel.init` AFTER the root has been resolved. So with the breadcrumb
+    /// first, copying a whole classic-layout folder somewhere new and opening it read the OLD
+    /// folder for one entire launch before the breadcrumb caught up: a session of marker edits
+    /// landing in the copy the operator thought they had left behind. Found by running
+    /// `--whereami` in the project folder and seeing `source: breadcrumb` where `beside` was the
+    /// honest answer — the two happened to be the same path, so nothing looked wrong.
+    /// In `/Applications` there is no library beside the app, so step 2 falls through and the
+    /// breadcrumb still does the migration it was added for.
+    ///
+    /// Each candidate must look like a library (`looksLikeLibrary`), so a bundle in
+    /// `/Applications` does not adopt `/Applications` and a stale breadcrumb does not win over a
+    /// real folder beside the app.
+    static func resolveRoot() -> (URL, RootSource) {
+        resolveRoot(chosen: UserDefaults.standard.string(forKey: dataRootKey),
+                    breadcrumb: try? String(contentsOf: InstallLocation.file, encoding: .utf8),
+                    beside: programRoot)
+    }
+
+    /// The order, with its three inputs passed in rather than read.
+    ///
+    /// Parameterised so `--roottest` can prove the precedence without touching the operator's
+    /// `UserDefaults` or their breadcrumb — a diagnostic that had to write the real "chosen
+    /// folder" key in order to test it would be the one flag capable of pointing the app at the
+    /// wrong library, which is the failure the whole resolver exists to avoid.
+    static func resolveRoot(chosen: String?, breadcrumb: String?,
+                            beside: URL) -> (URL, RootSource) {
+        if let raw = chosen {
+            let p = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !p.isEmpty {
+                let u = URL(fileURLWithPath: p)
+                if looksLikeLibrary(u) { return (u, .chosen) }
+            }
+        }
+        if looksLikeLibrary(beside) { return (beside, .beside) }
+        if let raw = breadcrumb {
+            let p = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !p.isEmpty {
+                let u = URL(fileURLWithPath: p)
+                if looksLikeLibrary(u) { return (u, .breadcrumb) }
+            }
+        }
+        return (beside, .none)
+    }
+
+    /// Is there a library here? `songs/` as a directory, or a `config.json` — the same two marks
+    /// the retired `installer.command`'s `valid_target` used, for the same reason: they are
+    /// what an install
+    /// has and what a download, a release folder or an arbitrary directory does not.
+    ///
+    /// §15 records that this test was too loose **for the installer**, because "any folder with a
+    /// subdirectory called songs" qualified and the installer then deleted files. The stakes here
+    /// are the opposite way round — this only decides where to READ — but the exclusions still
+    /// apply, because adopting one of those folders points every later save at it.
+    static func looksLikeLibrary(_ u: URL) -> Bool {
+        let path = u.path
+        guard !path.isEmpty, path != "/" else { return false }
+        guard !isTransient(path), !inBackups(path) else { return false }
+        return hasLibraryMarkers(u)
+    }
+
+    /// The shape test alone, with no exclusions. Split out so `--roottest` can build fixtures in
+    /// the system temp dir — which `isTransient` rejects by design — and still check the marks.
+    /// Production code calls `looksLikeLibrary`; there is no flag that turns an exclusion off.
+    static func hasLibraryMarkers(_ u: URL) -> Bool {
+        let fm = FileManager.default
+        // An unzipped release has these and is not an install — §15's `launchedFromRelease`.
+        for marker in ["ติดตั้ง-อัปเดต.command", "อ่านก่อน.txt"] where
+            fm.fileExists(atPath: u.appendingPathComponent(marker).path) { return false }
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: u.appendingPathComponent("songs").path, isDirectory: &isDir),
+           isDir.boolValue { return true }
+        return fm.fileExists(atPath: u.appendingPathComponent("config.json").path)
+    }
+
+    /// Temp roots and removable volumes. Lifted out of `InstallLocation`, which had the identical
+    /// list private — a sandboxed verification run of the update feature once pointed the
+    /// breadcrumb at a scratch folder that passed every check (§15), and the resolver reads that
+    /// same breadcrumb.
+    static let transientRoots = ["/private/tmp/", "/tmp/", "/private/var/folders/",
+                                 "/var/folders/", "/Volumes/"]
+    static func isTransient(_ path: String) -> Bool {
+        transientRoots.contains { path.hasPrefix($0) }
+    }
+    /// Anything inside a `backups/` directory. The installer moves the previous bundle there and
+    /// the Dock follows a same-volume move, so the operator's own icon can open the OLD app —
+    /// which finds a `config.json` the installer copied in and no `songs/`. §15 calls this out as
+    /// reachable, and pruning deletes that folder three updates later.
+    static func inBackups(_ path: String) -> Bool { ("/" + path + "/").contains("/backups/") }
+
+    /// Point the app at a different library. Returns nil on success, or the reason in Thai.
+    ///
+    /// Validation is deliberately the same `looksLikeLibrary` the resolver uses, so a folder the
+    /// operator can choose is exactly a folder the app would have adopted on its own. Creating a
+    /// new library is `createLibrary`, a separate verb — "open" and "create" doing the same thing
+    /// is how an empty folder silently becomes a second library.
+    @discardableResult
+    static func setRoot(_ u: URL) -> String? {
+        guard looksLikeLibrary(u) else {
+            if isTransient(u.path) { return "โฟลเดอร์ชั่วคราว/ไดรฟ์นอก ใช้เป็นโฟลเดอร์งานไม่ได้" }
+            if inBackups(u.path) { return "นี่คือโฟลเดอร์สำรองของตัวติดตั้ง ไม่ใช่โฟลเดอร์งาน" }
+            return "โฟลเดอร์นี้ไม่มี songs/ หรือ config.json — ถ้าจะเริ่มรอบใหม่ ให้ใช้ \u{201C}สร้างโฟลเดอร์งานใหม่\u{201D}"
+        }
+        UserDefaults.standard.set(u.path, forKey: dataRootKey)
+        cachedRoot = nil
+        rootSourceCache = nil
+        return nil
+    }
+
+    /// Make a library in an empty (or new) folder. Only `songs/` — `se/` and `brand/` are the
+    /// production's own files (§6e, §15's `SEED[]`), and this build may not be carrying them.
+    @discardableResult
+    static func createLibrary(_ u: URL) -> String? {
+        let fm = FileManager.default
+        guard !isTransient(u.path), !inBackups(u.path) else {
+            return "โฟลเดอร์ชั่วคราว/ไดรฟ์นอก ใช้เป็นโฟลเดอร์งานไม่ได้"
+        }
+        if looksLikeLibrary(u) { return setRoot(u) }   // already one; just open it
+        do {
+            try fm.createDirectory(at: u.appendingPathComponent("songs"),
+                                   withIntermediateDirectories: true)
+        } catch {
+            return "สร้างโฟลเดอร์ไม่ได้: \(error.localizedDescription)"
+        }
+        return setRoot(u)
+    }
+
+    /// Only for `--roottest`: re-resolve without a relaunch.
+    static func invalidateRootForTest() { cachedRoot = nil; rootSourceCache = nil }
+}
+
+/// First-run seeding: the production's own files, from the bundle into the questions folder.
+///
+/// §15's `SEED[]` promise was "copied on a fresh install, never overwritten by an update", and the
+/// old installer kept it by copying `se/` and `brand/` out of the release zip. With the app in
+/// `/Applications` there is no installer and nothing sitting next to the data, so the files travel
+/// inside the bundle and this copies them out — under exactly the same rule.
+///
+/// **Only present in a crew build.** `build.sh --with-payload` is the only thing that puts
+/// `Resources/seed/` there, and `release.sh --crew` is the only thing that passes it. A public
+/// build has no seed folder at all and this does nothing: §15 records the day `brand` joined
+/// `SEED[]` and the show's logo went into a public GitHub release, and baking it into every bundle
+/// would do that permanently rather than once.
+enum Seeding {
+    /// Relative paths, destination-first thinking: each is copied only if it is ABSENT. That is
+    /// the whole promise — an operator who swapped in their own stings must never lose them to a
+    /// version bump, and the production's logo changes on the production's schedule, not ours.
+    static let items = ["se/correct.mp3", "se/wrong.mp3", "brand/logo.png"]
+
+    static var sourceDir: URL? {
+        guard let r = Bundle.main.resourceURL?.appendingPathComponent("seed"),
+              FileManager.default.fileExists(atPath: r.path) else { return nil }
+        return r
+    }
+
+    /// Scripts seeded separately from `items` because they come from `Resources/scripts/` and
+    /// ship in EVERY build — they are the program's, not the production's.
+    ///
+    /// Placed in the questions folder rather than left in the bundle on purpose: the diagnostic's
+    /// whole instruction is "double-click this on the machine with the issue", and the situation
+    /// it exists for is the app not working. A menu item inside that app would be no use there.
+    static let scripts = ["ตรวจสอบเครื่อง.command"]
+
+    @discardableResult
+    static func placeScripts() -> Int {
+        guard AppPaths.hasRoot,
+              let web = Bundle.main.resourceURL?.appendingPathComponent("scripts")
+        else { return 0 }
+        let fm = FileManager.default
+        var n = 0
+        for name in scripts {
+            let src = web.appendingPathComponent(name)
+            let to = AppPaths.root.appendingPathComponent(name)
+            guard fm.fileExists(atPath: src.path), !fm.fileExists(atPath: to.path) else { continue }
+            do {
+                try fm.copyItem(at: src, to: to)
+                // `copyItem` keeps the mode, but a bundle that lost the +x — an Archive Utility
+                // round trip, a Drive sync — would leave a file that opens in TextEdit instead
+                // of running, which for a diagnostic is indistinguishable from it being broken.
+                try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: to.path)
+                n += 1
+            } catch { continue }
+        }
+        return n
+    }
+
+    /// Returns how many files it placed. Silent on every failure, by §8f's rule: on a show day a
+    /// file that cannot be copied must not produce a dialog, a toast or a retry.
+    @discardableResult
+    static func run() -> Int {
+        guard AppPaths.hasRoot, let src = sourceDir else { return 0 }
+        let fm = FileManager.default
+        var placed = 0
+        for rel in items {
+            let to = AppPaths.root.appendingPathComponent(rel)
+            guard !fm.fileExists(atPath: to.path) else { continue }
+            let from = src.appendingPathComponent(rel)
+            guard fm.fileExists(atPath: from.path) else { continue }
+            do {
+                try fm.createDirectory(at: to.deletingLastPathComponent(),
+                                       withIntermediateDirectories: true)
+                try fm.copyItem(at: from, to: to)
+                placed += 1
+            } catch {
+                continue
+            }
+        }
+        return placed
+    }
 }
 
 /// The programme's logo, drawn in the header bar before the app name.
@@ -874,7 +1154,7 @@ enum Diagnostics {
 
     /// The whole in-app update chain except the final swap: fetch the manifest, download (or
     /// copy) the zip, unpack it, and prove the app inside reports the version the manifest
-    /// promised. The swap itself is covered by `installer-test.sh`, which can test it without
+    /// promised. The swap itself is covered by `swap-test.sh`, which can test it without
     /// quitting anything.
     ///
     /// Read-only with respect to the project: everything lands in a temp dir and is deleted.
@@ -943,15 +1223,28 @@ enum Diagnostics {
                 // opposite: it never read `bundleName` at all, and would have reported
                 // `✗ ไม่ผ่าน` against a perfectly good zip. A check that names its subject
                 // literally is not checking the thing it claims to.
-                for f in [Updater.Install.bundleName, Updater.installerName, "VERSION", "server.py"] {
+                // The zip holds the bundle and nothing else now — the installer, `server.py`,
+                // `index.html` and `VERSION` all moved inside it (§5d). Spelled through
+                // `Install.bundleName` and `Updater.swapHelper`, never as literals: this loop
+                // IS the proof that the Swift copies still agree with a real release, and §12
+                // records it once hardcoding the pre-1.3.0 bundle name and therefore proving
+                // the opposite — a check that names its subject literally is not checking the
+                // thing it claims to.
+                let staged_app = staged.appendingPathComponent(Updater.Install.bundleName)
+                for f in [Updater.Install.bundleName,
+                          "\(Updater.Install.bundleName)/\(Updater.swapHelper)",
+                          "\(Updater.Install.bundleName)/Contents/Resources/web/server.py",
+                          "\(Updater.Install.bundleName)/Contents/Resources/web/index.html"] {
                     let there = fm.fileExists(atPath: staged.appendingPathComponent(f).path)
                     print("  \(there ? "ok  " : "✗   ")\(f)")
                     if !there { ok = false }
                 }
                 print("  ✓ แอปที่แตกออกมาตอบเวอร์ชั่น \(info.version) ตรงกับ manifest")
                 print("\nถ้ากดอัปเดตจริง จะเรียก:")
-                print("  bash \(staged.appendingPathComponent(Updater.installerName).path) \\")
-                print("    --unattended --target \(AppPaths.root.path) --wait-pid <pid> --relaunch")
+                print("  bash \(staged_app.appendingPathComponent(Updater.swapHelper).path) \\")
+                print("    --target \(Bundle.main.bundleURL.path) \\")
+                print("    --source \(staged_app.path) \\")
+                print("    --expect \(info.version) --wait-pid <pid> --relaunch")
             } catch {
                 ok = false
                 print("\n✗ \(error.localizedDescription)")
@@ -1946,6 +2239,127 @@ enum Diagnostics {
     /// column accessor was DELETED rather than kept beside the filtered one, so handing a
     /// narrowed list to the handover now means typing `visibleSongs` somewhere it does not
     /// belong — a visible mistake instead of an invisible one.
+    /// Where the questions live (§5, the DMG work). Read-only: it builds fixtures in the system
+    /// temp dir and deletes them, and it NEVER touches `UserDefaults` or the breadcrumb — the
+    /// resolver takes its three inputs as parameters precisely so this does not have to.
+    static func rootTest() {
+        var pass = 0, fail = 0
+        func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+            if ok { pass += 1 } else { fail += 1 }
+            print("   \(ok ? "ok  " : "✗   ")\(label)\(detail.isEmpty ? "" : "  — " + detail)")
+        }
+        let fm = FileManager.default
+        let box = fm.temporaryDirectory.appendingPathComponent("rgf-roottest-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: box) }
+        func make(_ name: String, _ build: (URL) -> Void) -> URL {
+            let u = box.appendingPathComponent(name)
+            try? fm.createDirectory(at: u, withIntermediateDirectories: true)
+            build(u)
+            return u
+        }
+        func touch(_ u: URL, _ n: String) {
+            fm.createFile(atPath: u.appendingPathComponent(n).path, contents: Data("x".utf8))
+        }
+        func dir(_ u: URL, _ n: String) {
+            try? fm.createDirectory(at: u.appendingPathComponent(n), withIntermediateDirectories: true)
+        }
+
+        print("1) อะไรนับว่าเป็นโฟลเดอร์งาน (hasLibraryMarkers)")
+        let withSongs = make("withSongs") { dir($0, "songs") }
+        let withCfg = make("withCfg") { touch($0, "config.json") }
+        let both = make("both") { dir($0, "songs"); touch($0, "config.json") }
+        let empty = make("empty") { _ in }
+        // `songs` as a FILE, not a directory. A bare existence check would pass this and the app
+        // would then adopt a folder it cannot scan.
+        let songsIsFile = make("songsIsFile") { touch($0, "songs") }
+        let release = make("release") { dir($0, "songs"); touch($0, "ติดตั้ง-อัปเดต.command") }
+        let readme = make("readme") { touch($0, "config.json"); touch($0, "อ่านก่อน.txt") }
+        check("มี songs/ → ใช่", AppPaths.hasLibraryMarkers(withSongs))
+        check("มี config.json → ใช่", AppPaths.hasLibraryMarkers(withCfg))
+        check("มีทั้งคู่ → ใช่", AppPaths.hasLibraryMarkers(both))
+        check("ว่างเปล่า → ไม่ใช่", !AppPaths.hasLibraryMarkers(empty))
+        check("songs เป็นไฟล์ ไม่ใช่โฟลเดอร์ → ไม่ใช่", !AppPaths.hasLibraryMarkers(songsIsFile))
+        // §15: launching out of an unzipped release is a natural thing to do and must not be
+        // mistaken for an install, or the breadcrumb and the resolver both point at a download.
+        check("โฟลเดอร์ที่แตก zip (มี ติดตั้ง-อัปเดต.command) → ไม่ใช่",
+              !AppPaths.hasLibraryMarkers(release))
+        check("โฟลเดอร์ที่แตก zip (มี อ่านก่อน.txt) → ไม่ใช่", !AppPaths.hasLibraryMarkers(readme))
+
+        print("\n2) ข้อห้าม — ที่ที่ห้ามใช้เป็นโฟลเดอร์งาน")
+        check("โฟลเดอร์ temp ถูกตัด", AppPaths.isTransient("/private/var/folders/x/y/T/a"))
+        check("/tmp ถูกตัด", AppPaths.isTransient("/tmp/work"))
+        check("/Volumes ถูกตัด", AppPaths.isTransient("/Volumes/USB/งาน"))
+        check("โฟลเดอร์ปกติไม่ถูกตัด", !AppPaths.isTransient("/Users/x/Documents/IntroPlayer"))
+        // The Dock follows the old bundle into `backups/` after an update (§15), and that folder
+        // has a config.json the installer copied in and no songs/.
+        check("ใน backups/ ถูกตัด", AppPaths.inBackups("/Users/x/IntroPlayer/backups/2026-01-01"))
+        check("ชื่อมีคำว่า backups แต่ไม่ใช่โฟลเดอร์นั้น ไม่ถูกตัด",
+              !AppPaths.inBackups("/Users/x/my-backups-notes"))
+        // The exclusions have to beat the marks, not the other way round: the temp fixtures above
+        // all HAVE the marks, so if the order were wrong every one of them would qualify.
+        check("ข้อห้ามชนะเครื่องหมาย (fixture ใน temp มี songs/ แต่ใช้ไม่ได้)",
+              AppPaths.hasLibraryMarkers(both) && !AppPaths.looksLikeLibrary(both))
+        check("/ ไม่ใช่โฟลเดอร์งาน", !AppPaths.looksLikeLibrary(URL(fileURLWithPath: "/")))
+
+        print("\n3) ลำดับการหา (resolveRoot) — ของที่เลือกเองต้องชนะเสมอ")
+        // Non-transient paths that really are libraries cannot be built in temp, so the order is
+        // checked with the REAL project folder as the stand-in for "a real library": it is the
+        // one directory this process is guaranteed to be able to see.
+        let real = AppPaths.programRoot
+        let realIsLib = AppPaths.looksLikeLibrary(real)
+        check("โฟลเดอร์โปรแกรมตอนนี้เป็นโฟลเดอร์งาน (ใช้เป็นตัวแทนของจริง)", realIsLib, real.path)
+        if realIsLib {
+            let other = URL(fileURLWithPath: "/no/such/place")
+            var r = AppPaths.resolveRoot(chosen: real.path, breadcrumb: other.path, beside: other)
+            check("เลือกเองใช้ได้ → ชนะ", r.1 == .chosen && r.0.path == real.path, r.1.rawValue)
+            r = AppPaths.resolveRoot(chosen: other.path, breadcrumb: other.path, beside: real)
+            check("เลือกเองใช้ไม่ได้ → ตกไปที่โฟลเดอร์ข้างแอป",
+                  r.1 == .beside && r.0.path == real.path, r.1.rawValue)
+            // The migration case, and the ONLY one the breadcrumb is for: the app has moved to
+            // /Applications, so there is no library beside it.
+            r = AppPaths.resolveRoot(chosen: nil, breadcrumb: real.path, beside: other)
+            check("แอปย้ายไป /Applications (ไม่มี library ข้างแอป) → ใช้ breadcrumb",
+                  r.1 == .breadcrumb && r.0.path == real.path, r.1.rawValue)
+            // The ordering defect this found: with the breadcrumb first, a classic-layout folder
+            // copied somewhere new read the OLD folder for a whole launch.
+            r = AppPaths.resolveRoot(chosen: nil, breadcrumb: real.path, beside: real)
+            check("มี library ข้างแอป → ชนะ breadcrumb (กันอ่านโฟลเดอร์เก่า)",
+                  r.1 == .beside, r.1.rawValue)
+            r = AppPaths.resolveRoot(chosen: nil, breadcrumb: nil, beside: real)
+            check("ไม่มีทั้งคู่ → ใช้โฟลเดอร์ข้างแอป (ของเดิมไม่พัง)",
+                  r.1 == .beside && r.0.path == real.path, r.1.rawValue)
+            r = AppPaths.resolveRoot(chosen: "  ", breadcrumb: "\n", beside: real)
+            check("ค่าว่าง/ช่องว่าง ถูกข้าม ไม่ใช่ถูกใช้", r.1 == .beside, r.1.rawValue)
+            r = AppPaths.resolveRoot(chosen: both.path, breadcrumb: nil, beside: real)
+            check("เลือกเองชี้ที่ต้องห้าม → ไม่เอา ตกไปข้างแอป", r.1 == .beside, r.1.rawValue)
+        }
+        let nowhere = URL(fileURLWithPath: "/no/such/place")
+        let none = AppPaths.resolveRoot(chosen: nil, breadcrumb: nil, beside: nowhere)
+        // The one that matters most. `.none` is what a fresh drag-to-Applications install is in,
+        // and `Store.saveNow` / `LogStore.save` / `Snapshot.write` all refuse while it holds —
+        // because `AppPaths.root` then falls back to the bundle's parent, and writing a
+        // `config.json` there would make `looksLikeLibrary` true for `/Applications` on the next
+        // launch. An empty second library the app PREFERS is worse than no library at all.
+        check("ไม่เจอที่ไหนเลย → .none (ไม่เดา ไม่สร้าง)", none.1 == .none, none.1.rawValue)
+        check("เส้นทางที่ไม่มีอยู่จริง ไม่ถูกนับเป็นโฟลเดอร์งาน",
+              !AppPaths.looksLikeLibrary(nowhere))
+
+        print("\n4) โปรแกรมกับข้อมูลเป็นคนละที่ได้")
+        check("programRoot ไม่ได้มาจากค่าที่เก็บไว้ (เป็นที่อยู่ของ bundle จริง)",
+              AppPaths.programRoot.path == Bundle.main.bundleURL.deletingLastPathComponent().path
+                || Bundle.main.bundleURL.pathExtension != "app",
+              AppPaths.programRoot.path)
+        check("accessor ของข้อมูลทั้งห้าอิงกับ root เดียวกัน",
+              AppPaths.songs.deletingLastPathComponent().path == AppPaths.root.path
+                && AppPaths.se.deletingLastPathComponent().path == AppPaths.root.path
+                && AppPaths.config.deletingLastPathComponent().path == AppPaths.root.path
+                && AppPaths.log.deletingLastPathComponent().path == AppPaths.root.path
+                && AppPaths.brand.deletingLastPathComponent().path == AppPaths.root.path)
+
+        print("\nผ่าน \(pass)  ตก \(fail)")
+        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+    }
+
     static func filterTest() {
         var pass = 0, fail = 0
         func check(_ label: String, _ ok: Bool, _ detail: String = "") {

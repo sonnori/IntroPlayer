@@ -4,7 +4,18 @@ IntroPlayer - Local server for the Song Intro Quiz game.
 Pure Python standard library. No pip packages needed.
 
 Run:  python3 server.py
+      python3 server.py --root /path/to/the/questions
 Then open http://localhost:8000 in your browser.
+
+--root exists because the app can now live in /Applications while the questions live somewhere
+else (CLAUDE.md §5d). This file then ships inside the bundle, so the directory it sits in is the
+PROGRAM's, not the data's, and the two have to be told apart:
+
+  APP_DIR   where index.html is — the script's own directory. Never the data root.
+  DATA_ROOT songs/, se/, config.json, log.json. --root, else the script's directory.
+
+Defaulting DATA_ROOT to the script's directory is what keeps the classic layout working with no
+arguments at all.
 """
 
 import http.server
@@ -16,14 +27,28 @@ import re
 import time
 import json
 import posixpath
+import sys
 import urllib.parse
 
 PORT = 8000
-ROOT = os.path.dirname(os.path.abspath(__file__))
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+# Rebound by main() when --root is given. Module-level so the handler can read them as before.
+ROOT = APP_DIR
 SONGS_DIR = os.path.join(ROOT, "songs")
 SE_DIR = os.path.join(ROOT, "se")
 CONFIG_PATH = os.path.join(ROOT, "config.json")
 LOG_PATH = os.path.join(ROOT, "log.json")
+
+
+def set_data_root(path):
+    """Point the server at a questions folder. Returns the resolved absolute path."""
+    global ROOT, SONGS_DIR, SE_DIR, CONFIG_PATH, LOG_PATH
+    ROOT = os.path.abspath(os.path.expanduser(path))
+    SONGS_DIR = os.path.join(ROOT, "songs")
+    SE_DIR = os.path.join(ROOT, "se")
+    CONFIG_PATH = os.path.join(ROOT, "config.json")
+    LOG_PATH = os.path.join(ROOT, "log.json")
+    return ROOT
 
 CLIENTS = {}        # client id -> last heartbeat (monotonic); see /api/hello
 CLIENT_TTL = 12.0   # a window that hasn't pinged for this long is considered closed
@@ -126,7 +151,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = parsed.path
 
         if path == "/" or path == "/index.html":
-            self._serve_file(os.path.join(ROOT, "index.html"))
+            # APP_DIR, not ROOT: index.html ships with the program, and once this file lives in
+            # the bundle those are different folders.
+            self._serve_file(os.path.join(APP_DIR, "index.html"))
             return
 
         if path == "/api/songs":
@@ -281,6 +308,22 @@ class ThreadingServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def main():
+    argv = sys.argv[1:]
+    if "--root" in argv:
+        i = argv.index("--root")
+        if i + 1 >= len(argv):
+            print("ERROR: --root ต้องตามด้วย path ของโฟลเดอร์งาน")
+            raise SystemExit(2)
+        r = set_data_root(argv[i + 1])
+        # Refuse a root that is not there rather than creating one. The native app's resolver
+        # makes the same choice and CLAUDE.md §5d says why: an empty second library that the
+        # program prefers is worse than no library at all.
+        if not os.path.isdir(r):
+            print("ERROR: ไม่มีโฟลเดอร์นี้ - %s" % r)
+            raise SystemExit(2)
+    print("โฟลเดอร์งาน: %s" % ROOT)
+    if APP_DIR != ROOT:
+        print("โฟลเดอร์โปรแกรม: %s" % APP_DIR)
     # macOS blocks Desktop / Documents / Downloads / iCloud for processes without permission, so
     # this is where a copied-to-another-Mac install dies. A bare traceback here tells the operator
     # nothing, and the launcher can only report "server failed to start".

@@ -7,20 +7,40 @@ echo "==================================================="
 echo "  RGF Intro Player — ตรวจสอบเครื่อง"
 echo "==================================================="
 echo ""
-echo "โฟลเดอร์ที่ติดตั้ง:"
+
+# The program and the questions are two places now (CLAUDE.md §5d), so this reports both — and
+# which one it is standing in. It is seeded into the QUESTIONS folder, because the situation it
+# exists for is the app not working, and a diagnostic inside a broken app is no diagnostic.
+echo "โฟลเดอร์ที่ไฟล์นี้อยู่ (= โฟลเดอร์งาน):"
 echo "  $HERE"
+# The app: wherever it actually is. Checked in the order the app's own resolver would meet it.
+APPBUNDLE=""
+for b in "/Applications/RGF Intro Player.app" "$HOME/Applications/RGF Intro Player.app" \
+         "$HERE/RGF Intro Player.app" "$HERE/IntroPlayerNative.app"; do
+  [ -d "$b" ] && { APPBUNDLE="$b"; break; }
+done
+echo "โฟลเดอร์ของตัวแอป:"
+if [ -n "$APPBUNDLE" ]; then echo "  $APPBUNDLE"; else echo "  ไม่พบแอปเลย — ลาก RGF Intro Player ไปใส่ Applications ก่อน"; fi
+# What the app itself decided to read. The stored choice wins, then the breadcrumb, then the
+# folder beside the app — so a surprising answer here is the single most useful line on a call.
+# The real bundle id, verified against the plist that UserDefaults actually writes — guessing
+# `com.rgf.introplayer` reads nothing and reports "ยังไม่ได้ตั้ง" for a machine that HAS chosen,
+# which is the worst possible answer for the one line a support call is looking at.
+DEFROOT="$(defaults read com.rgf.introplayer.native dataRoot 2>/dev/null || true)"
+CRUMB="$(cat "$HOME/Library/Application Support/IntroPlayer/location" 2>/dev/null | head -1 || true)"
+echo "โฟลเดอร์งานที่แอปจะเลือก:"
+[ -n "$DEFROOT" ] && echo "  เลือกไว้เอง    = $DEFROOT" || echo "  เลือกไว้เอง    = (ยังไม่ได้ตั้ง)"
+[ -n "$CRUMB" ]   && echo "  จำจากที่ติดตั้ง = $CRUMB"   || echo "  จำจากที่ติดตั้ง = (ไม่มี)"
+if [ -n "$DEFROOT" ] && [ "$DEFROOT" != "$HERE" ]; then
+  echo "  ⚠ แอปจะอ่านจาก $DEFROOT ไม่ใช่โฟลเดอร์ที่ไฟล์นี้อยู่"
+  echo "    ถ้าไม่ใช่ที่ตั้งใจ เปลี่ยนได้ที่ ⋯ > เกี่ยวกับแอป > เปลี่ยนโฟลเดอร์งาน"
+fi
 echo ""
 
 # [0] เวอร์ชั่น — คำถามข้อแรกของทุกเคสที่แจ้งมา
 echo "[0] เวอร์ชั่น"
 VTXT="$( { tr -d ' \n\r' < VERSION; } 2>/dev/null || echo "" )"
-[ -n "$VTXT" ] && echo "     VERSION         = $VTXT" || echo "     VERSION         = (ไม่มีไฟล์ VERSION — เป็นชุดก่อนมีระบบอัปเดต)"
-# The bundle was renamed in 1.3.0. A crew machine may still be on the old one, and this script
-# is the thing we ask them to run BEFORE the update — so it has to find either.
-APPBUNDLE=""
-for b in "RGF Intro Player.app" "IntroPlayerNative.app"; do
-  [ -d "$b" ] && { APPBUNDLE="$b"; break; }
-done
+[ -n "$VTXT" ] && echo "     VERSION         = $VTXT (ไฟล์ข้างโฟลเดอร์งาน — ชุดเก่าเท่านั้น)"
 APPEXE="$APPBUNDLE/Contents/MacOS/IntroPlayerNative"
 PLIST="$APPBUNDLE/Contents/Info.plist"
 if [ -f "$PLIST" ]; then
@@ -31,14 +51,19 @@ if [ -f "$PLIST" ]; then
   # A mismatch means the folder was updated by hand and half of it is stale — invisible
   # otherwise, and it explains "I installed the new one but nothing changed".
   if [ -n "$VTXT" ] && [ "$PV" != "$VTXT" ] && [ "$PV" != "?" ]; then
-    echo "     ⚠ เลขไม่ตรงกัน — โฟลเดอร์นี้อัปเดตไม่ครบ ให้รัน ติดตั้ง-อัปเดต.command อีกครั้ง"
+    echo "     หมายเหตุ: ไฟล์ VERSION เก่ากว่าตัวแอป — ปกติหลังย้ายมาใช้ /Applications"
+    echo "               ไฟล์นั้นไม่ได้ใช้แล้ว ลบทิ้งได้"
   fi
 else
   echo "     แอป (native)    = ไม่พบ RGF Intro Player.app"
 fi
-if [ "$APPBUNDLE" = "IntroPlayerNative.app" ]; then
-  echo "     หมายเหตุ: ชื่อแอปเก่า — รัน ติดตั้ง-อัปเดต.command แล้วจะเปลี่ยนเป็น RGF Intro Player"
-fi
+case "$APPBUNDLE" in
+  *IntroPlayerNative.app)
+    echo "     ⚠ ชื่อแอปเก่า (ก่อน 1.3.0) — โหลด .dmg ตัวใหม่ แล้วลากไปใส่ Applications" ;;
+  "$HERE/"*)
+    echo "     ⚠ แอปอยู่ในโฟลเดอร์งาน ไม่ได้อยู่ใน Applications — แบบเก่า ยังใช้ได้"
+    echo "       อัปเดตครั้งหน้าจะย้ายให้เอง หรือลากไปใส่ Applications เองก็ได้" ;;
+esac
 # What wrote config.json last. Two people on two builds sharing a folder shows up here.
 # `-I` because the cwd is the install folder, which holds files we did not write — a planted
 # json.py there would otherwise be imported.

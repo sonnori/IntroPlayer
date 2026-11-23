@@ -61,6 +61,11 @@ final class AppModel: ObservableObject {
     /// True when this bundle was launched from an unzipped RELEASE folder rather than an install.
     /// Computed once at startup, never from `body` — see `Updater.manifestLocation`.
     private(set) var launchedFromRelease = false
+    /// Running straight off the mounted .dmg instead of from /Applications. The new shape of the
+    /// same mistake `launchedFromRelease` catches: double-clicking the app in the installer
+    /// window is the most natural thing in the world, and it leaves the operator editing a copy
+    /// that vanishes when the disk is ejected. Nothing else in the app can tell them why.
+    private(set) var launchedFromDMG = false
 
     // The in-app install (§15). Progress is -1 while the length is unknown.
     @Published var updateInstalling = false
@@ -195,21 +200,13 @@ final class AppModel: ObservableObject {
             self.saveState = self.store.saveState
             self.objectWillChange.send()
         }
+        // Before anything renders: `ShowLogo.prepared` is a lazy `static let` loaded once per
+        // process (§6e), so a logo copied out after the header has drawn would not appear until
+        // the next launch. Nothing has touched it yet at this point.
+        Seeding.run()
+        Seeding.placeScripts()
         rebuildResetCache()
-        if let shot {
-            let version = AppVersion.short, mirror = store.backupDir
-            Task.detached(priority: .utility) { [weak self] in
-                let r = Snapshot.write(shot, version: version, mirrorTo: mirror)
-                guard let note = Snapshot.summary(r) else { return }
-                let model = self
-                await MainActor.run {
-                    // About only. §8f's rule: on a show day a backup that cannot write must not
-                    // produce a dialog, a toast or a retry — and a backup that DID write is not
-                    // news worth a banner either.
-                    model?.snapshotNote = note
-                }
-            }
-        }
+        if let shot { writeSnapshot(shot) }
         // The save is debounced 250 ms. Quitting inside that window — which is exactly what
         // happens when the GM marks a song and immediately hits Cmd+Q — dropped the edit.
         for name in [NSApplication.willTerminateNotification, NSApplication.willResignActiveNotification] {
@@ -224,8 +221,14 @@ final class AppModel: ObservableObject {
         // Launching the bundle straight out of an unzipped release is a natural thing to do
         // ("let me see if the new one works") and it has one cause and one fix, but it LOOKS
         // like §8c's "the app can't find my songs". Detected once, here, never from `body`.
+        // `programRoot`, not the data root: the question is whether the BUNDLE is sitting in
+        // an unzipped release, which is a fact about where the app was launched from. Kept for
+        // machines mid-migration — a classic-layout folder still has that file in it.
         launchedFromRelease = FileManager.default.fileExists(
-            atPath: AppPaths.root.appendingPathComponent("ติดตั้ง-อัปเดต.command").path)
+            atPath: AppPaths.programRoot.appendingPathComponent("ติดตั้ง-อัปเดต.command").path)
+        // A read-only mounted image is `/Volumes/<name>`. Checked on the real bundle path rather
+        // than on a volume list, because that is the thing that actually goes away on eject.
+        launchedFromDMG = AppPaths.programRoot.path.hasPrefix("/Volumes/")
         // The other half of the update loop. `lastRanVersion` is rewritten on every save, so a
         // difference here means this launch is the first on a new build.
         let seen = store.lastRanVersion
@@ -332,11 +335,16 @@ final class AppModel: ObservableObject {
     /// Re-reads songs/ from disk. The app used to scan only at launch, so a folder dropped in
     /// while it was running simply never appeared — and there was nothing to press, unlike the
     /// web version's Cmd+R. Runs on window activation so returning from Finder is enough.
-    func rescan() {
+    /// `force` is for a data-root switch and nothing else. The two guards below exist because a
+    /// routine rescan that comes back empty almost always means `songs/` could not be read, and
+    /// keeping the old list is then right (§12). After a root switch both guards are wrong: the
+    /// new library legitimately holds different songs, possibly none at all, and keeping the old
+    /// round's list would leave the operator looking at songs that are no longer anywhere.
+    func rescan(force: Bool = false) {
         let before = Set(playlists)
         let found = Library.scan()
-        guard found != songs else { return }
-        if found.isEmpty && !songs.isEmpty {
+        guard force || found != songs else { return }
+        if !force, found.isEmpty && !songs.isEmpty {
             flash("อ่านโฟลเดอร์ songs/ ไม่ได้ — ยังใช้รายการเดิมอยู่")
             return
         }
@@ -349,6 +357,82 @@ final class AppModel: ObservableObject {
             flash("เจอรอบใหม่: " + fresh.joined(separator: ", ") + " — เลือกได้จากช่องด้านบน")
         }
         objectWillChange.send()
+    }
+
+    /// §5c's launch snapshot, detached. Factored out of `init` so a data-root switch can take one
+    /// too — otherwise the only pre-run copy a session holds is of the library it LEFT, and the
+    /// one it moved into would be edited with no snapshot until the next launch. §5c's promise is
+    /// "the state before this run touched anything", and after a switch this run has not touched
+    /// the new library yet, so the moment is still right.
+    private func writeSnapshot(_ shot: (config: Data, log: Data?)) {
+        let version = AppVersion.short, mirror = store.backupDir
+        Task.detached(priority: .utility) { [weak self] in
+            let r = Snapshot.write(shot, version: version, mirrorTo: mirror)
+            guard let note = Snapshot.summary(r) else { return }
+            let model = self
+            await MainActor.run {
+                // About only. §8f's rule: on a show day a backup that cannot write must not
+                // produce a dialog, a toast or a retry — and a backup that DID write is not
+                // news worth a banner either.
+                model?.snapshotNote = note
+            }
+        }
+    }
+
+    /// Point the app at a different library (§5, the DMG work). Returns nil on success, or the
+    /// reason in Thai.
+    ///
+    /// Four things in here are load-bearing, and three of them are about not losing the library
+    /// you are LEAVING:
+    ///
+    /// - **Refused while playing.** This tears down the song list and reloads the store; doing it
+    ///   under live playback is the shape §10 spends itself preventing, and the operator cannot
+    ///   hear a folder change.
+    /// - **The old store is flushed FIRST, to the old root.** The save is debounced 250 ms, so a
+    ///   marker edited a moment ago is still pending — and after `setRoot` it would land in the
+    ///   NEW folder, writing one library's markers into another. Same debounce that §12 records
+    ///   losing an edit at quit.
+    /// - **Guesses are cancelled.** An in-flight `AutoDetect` task finishes with a main-actor hop
+    ///   that writes by PATH, and a path means a different song once the root moves (§7a4).
+    /// - **Every per-path cache is dropped.** `analysisCache` and `coverCache` are keyed by the
+    ///   path under `songs/`, which is not unique across libraries: `EP01/101.mp3` exists in both
+    ///   and would otherwise draw one library's waveform for another's audio. §8f records the
+    ///   same defect when the cover cache dropped the extension.
+    @discardableResult
+    func switchDataRoot(to url: URL, create: Bool = false) -> String? {
+        if player.isPlaying { return "หยุดเพลงก่อนเปลี่ยนโฟลเดอร์งาน" }
+        let from = AppPaths.root
+        if url.standardizedFileURL == from.standardizedFileURL, AppPaths.hasRoot { return nil }
+        cancelGuesses()
+        cancelPending()
+        // `store` is debounced; `LogStore.append` writes immediately and re-reads first, so it
+        // has nothing pending — do not add a flush there that does not exist.
+        store.saveNow()
+        if let err = create ? AppPaths.createLibrary(url) : AppPaths.setRoot(url) { return err }
+        player.pause()          // a no-op when stopped, which the guard above guarantees
+        current = nil
+        analysisCache.removeAll()
+        coverCache.removeAll()
+        tagFilter = ""
+        store.load()
+        logStore.load()
+        invalidateStatus()
+        currentPlaylist = store.lastPlaylist
+        rescan(force: true)
+        let pls = playlists
+        if !pls.contains(currentPlaylist) { currentPlaylist = pls.first ?? "" }
+        if let first = songsIn(currentPlaylist).first { select(first) }
+        // §5c, for the library we just moved INTO. Read after `store.load()` so it is the bytes
+        // on disk rather than anything this session has done, and deduplicated by `Snapshot.write`
+        // itself if an identical copy is already the newest one.
+        Seeding.run()
+        Seeding.placeScripts()
+        if let shot = Snapshot.capture() { writeSnapshot(shot) }
+        objectWillChange.send()
+        flash(songs.isEmpty
+              ? "เปลี่ยนโฟลเดอร์งานแล้ว — ยังไม่มีไฟล์เพลงใน songs/"
+              : "เปลี่ยนโฟลเดอร์งานแล้ว — เจอ \(songs.count) เพลง")
+        return nil
     }
 
     func setPlaylist(_ p: String) {
@@ -1476,7 +1560,11 @@ final class AppModel: ObservableObject {
                 // the debounced save would otherwise still be pending when it does.
                 store.saveNow()
                 try Updater.apply(staged: staged,
-                                  target: AppPaths.root,
+                                  // The installed BUNDLE, not the folder holding it: the helper
+                                  // replaces one directory. Handing it a folder — least of all
+                                  // the data root — is how a program swap reaches the questions.
+                                  target: Bundle.main.bundleURL,
+                                  version: u.version,
                                   waitPid: ProcessInfo.processInfo.processIdentifier)
                 updateStep = "กำลังปิดแอป — เดี๋ยวมันจะเปิดขึ้นมาใหม่เอง"
                 // Let the child reach its wait loop before we vanish.

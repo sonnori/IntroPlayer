@@ -2,13 +2,29 @@
 # Builds the native app and assembles "RGF Intro Player.app" next to the web version.
 # The bundle name carries a space; the EXECUTABLE inside stays `IntroPlayerNative`,
 # which is what pgrep matches on and what every documented diagnostic invokes.
-#   ./native/build.sh          release build, universal (arm64 + x86_64)
-#   ./native/build.sh debug    faster build while iterating, this machine's arch only
+#   ./native/build.sh                 release build, universal (arm64 + x86_64)
+#   ./native/build.sh debug           faster build while iterating, this machine's arch only
+#   ./native/build.sh --with-payload  ALSO bundle se/*.mp3 and brand/logo.png as first-run seed
+#
+# About --with-payload (CLAUDE.md §5d/§15). Once the app lives in /Applications it cannot seed a
+# new questions folder from files sitting next to itself, so the stings and the show's logo have
+# to travel inside the bundle — and they must NOT travel in a public build. This repo is public
+# and §15 records the day `brand` joined SEED[] and the logo went into a GitHub release before
+# anyone noticed. So the default build carries no payload at all and `release.sh --crew` is the
+# only thing that passes this flag.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
-CONF="${1:-release}"
+CONF="release"
+PAYLOAD=0
+for a in "$@"; do
+  case "$a" in
+    --with-payload) PAYLOAD=1 ;;
+    debug|release) CONF="$a" ;;
+    *) echo "unknown argument: $a"; exit 2 ;;
+  esac
+done
 APP="$ROOT/RGF Intro Player.app"
 NEW="$APP.new"
 OLD="$APP.old"
@@ -61,6 +77,40 @@ done
 cp "$HERE/Info.plist" "$NEW/Contents/Info.plist"
 printf 'APPL????' > "$NEW/Contents/PkgInfo"
 
+# The on-site diagnostic. "ดับเบิลคลิกไฟล์นี้ที่เครื่องที่มีปัญหา" has to work when the app does
+# not, so it ships here and the app seeds it into the questions folder on first run. It used to be
+# a sibling of the data by virtue of the old layout; that stops being a place once the app can
+# live in /Applications.
+#
+# The WEB fallback is deliberately not here. It stays in the repo and still works in a
+# classic-layout folder (`server.py --root` makes it work from anywhere), but it is no longer
+# shipped or seeded — the native app being solid is the thing worth the effort.
+mkdir -p "$NEW/Contents/Resources/scripts"
+[ -f "$ROOT/ตรวจสอบเครื่อง.command" ] || { echo "missing ตรวจสอบเครื่อง.command"; exit 1; }
+cp "$ROOT/ตรวจสอบเครื่อง.command" "$NEW/Contents/Resources/scripts/ตรวจสอบเครื่อง.command"
+chmod +x "$NEW/Contents/Resources/scripts/ตรวจสอบเครื่อง.command"
+
+# The swap helper for in-app updates. Tiny compared with the installer it replaces, because the
+# questions are no longer anywhere near what it touches.
+[ -f "$HERE/swap-app.sh" ] || { echo "missing native/swap-app.sh"; exit 1; }
+cp "$HERE/swap-app.sh" "$NEW/Contents/Resources/swap-app.sh"
+chmod +x "$NEW/Contents/Resources/swap-app.sh"
+
+if [ "$PAYLOAD" = "1" ]; then
+  echo "  ● --with-payload: ใส่เสียงตอบถูก/ผิด และโลโก้รายการเข้า bundle — ห้ามปล่อยขึ้นที่สาธารณะ"
+  mkdir -p "$NEW/Contents/Resources/seed/se" "$NEW/Contents/Resources/seed/brand"
+  miss=""
+  for f in se/correct.mp3 se/wrong.mp3; do
+    if [ -f "$ROOT/$f" ]; then cp "$ROOT/$f" "$NEW/Contents/Resources/seed/$f"; else miss="$miss $f"; fi
+  done
+  if [ -f "$ROOT/brand/logo.png" ]; then
+    cp "$ROOT/brand/logo.png" "$NEW/Contents/Resources/seed/brand/logo.png"
+  else miss="$miss brand/logo.png"; fi
+  # A crew build that lost a sting is exactly what this flag exists to prevent, so it is fatal
+  # rather than a warning — the same inversion release.sh applies to its own payload check.
+  [ -z "$miss" ] || { echo "✗ --with-payload แต่หาไฟล์พวกนี้ไม่เจอ:$miss"; exit 1; }
+fi
+
 PB=/usr/libexec/PlistBuddy
 plist="$NEW/Contents/Info.plist"
 "$PB" -c "Set :CFBundleShortVersionString $VERSION" "$plist"
@@ -82,3 +132,8 @@ rm -rf "$OLD"
 echo "✓ $APP"
 echo "  version: $VERSION${COMMIT:+ ($COMMIT)} built $BUILT"
 lipo -archs "$APP/Contents/MacOS/IntroPlayerNative" 2>/dev/null | sed 's/^/  arch: /' || true
+if [ -d "$APP/Contents/Resources/seed" ]; then
+  echo "  seed: มีไฟล์ของรายการอยู่ใน bundle (crew build)"
+else
+  echo "  seed: ไม่มี (บิลด์สาธารณะ)"
+fi
