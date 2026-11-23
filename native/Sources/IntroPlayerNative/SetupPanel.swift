@@ -28,7 +28,10 @@ struct SetupPanel: View {
 
     @ViewBuilder
     private func body(for c: SongConfig) -> some View {
-        wideButton(c.played ? "✓ เล่นแล้ว — กดเพื่อยกเลิก" : "ทำเครื่องหมายว่าเล่นแล้ว",
+        // The keys are named here because their absence is what prompted the request: the
+        // transport button two panes away had carried `P` all along and this one said nothing,
+        // so the function looked like it had no shortcut.
+        wideButton(c.played ? "✓ เล่นแล้ว — กดเพื่อยกเลิก  (P / T)" : "ทำเครื่องหมายว่าเล่นแล้ว  (P / T)",
                    bg: c.played ? Palette.tintWarn : Palette.panel2,
                    fg: c.played ? Palette.amberOnTint : Palette.text,
                    border: c.played ? Palette.amber : Palette.line) {
@@ -143,24 +146,49 @@ struct SetupPanel: View {
     /// typing a tag by hand is how "ยุค 90" and "ยุค 90 " become two tags, and a registry whose
     /// suggestions nobody clicks is a registry of one-offs.
     ///
-    /// No hue on any chip. A tag reports no state (§6d).
+    /// **The chip is a MENU now, not a remove button, and that is the safer direction.** It used
+    /// to remove the tag on a single click, so the one thing a slip could do was destroy part of
+    /// a signed-off round; now a slip opens a menu. It is also the answer to "where do I pick the
+    /// colour" without putting two different immediate meanings a few pt apart on one ~60 pt
+    /// chip — §13 rejected exactly that for "click a chip to filter by it", and a menu is not
+    /// subject to the objection because nothing happens until you choose. The cost is that
+    /// removing a tag is two clicks instead of one; the trailing `▾` says the click opens
+    /// something rather than deleting something.
+    ///
+    /// The colour is a LIBRARY-wide property of the tag, not of this song, so the menu says the
+    /// tag's name — otherwise "set this to red" reads as a change to the song in front of you.
     @ViewBuilder
     private func tagRow(_ c: SongConfig) -> some View {
         if !c.tags.isEmpty {
             FlowRow(spacing: 6, lineSpacing: 6) {
                 ForEach(c.tags, id: \.self) { t in
-                    Button { model.removeTag(t) } label: {
-                        TagChip(tag: t, trailing: "✕").contentShape(Rectangle())
+                    Menu {
+                        Section("สีของแท็ก \u{201C}\(t)\u{201D} (ทุกเพลงที่ใช้แท็กนี้)") {
+                            ForEach(TagColor.allCases, id: \.rawValue) { tc in
+                                Button(colorMenuLabel(t, tc)) { model.setTagColor(t, tc.rawValue) }
+                            }
+                            Button(model.store.tagColorChoice[Store.tagKey(t)] == nil
+                                   ? "✓ อัตโนมัติ (เลือกสีจากชื่อแท็ก)"
+                                   : "อัตโนมัติ (เลือกสีจากชื่อแท็ก)") {
+                                model.setTagColor(t, nil)
+                            }
+                        }
+                        Divider()
+                        Button("เอาแท็ก \u{201C}\(t)\u{201D} ออกจากเพลงนี้") { model.removeTag(t) }
+                    } label: {
+                        TagChip(tag: t, trailing: "▾")
                     }
-                    .buttonStyle(PressStyle(corner: 6))
-                    .help("คลิกเพื่อเอาแท็กนี้ออก")
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("เลือกสีของแท็กนี้ หรือเอาออกจากเพลงนี้")
                 }
             }
         }
         // The library-wide cap is invisible until it bites, and when it bites it refuses a word
         // the setter just typed — so it is stated while there is still room to plan.
         if model.store.tagsInUse.count >= Store.tagsMaxDistinct - 2 {
-            Text("ใช้ไปแล้ว \(model.store.tagsInUse.count)/\(Store.tagsMaxDistinct) แบบ (สีมีเท่านี้)")
+            Text("ใช้ไปแล้ว \(model.store.tagsInUse.count)/\(Store.tagsMaxDistinct) แบบในไลบรารี")
                 .font(Typo.font(10)).foregroundStyle(Palette.muted)
         }
         if c.tags.count >= Store.tagsPerSong {
@@ -186,7 +214,7 @@ struct SetupPanel: View {
                         // Its own ink on the panel, with an outline instead of a fill: the
                         // colour says WHICH tag this will add, while the empty chip keeps "add"
                         // and "remove" apart by shape rather than by reading the ✕.
-                        .foregroundStyle(Palette.tagInk[model.store.tagColor(t) % Palette.tagSlots])
+                        .foregroundStyle(Palette.tagInkAt(model.store.tagColor(t)))
                         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.line)
                             .allowsHitTesting(false))
                         .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -194,6 +222,14 @@ struct SetupPanel: View {
                 }
             }
         }
+    }
+
+    /// `Menu` renders a plain `Button(String)` as a system menu item, which means the colour
+    /// itself cannot be drawn there without a custom label — and a custom label in an AppKit
+    /// menu loses the checkmark idiom. So the row is NAMED and ticked instead, which is also
+    /// the only form that works for someone who cannot tell two of the six apart (§6d).
+    private func colorMenuLabel(_ tag: String, _ tc: TagColor) -> String {
+        (model.store.tagColor(tag) == tc.rawValue ? "✓ " : "") + tc.label
     }
 
     private func markerBlock(_ m: Markers, _ c: SongConfig) -> some View {
@@ -617,10 +653,10 @@ struct TagChip: View {
                 Text(trailing).font(Typo.font(10, latinOnly: true)).opacity(0.75)
             }
         }
-        .foregroundStyle(Palette.tagInk[i % Palette.tagSlots])
+        .foregroundStyle(Palette.tagInkAt(i))
         .padding(.horizontal, compact ? 5 : 8)
         .padding(.vertical, compact ? 1 : 4)
-        .background(Palette.tagFill[i % Palette.tagSlots])
+        .background(Palette.tagFillAt(i))
         .clipShape(RoundedRectangle(cornerRadius: 5))
     }
 }

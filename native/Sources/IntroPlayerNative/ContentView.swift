@@ -370,7 +370,20 @@ struct ContentView: View {
             // `E` is the most consequential key in the app: it disarms the intro-end stop, and
             // keyCode 14 sits next to `R` (15).
             case 14: model.requestMark(.ignoreEnd); model.pulse(PulseID.ignoreEnd)
-            case 35: model.updateConfigQuiet { $0.played.toggle() }; model.pulse(PulseID.played)
+            // `T` is a second binding for Played, asked for because `P` was not discoverable:
+            // the SETUP button showed no key and the transport button read "Mark Played" in
+            // English among Thai labels. Both keys stay — `P` is mnemonic and is what any
+            // existing muscle memory uses.
+            //
+            // **`T` is keyCode 17, one key from `R` (15), which puts the chorus on camera.** It
+            // is bound anyway, and the two-press rule (§11) is deliberately NOT applied, because
+            // it would not help: the mis-press that costs something is reaching for T and
+            // hitting R, and guarding T only guards the harmless direction. Toggling Played
+            // writes no log event, airs nothing and is undone by pressing the key again — so the
+            // key itself needs no guard, and the adjacency is a thing to know rather than a
+            // thing to fix here. If this ever bites, move Played off the QWERTY row; do not
+            // guard `R`, which §11 explains at length.
+            case 35, 17: model.updateConfigQuiet { $0.played.toggle() }; model.pulse(PulseID.played)
             case 36: model.confirmCurrent()                                      // Return
             case 48: model.nextNeedingReview()                                   // Tab
             case 46: model.cycleFocusMarker()                                              // M

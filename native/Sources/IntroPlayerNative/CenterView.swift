@@ -212,7 +212,7 @@ struct CenterView: View {
                 t.font = Typo.font(12)
                 t.foregroundColor = colors.isEmpty
                     ? Palette.muted
-                    : Palette.tagInk[(colors[Store.tagKey(tag)] ?? 0) % Palette.tagSlots]
+                    : Palette.tagInkAt(colors[Store.tagKey(tag)] ?? 0)
                 out += t
             }
         }
@@ -336,18 +336,34 @@ struct CenterView: View {
                 model.player.reveal(config: c)   // deliberately does not mark the song used
             }
             .pulseTarget(PulseID.reveal)
+            // Moved to sit immediately right of Reveal, as asked — it is pressed once per
+            // question, which Reset is not. Two things about that are worth writing down.
+            //
+            // The order is FIXED, and changing it moves muscle memory: §12 records that sliding
+            // transport buttons meant "a click aimed at Reset could land on Reveal". This swap
+            // makes Reveal's right-hand neighbour the harmless toggle instead of Reset, which is
+            // the better of the two arrangements for a slip rightwards — and it makes Played's
+            // left-hand neighbour Reveal, which is the worse one for a slip leftwards. Net: the
+            // button pressed most often is now next to the one that costs a take. Accepted
+            // knowingly; the 12 pt gap is all that separates them.
+            //
+            // **Amber, never green.** This read `Palette.green` when set, which is a live §6d
+            // violation — green means "a human answered correctly" and nothing else, and §12
+            // records that `✓` once meant both "played" and "correct" with two near-identical
+            // glyphs. The SETUP card for the same flag has always been `tintWarn`; these two
+            // now agree.
+            actionButton(c.played ? "✓ เล่นแล้ว" : "ทำเครื่องหมายเล่นแล้ว", "P / T",
+                         c.played ? Palette.tintWarn : Palette.panel2,
+                         c.played ? Palette.amberOnTint : Palette.text,
+                         width: 190) {
+                model.updateConfigQuiet { $0.played.toggle() }
+            }
+            .pulseTarget(PulseID.played)
             actionButton("⟲ Reset", "S", Palette.panel2, Palette.text, width: 150) {
                 model.cancelPending()
                 model.player.reset(config: c)
             }
             .pulseTarget(PulseID.reset)
-            actionButton(c.played ? "✓ Played" : "Mark Played", "P",
-                         c.played ? Palette.green : Palette.panel2,
-                         c.played ? Palette.ink : Palette.text,
-                         width: 190) {
-                model.updateConfigQuiet { $0.played.toggle() }
-            }
-            .pulseTarget(PulseID.played)
         }
         .disabled(model.current == nil)
     }

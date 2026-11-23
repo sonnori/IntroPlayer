@@ -378,7 +378,7 @@ INTROPLAYER_DIAG=1 $BIN --takes        # take model self-check, then the real lo
 INTROPLAYER_DIAG=1 $BIN --timefmt      # typed-field parser: round-trip, accepts, rejects (read-only)
 INTROPLAYER_DIAG=1 $BIN --overview     # overview strip: same data as columnPeaks, caches independent
 INTROPLAYER_DIAG=1 $BIN --notetest     # the note: clamps, merge rule, measured layout, the ※ (§8g)
-INTROPLAYER_DIAG=1 $BIN --tagtest      # tags: derived registry, UNION merge, the 2-line box (§8g)
+INTROPLAYER_DIAG=1 $BIN --tagtest      # tags: registry, UNION merge, the chosen colour, the box (§8g)
 INTROPLAYER_DIAG=1 $BIN --filtertest   # the tag filter narrows the LIST and nothing else (§8g)
 INTROPLAYER_DIAG=1 $BIN --updatecheck  # semver compare, feed resolution, blocked URL schemes (§15)
 INTROPLAYER_DIAG=1 $BIN --updatestage  # download + unpack + verify a real release, then delete (§15)
@@ -524,7 +524,7 @@ property, not the mechanism: amber is YELLOW against a BLUE accent, and deutan l
 blue-yellow axis intact. The real separation is ΔE 67 in light (74 in dark), and the carrier of
 last resort is still the word next to it.
 
-`--palettetest` measures both themes in Swift — 144 assertions over the ladder, text contrast,
+`--palettetest` measures both themes in Swift — 167 assertions over the ladder, text contrast,
 fill-vs-surface, `ink`-on-fill, the tinted chips, and the deutan pairs.
 
 > `Palette.audit` is the list it measures, and it must name **every** value. It first shipped
@@ -1229,6 +1229,10 @@ both the native and the web app — that is what keeps the web fallback usable m
 Dropping the live store into the round folder instead would have recreated §12's clobber problem
 across two machines.
 
+`round.json` also carries `tagColors` — which colour the sender chose for each tag the round
+uses (§8g). Merged silently and additively, with no `DiffRow`, because it changes nothing that
+goes to air.
+
 **Import is a MERGE**, touching only the five question fields. It never writes `played`,
 `resetAt` or the log. This is why session state can stay inside `config.json`: the thing that
 wiped a taping was whole-file handover, not the fact that `played` sits next to `introStart`.
@@ -1414,32 +1418,136 @@ reading and two spellings make the registry's suggestions useless.
 > that is the only thing telling you a state; it does not forbid redundant encoding. **If a
 > chip ever loses its text, the colour has to go with it.**
 >
-> Two things enforce the rest, neither of them a convention:
->
-> - `Palette.tagFill` / `tagInk` contain **no green, red or amber** — the three that carry an
->   outcome or a warning. `--palettetest` measures every tag ink against all three at deutan
->   ΔE ≥ 8, against its own fill at ≥ 4.5:1, and against `panel` for ΔL*. It found four real
->   faults on the first run: three fills that sank into the light theme's pane, and a rose that
->   sat at **ΔE 7.1 from green** for a deutan viewer.
-> - `Store.tagsMaxDistinct` is **8, exactly the number of colours**, so "แต่ละ tag คนละสี" is
->   true rather than nearly true. `addTag` refuses a word that is NEW to the library past the
->   cap and says so; it never refuses a tag the round already uses, or the cap would stop
->   meaning "how many different tags exist" and start meaning "how much tagging you may do".
+> Superseded again, and the second round is the one that matters. The first version of this
+> paragraph kept two guards: no green/red/amber in the ramp, and `tagsMaxDistinct` pinned to
+> the palette size. The owner then asked for **แดง เหลือง เขียว น้ำเงิน ม่วง เทา** and a way
+> to choose which tag gets which. Both guards are gone, and the condition above — the word is
+> always there — is now carrying the whole thing on its own. See the next two sections.
+
+### The six colours, and what dropping the hue exclusion cost
+
+`TagColor` is the named face of `Palette.tagFill` / `tagInk`: **แดง เหลือง เขียว น้ำเงิน ม่วง
+เทา**, in that order. The owner's words, because the picker is the one place a colour has to be
+nameable out loud, on a support call or across a studio floor.
+
+**The old rule was "no tag ink within deutan ΔE 8 of green, red or amber".** A red/yellow/green
+ramp cannot pass it — a red tag is red. What replaces it is a bound on the thing a glance could
+actually misread, and it is **wider**, not looser:
+
+| | old | new |
+|---|---|---|
+| what is measured | the chip's **ink** (small text) | the chip's **fill** (its whole area) |
+| bar | deutan ΔE ≥ 8 | deutan ΔE ≥ **20** |
+| worst real value | — | **29.8** (light เหลือง vs red) |
+
+That works because the three status colours only ever reach the eye as **text and badges**,
+never as a filled chip — so "could this chip be read as a state" is a question about the fill.
+`--palettetest` section 7b asserts it for both themes, plus ink-on-fill ≥ 4.5:1, fill-vs-`panel`
+ΔL\* ≥ 2.0, and that **no two chips are the same chip to a deutan viewer** — `max(fill, ink)`
+ΔE ≥ 4.0 per pair, which is a measurement result rather than a softened bar (see below).
+
+**The cost, measured and printed on every run rather than left in a comment.** For a deutan
+viewer the warm inks sit on top of the status colours — dark เหลือง-vs-amber **ΔE 0.2**,
+แดง-vs-green **1.5**, เขียว-vs-green **3.5** — and on top of each other (แดง-vs-เขียว 4.6,
+น้ำเงิน-vs-ม่วง 5.4, which is §6d's own accent/purple collision in a new place). So **this is
+about four distinguishable groups to a deutan viewer, not six.** The word is the carrier; the
+colour is a scanning aid. That is why `--palettetest` prints the ink table under the heading
+"ราคาที่จ่าย (วัดไว้ ไม่ใช่ข้อสอบ)" — the number nobody asserted is the one that gets forgotten.
+
+Lightness is deliberately **spread** inside each theme rather than held constant, because §6d
+records that this palette's deutan separation comes from the lightness spread and not from hue.
+Dark has room — fills L\* 16–32, chip-vs-chip **5.2–45.6** on the fill alone.
+
+**The light theme is where this got decided, and the first answer was wrong.** `panel` is
+L\* 88.6 and a fill must clear it by 2, so the usable band is *two* bands (79–86.5 and
+90.6–97) with three fills in each. A first pass optimised for separation and produced a
+"ม่วง" at L\* 96 and a "แดง" at C 7 — rendered at the real size they read as **plain white
+chips**, which fails the request outright. Chosen for legible hue instead, pale แดง and pale
+เขียว land **ΔE 2.2** apart: to a deutan viewer, the same colour. Their *inks* are 12.9 apart.
+
+Hence `max(fill, ink)`: in dark the saturated fill carries the identity, in light the ink does.
+Asserting the fill in both themes would have been a number arguing for the palette that fails
+the thing it was asked for — the inverse of §7a3's "re-measure the constant, don't read it off
+the parameter names".
+
+> **ORDER IS THE WIRE FORMAT.** `_settings.tagColors` and `round.json` store the slot **index**.
+> Reordering `TagColor`, `Palette.tagFill` or `Palette.tagInk` silently repaints every tag
+> anyone chose a colour for, on every machine that opens the file. Append; never reorder.
+> `--palettetest` asserts the enum and the ramp are the same length — a name without a colour
+> crashes the picker, a colour without a name is unreachable in it.
+
+**`Store.tagsMaxDistinct` is no longer tied to the palette size**, and that is the point rather
+than an oversight: once the operator picks the colours, two tags sharing one is their decision,
+so keeping the numbers equal would only mean that *naming six colours refused tags that work
+today*. It stays at **8** as a readability bound, and `--tagtest` asserts
+`tagsMaxDistinct >= Palette.tagSlots` — fewer colours than tags is allowed and means a repeat;
+more colours than tags would be dead slots.
 
 ### Which colour a tag gets
 
 `Store.tagColors` maps tag key → slot, derived and cached like `tagsInUse`, never stored.
+`_settings.tagColors` holds only the **choices**, which is a different thing.
 
-**From a hash of the word, not from its position in the registry.** `tagsInUse` is ordered by
-how often each tag is used, so a position-based colour would repaint tags nobody touched every
-time a song gained or lost one. FNV-1a over the UTF-8 of `tagKey` — **not** Swift's `hashValue`,
-which is seeded per process, the identical defect `tagsInUse` already recorded once. Collisions
-take the next free slot, walking the keys in sorted order so the result does not depend on
-dictionary iteration either.
+**The operator's choice is applied first and claims its slot; everything else is a hash of the
+word.** `tagsInUse` is ordered by how often each tag is used, so a position-based colour would
+repaint tags nobody touched every time a song gained or lost one. FNV-1a over the UTF-8 of
+`tagKey` — **not** Swift's `hashValue`, which is seeded per process, the identical defect
+`tagsInUse` already recorded once. Collisions take the next free slot, walking the keys in
+sorted order so the result does not depend on dictionary iteration either.
 
-Being a pure function of the word has a second payoff worth stating: **the setter's screen and
-the operator's screen give the same tag the same colour** without anything travelling in
-`round.json`.
+Claiming the chosen slots before the hash runs is what stops an automatic assignment from
+sitting on a colour a human asked for. **It costs the one property the old version had:** the
+automatic half is no longer a pure function of the word alone — it depends on which slots are
+already claimed, and on whether the library is over-subscribed. So two machines with different
+choices can colour an *unchosen* tag differently, which is precisely why the choices travel in
+`round.json`. Choosing explicitly is what makes the two screens agree.
+
+### Picking it: the chip is a MENU now, not a remove button
+
+Clicking a tag chip in SETUP used to remove the tag immediately. It opens a menu instead — the
+six colours, "อัตโนมัติ", and "เอาแท็กนี้ออกจากเพลงนี้" — and the chip's trailing glyph changed
+from `✕` to `▾` to say so.
+
+That is the **safer** direction, not a compromise for the picker: the one thing a slip could do
+on that chip was destroy part of a signed-off round, and now a slip opens a menu. It is also how
+the colour gets an entry point without putting two different *immediate* meanings a few pt apart
+on one ~60 pt chip — §13 rejected exactly that for "click a chip to filter by it", and a menu is
+not subject to the objection because nothing happens until you choose. Removing a tag is two
+clicks now; that is the price and it is paid in the right direction.
+
+Three details:
+
+- **The menu names the tag, and says "ทุกเพลงที่ใช้แท็กนี้".** The colour is a property of the
+  *tag*, library-wide. Without the header, "set this to red" reads as a change to the song in
+  front of you — and the setter would discover otherwise by seeing another round repaint.
+- **A colour is written through `Store.setTagColor`, a `_settings` write, never `updateConfig`.**
+  `updateConfig` stamps `configured = true, auto = false`, which certifies an unreviewed machine
+  guess as human-reviewed and drops the song out of the `Return`/`Tab` sweep **and** out of the
+  pre-flight's `stillAuto` and `hookDefault` warnings. That is §8g's note trap and §7a4's
+  `applyGuess` trap in a third costume, and a chip's colour is further from a decision about
+  what goes to air than either of them.
+- **`Menu` renders a plain `Button(String)` as a system menu item**, so the colour itself cannot
+  be drawn there without a custom label — and a custom label in an AppKit menu loses the
+  checkmark idiom. The row is named and ticked instead, which is also the only form that works
+  for someone who cannot tell two of the six apart.
+
+### The colours cross the handover, additively and in silence
+
+`RoundPackage.tagColors` carries `tagKey → slot` for **the tags that round uses and that the
+sender actually chose a colour for** — a hash-coloured tag needs nothing in the file, because
+both machines compute the same answer from the word.
+
+`Store.mergeTagColors` applies it: a local choice always wins, and a tag missing from an incoming
+set means "I have nothing to say", never "clear yours" — §8g's rule for the note and the tag
+list, unchanged. The difference is that a colour gets **no `DiffRow`**: it changes nothing that
+goes to air, and a diff row per tag colour would bury the rows that decide what the audience
+hears. Stated plainly so nobody has to rediscover it: **a colour the operator CHANGED does not
+travel back if the setter had already chosen one.** Same safe direction as a removed tag.
+
+The web fallback shows tags as muted text in the note box and gives them no colour — the same
+reasoning as its read-only note (§8g below): one implementation of the slot→colour mapping, not
+two. It never touches `_settings.tagColors`, because it mutates named keys on the object it
+loaded and POSTs the whole thing back.
 
 ### Tags in the song list
 
@@ -1601,7 +1709,7 @@ another to read on the day, and its content is precisely what the contestants mu
 
 ```bash
 INTROPLAYER_DIAG=1 $BIN --notetest   # 66 assertions
-INTROPLAYER_DIAG=1 $BIN --tagtest    # 70 assertions
+INTROPLAYER_DIAG=1 $BIN --tagtest    # 89 assertions
 ```
 
 Both are **read-only**, and by construction rather than by care: every `Store` they build comes
@@ -1634,7 +1742,12 @@ Keyed by **path relative to `songs/`** (a bare filename for loose files). Exampl
                               // update worked, and is the only way to SAY so — §15
     "dismissedUpdate": "",    // version the operator waved off; survives a relaunch — §15
     "dismissedSchema": 0,     // schema number they have already been told about — §15
-    "backupDir": ""           // ALSO copy each launch snapshot here; empty = local only — §5c
+    "backupDir": "",          // ALSO copy each launch snapshot here; empty = local only — §5c
+    "tagColors": { "ยุค 90": 2 }  // which colour the operator CHOSE for a tag — §8g. Keyed by
+                              // Store.tagKey, value = INDEX into Palette.tagFill, so the ORDER
+                              // of that array is a wire format. A tag absent here is coloured
+                              // by a hash of its own word. Max 64 entries; a slot outside the
+                              // running build's ramp is dropped on read, not clamped into it.
   },
   "EP01/SongA.m4a": {
     "introStart": 14.2,   // seconds; intro begins here
@@ -1766,7 +1879,7 @@ explicitly. Pause-on-buzz → Space resumes exactly where it stopped, still in `
 | `R` | Reveal (jump to hook, play on) — deliberately does **not** mark Played, and never stops |
 | `1` / `2` | SE correct / wrong — **also writes the taping log** (§8d) |
 | `L` | Open/close the taping log — a **left-pane swap**, not a sheet (`Esc` closes) |
-| `P` | Toggle Played on current song |
+| `P` / `T` | Toggle Played on current song — **`T` is one key from `R`**, see below |
 | `I` / `O` / `H` | Mark introStart / introEnd / hook at playhead — **confirm-on-second-press while playing** |
 | `Shift` + `←` / `→` | Nudge the **focused** marker by 0.01 s (`AppModel.nudgeStep`) |
 | `M` | Cycle which marker `Shift+←/→` nudges |
@@ -1873,6 +1986,26 @@ and it disarms the intro-end stop outright — which plays the whole song on cam
 
 `R` is not guarded and should not be: §10 calls Reveal the on-camera verb, something the GM
 means to press.
+
+### `T` for Played, and why it is NOT behind the two-press rule
+
+`P` has toggled Played since the native app shipped. It was reported as having no shortcut, which
+is a discoverability defect rather than a missing feature: the SETUP button named no key, and the
+transport button read **"Mark Played"** in English among Thai labels two panes away. Both keys
+are bound now, both are named on both buttons, and the transport button is Thai.
+
+**`T` is keyCode 17, one key from `R` (15), which puts the chorus on camera.** §11 above says
+that if a key is ever added near `R`, the reasoning says to guard the new key. It is deliberately
+**not** guarded here, and the reason is worth keeping because the rule looks like it applies:
+
+- The mis-press that costs something is **reaching for T and hitting R**. A guard on `T` only
+  guards the other direction — reaching for R and hitting T — which costs a toggle.
+- Toggling Played writes **no log event**, airs nothing, and is undone by pressing the key
+  again. Nothing about the key itself needs confirming.
+
+So the adjacency is a thing to know, not a thing a guard fixes. If it ever bites, move Played off
+the QWERTY row; **do not guard `R`** — §11 explains at length why Reveal must stay immediate.
+The same trade shows up in the transport row: see §12's note on moving the Played button.
 
 ### The hook audition (`G`) was removed — and why the argument for it was still right
 
@@ -2347,6 +2480,21 @@ the day it does not help.
   green** for a deutan viewer — a tag that could be read as "a human answered correctly", which
   is the exact confusion the no-colour rule existed to prevent. Adding a value to the audit list
   is not the same as measuring it.
+- **The transport's Played button was `Palette.green` when set** — a live §6d violation that
+  outlived the rule by months. Green means "a human answered correctly" and nothing else, and
+  §12 already records that `✓` once meant both "played" and "correct" with two near-identical
+  glyphs. The SETUP card for the *same flag* has always been `tintWarn`/`amberOnTint`, so the
+  two halves of one toggle disagreed about what colour the state is. Both are amber now.
+  Noticed only because the button was being moved for an unrelated reason — a hue violation in
+  a place nobody is editing does not announce itself, which is the argument for `Palette.audit`
+  naming every value and for a check that can actually fail.
+- **`--tagtest` asserted `Palette.tagSlots == Store.tagsMaxDistinct`**, which encoded "the cap
+  exists so every tag gets its own colour" as an equality. It was true and useful right up to
+  the moment the owner named six colours — at which point the honest change (six colours) would
+  have silently become "the library may now hold only six distinct tags", refusing words that
+  work today. The equality is `>=` now and the cap's doc comment says what it is for instead of
+  what it happens to equal. **An assertion that pins two numbers together outlives the reason
+  they were equal**, and the test is then the thing arguing for the wrong design.
 - **A `ps | grep` that matched its own `grep`** — see the installer entry below; it also makes
   the point that `ps` output is a live process table and anything reading it is in it.
 - Esc did not work inside a text field: the key monitor's `typing` branch returns the event to
@@ -2445,9 +2593,11 @@ Product / UX
 - **The filter offers one tag at a time, not a combination.** Two tags (AND/OR) needs a UI for
   the operator to say which, and nothing has asked for it. The accessor takes a single tag, so
   adding it later means changing `Library.visible` and the strip, not the wiring.
-- **The SETUP tag chips are remove-only** — clicking a chip does not filter by it. Two different
-  meanings a few pt apart on a ~60 pt chip is §12's recurring defect, and the filter already has
-  an unambiguous entry point above the list.
+- **The SETUP tag chip opens a menu** (colour · อัตโนมัติ · remove) and still does not filter by
+  itself. Two different *immediate* meanings a few pt apart on a ~60 pt chip is §12's recurring
+  defect; a menu escapes it because nothing happens until you choose, which is why the colour
+  picker could live there and the filter still cannot. The filter's entry point stays above the
+  list.
 - **A global tag rename/delete** (fixing a typo across a round) is bulk work: no cross-song undo,
   and `afterBulkChange` drops the stack. Out of scope on purpose.
 - **Port the handover UI to the web version.** The web app plays, marks and logs as before and
@@ -2513,7 +2663,7 @@ INTROPLAYER_DIAG=1 $BIN --analyse     # detection + loudness per song
 INTROPLAYER_DIAG=1 $BIN --playtest    # overshoot must be 0.000, ignoreEnd must still bypass
 INTROPLAYER_DIAG=1 $BIN --revealtest  # Reveal plays on, and the intro guard re-arms after it
 INTROPLAYER_DIAG=1 $BIN --grabtest    # two-stage marker rule, 10 assertions
-INTROPLAYER_DIAG=1 $BIN --palettetest # both themes: contrast, ladder, deutan ΔE — 144 assertions
+INTROPLAYER_DIAG=1 $BIN --palettetest # both themes: contrast, ladder, deutan ΔE — 167 assertions
 INTROPLAYER_DIAG=1 $BIN --loudtest    # + the reveal lands on target, 12 assertions — §7a5
 INTROPLAYER_DIAG=1 $BIN --autodetect  # Intro End / Hook guesses with their evidence
 INTROPLAYER_DIAG=1 $BIN --guesstest   # clamps vs NaN/inf/1e19 + the admission rules per song
@@ -2525,7 +2675,7 @@ INTROPLAYER_DIAG=1 $BIN --takes       # running order: synthetic self-check + th
 INTROPLAYER_DIAG=1 $BIN --timefmt     # typed-field parser
 INTROPLAYER_DIAG=1 $BIN --overview    # strip data matches columnPeaks; caches stay independent
 INTROPLAYER_DIAG=1 $BIN --notetest    # note: 66 assertions. Writes NOTHING — Store(rawForTest:)
-INTROPLAYER_DIAG=1 $BIN --tagtest     # tags: 70 assertions, incl. the registry + colour determinism
+INTROPLAYER_DIAG=1 $BIN --tagtest     # tags: 89 assertions, the registry, the chosen colour, the handover
 INTROPLAYER_DIAG=1 $BIN --filtertest  # the filter cannot reach the handover or the pre-flight
 INTROPLAYER_DIAG=1 $BIN --preflight   # the handover checklist
 INTROPLAYER_DIAG=1 $BIN --updatecheck # semver compare + the configured feed (§15)

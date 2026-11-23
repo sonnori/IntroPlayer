@@ -181,6 +181,30 @@ struct LogEvent: Identifiable {
 
 /// One question as it was actually run on set.
 ///
+/// The six tag colours, by name, in the order of `Palette.tagFill` / `Palette.tagInk`.
+///
+/// The names are the owner's own words. **The order is the wire format**: `_settings.tagColors`
+/// and `round.json` carry the slot INDEX, so reordering this — or the two arrays in `Palette` —
+/// silently repaints every tag anyone chose a colour for, on every machine that opens the file.
+/// Append only. `--tagtest` asserts this enum and the ramp are the same length, because a name
+/// without a colour would crash a picker and a colour without a name would be unreachable in it.
+enum TagColor: Int, CaseIterable {
+    case red = 0, yellow, green, blue, purple, grey
+
+    /// Thai, because every label in this app is — and because the picker is the one place the
+    /// colour has to be nameable out loud, on a support call or across a studio floor.
+    var label: String {
+        switch self {
+        case .red:    return "แดง"
+        case .yellow: return "เหลือง"
+        case .green:  return "เขียว"
+        case .blue:   return "น้ำเงิน"
+        case .purple: return "ม่วง"
+        case .grey:   return "เทา"
+        }
+    }
+}
+
 /// The running order IS the record: questions are never played in list order, so "what was opened
 /// first, then what" is the only index the edit room can use against the tape. A take is a
 /// **consecutive run** of log events on one song — grouping by path across the whole session (what
@@ -284,6 +308,14 @@ final class Store {
     var theme: AppTheme = .dark
     var lastPlaylist = ""
     var resetAt: [String: String] = [:]
+    /// Which colour the operator CHOSE for a tag, keyed by `Store.tagKey` → slot index into
+    /// `Palette.tagFill`. A tag absent from here is coloured by the hash in `tagColors`.
+    ///
+    /// Library-wide and in `_settings`, not per song, because a tag's colour is a property of
+    /// the tag: setting it on one song and not another would be a bug with a UI. Written only
+    /// by `setTagColor`, which is a settings write — see the note there for why it must never
+    /// go through `updateConfig`.
+    private(set) var tagColorChoice: [String: Int] = [:]
     /// Where to look for a newer build. Empty = the check is off, which is the default and the
     /// only state that needs no network at all. See §15.
     var updateFeed = ""
@@ -358,6 +390,16 @@ final class Store {
         // Per-key: one bad value used to fail the whole cast, and writeSettings would then erase
         // every reset stamp in the file.
         resetAt = ((s["resetAt"] as? [String: Any]) ?? [:]).compactMapValues { $0 as? String }
+        // Per key, like `resetAt` one line up, and clamped to the slots THIS build has: the
+        // index is the wire format, so a file written by a build with more colours must not be
+        // able to index past the end of the ramp. Bounded, because it crosses machines.
+        tagColorChoice = [:]
+        for (k, v) in ((s["tagColors"] as? [String: Any]) ?? [:]).sorted(by: { $0.key < $1.key }) {
+            guard tagColorChoice.count < Store.tagColorChoiceMax,
+                  let i = v as? Int, i >= 0, i < Palette.tagSlots,
+                  let key = Store.clampTag(k).map(Store.tagKey) else { continue }
+            tagColorChoice[key] = i
+        }
         updateFeed = (s["updateFeed"] as? String) ?? ""
         backupDir = String(((s["backupDir"] as? String) ?? "").prefix(500))
         // A non-numeric or missing value reads as the current schema rather than 0, so a garbled
@@ -436,11 +478,25 @@ final class Store {
     static let tagsPerSong = 6
     /// How many DISTINCT tags a library may hold, §8g.
     ///
-    /// It is exactly the number of colours in `Palette.tagFill`, and that is the whole reason
-    /// it exists: the owner asked for "แต่ละ tag คนละสี", and a cap equal to the palette is what
-    /// makes that true rather than nearly true. Past it, `addTag` refuses a NEW word and says
-    /// so — it never silently reuses a colour, and it never blocks a tag already in the round.
+    /// **It used to be exactly `Palette.tagSlots`, and that is no longer the reason it exists.**
+    /// The cap was equal to the palette so that "แต่ละ tag คนละสี" was true rather than nearly
+    /// true — but once the operator picks the colours (`setTagColor`), two tags sharing one is
+    /// their choice to make, so tying the two numbers together would only mean that naming six
+    /// colours REFUSED tags that work today. It is a readability bound now: eight distinct
+    /// labels is already more than a column of chips can carry. Past it, `addTag` refuses a NEW
+    /// word and says so; it never blocks a tag the round already uses.
+    ///
+    /// `--tagtest` asserts `tagsMaxDistinct >= Palette.tagSlots`, not equality: fewer colours
+    /// than tags is allowed and means a repeat, more colours than tags would be dead slots.
     static let tagsMaxDistinct = 8
+
+    /// How many tag→colour choices a file may carry, §8g.
+    ///
+    /// Generous on purpose, and deliberately NOT pruned when a tag stops being used: a tag
+    /// re-added next week should come back in the colour the setter picked, and a stale entry
+    /// costs one short string. The bound is here because this dictionary crosses machines in
+    /// `round.json`, and everything that crosses a machine boundary gets a bound.
+    static let tagColorChoiceMax = 64
 
     /// nil for anything that is not a usable tag.
     static func clampTag(_ s: String) -> String? {
@@ -544,8 +600,14 @@ final class Store {
     /// in `round.json`.
     ///
     /// Collisions take the next free slot, walking the keys in sorted order so the result does
-    /// not depend on dictionary iteration either. With no more than `tagsMaxDistinct` tags every
-    /// one ends up with a colour of its own.
+    /// not depend on dictionary iteration either.
+    ///
+    /// **`tagColorChoice` wins, and is applied FIRST.** Claiming the chosen slots before the
+    /// hash runs is what stops an automatic assignment from sitting on a colour a human asked
+    /// for. The cost is that the automatic half is no longer a pure function of the word alone —
+    /// it depends on which slots are already claimed — so two machines with different choices
+    /// can colour an unchosen tag differently. That is why the choices travel in `round.json`
+    /// (§8g): choosing explicitly is what makes the two screens agree.
     var tagColors: [String: Int] {
         if let c = tagColorCache { return c }
         let n = max(1, Palette.tagSlots)
@@ -554,6 +616,11 @@ final class Store {
         var keys = Set<String>()
         for c in songs.values { for t in c.tags { keys.insert(Store.tagKey(t)) } }
         for key in keys.sorted() {
+            guard let s = tagColorChoice[key], s >= 0, s < n else { continue }
+            out[key] = s
+            taken[s] = true
+        }
+        for key in keys.sorted() where out[key] == nil {
             var h: UInt64 = 0xcbf2_9ce4_8422_2325
             for b in key.utf8 { h = (h ^ UInt64(b)) &* 0x1000_0000_01b3 }
             var slot = Int(h % UInt64(n)), steps = 0
@@ -563,6 +630,48 @@ final class Store {
         }
         tagColorCache = out
         return out
+    }
+
+    /// Set (or clear, with nil) the colour the operator chose for a tag.
+    ///
+    /// A `_settings` write, never a song write. `updateConfig` stamps `configured = true,
+    /// auto = false`, which would certify an unreviewed machine guess as human-reviewed and
+    /// drop the song out of the `Return`/`Tab` sweep AND out of the pre-flight's `stillAuto`
+    /// and `hookDefault` warnings — §8g records that trap for the note field, and picking a
+    /// chip's colour is even further from a decision about what goes to air.
+    func setTagColor(_ tag: String, _ slot: Int?) {
+        guard let clean = Store.clampTag(tag) else { return }
+        let k = Store.tagKey(clean)
+        if let v = slot, v >= 0, v < Palette.tagSlots {
+            // A new entry past the bound is refused rather than evicting one: eviction would
+            // silently repaint a tag somewhere else in the library.
+            guard tagColorChoice[k] != nil || tagColorChoice.count < Store.tagColorChoiceMax
+            else { return }
+            if tagColorChoice[k] == v { return }
+            tagColorChoice[k] = v
+        } else {
+            if tagColorChoice[k] == nil { return }
+            tagColorChoice.removeValue(forKey: k)
+        }
+        clearTagCaches()
+        settingsChanged()
+    }
+
+    /// Merge colours arriving from another machine, §8g. Additive in one direction only: a tag
+    /// this machine has already chosen a colour for keeps it, and an incoming set that is
+    /// missing a tag means "I have nothing to say", never "clear yours". Returns how many were
+    /// taken, so the receive path can say so rather than changing the screen in silence.
+    @discardableResult
+    func mergeTagColors(_ incoming: [String: Int]) -> Int {
+        var took = 0
+        for (k, v) in incoming.sorted(by: { $0.key < $1.key }) {
+            guard v >= 0, v < Palette.tagSlots, tagColorChoice[k] == nil,
+                  tagColorChoice.count < Store.tagColorChoiceMax else { continue }
+            tagColorChoice[k] = v
+            took += 1
+        }
+        if took > 0 { clearTagCaches(); settingsChanged() }
+        return took
     }
     func tagColor(_ tag: String) -> Int { tagColors[Store.tagKey(tag)] ?? 0 }
     var tagsInUse: [String] {
@@ -691,6 +800,13 @@ final class Store {
             s["backupDir"] = backupDir
         } else if s["backupDir"] is String {
             s.removeValue(forKey: "backupDir")
+        }
+        // Same read-it-before-you-delete-it rule as `resetAt` and `updateFeed` above: only
+        // remove a key we successfully READ as empty.
+        if !tagColorChoice.isEmpty {
+            s["tagColors"] = tagColorChoice
+        } else if s["tagColors"] is [String: Any] {
+            s.removeValue(forKey: "tagColors")
         }
         s["writtenBy"] = AppVersion.short
         if !dismissedUpdate.isEmpty { s["dismissedUpdate"] = dismissedUpdate }

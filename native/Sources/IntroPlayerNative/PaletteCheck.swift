@@ -246,11 +246,30 @@ extension Diagnostics {
                 assertThat("\(fg) บน \(bg) — \(what)", v >= 4.5, String(format: "%.2f:1", v))
             }
 
-            // 7b. The tag chips (§8g). Added with the same mistake as 7: the sixteen values
-            //     went into `Palette.audit` and the suite stayed at 64 assertions, i.e. it
-            //     named them and measured none of them. Three things are checked, because the
-            //     colour is only allowed to exist if it cannot be mistaken for a STATE.
-            print("  7b) ชิปแท็ก — อ่านออก และไม่ชนกับสีที่แปลว่าสถานะ")
+            // 7b. The tag chips (§8g). Added originally with the same mistake as 7 — the
+            //     values went into `Palette.audit` and the suite stayed at 64 assertions, i.e.
+            //     it named them and measured none of them.
+            //
+            //     **The bar MOVED when the owner asked for แดง เหลือง เขียว น้ำเงิน ม่วง เทา.**
+            //     It used to be "every tag INK is at least deutan ΔE 8 from green, red and
+            //     amber", which a red/yellow/green ramp cannot pass by construction — a red
+            //     tag is red. What replaces it is a bound on the thing a glance could actually
+            //     misread: the chip's FILL, which is its whole area, where the status colours
+            //     only ever appear as small text and badges. That bound is far WIDER than the
+            //     one it replaces (20 vs 8), so this is not a relaxation dressed up as a rule.
+            //
+            //     The ink numbers are still measured and PRINTED every run, as the cost of the
+            //     decision rather than as a pass/fail — the same treatment §6d gives the
+            //     accent/purple collision it pins as expected.
+            print("  7b) ชิปแท็ก — อ่านออก, พื้นชิปไม่ถูกอ่านเป็นสถานะ, และแยกกันได้")
+            // A name without a colour crashes the picker; a colour without a name is
+            // unreachable in it. They have to be the same length, and the order IS the wire
+            // format (`_settings.tagColors`, `round.json`), so this is not cosmetic.
+            if dark {
+                assertThat("ชื่อสีแท็กครบตามจำนวนช่อง",
+                           TagColor.allCases.count == Palette.tagSlots,
+                           "\(TagColor.allCases.count) ชื่อ / \(Palette.tagSlots) ช่อง")
+            }
             for i in 0..<Palette.tagSlots {
                 let ink = c("tagInk\(i)", dark: dark), fill = c("tagFill\(i)", dark: dark)
                 let v = ColorMath.contrast(ink, fill)
@@ -258,14 +277,55 @@ extension Diagnostics {
                 // The chip has to read as sitting ON the pane, not as part of it.
                 let sep = abs(ColorMath.lightness(fill) - ColorMath.lightness(c("panel", dark: dark)))
                 assertThat("tagFill\(i) แยกจาก panel", sep >= 2.0, String(format: "ΔL* %.1f", sep))
-                // The one that matters: amber means "the intro-end stop is not armed", green
-                // means a human answered, red means burned. A tag must never be read as any of
-                // them — by a deutan viewer either, which is why this is ΔE and not hue.
+                // The one that matters now. amber means "the intro-end stop is not armed",
+                // green means a human answered, red means burned — and those three reach the
+                // eye as text, never as a filled chip. So the filled chip must not be
+                // mistakable for them, deutan included.
                 for status in ["green", "red", "amber"] {
-                    let d = ColorMath.deutanDeltaE(ink, c(status, dark: dark))
-                    assertThat("tagInk\(i) ไม่ชนกับ \(status)", d >= 8.0,
+                    let d = ColorMath.deutanDeltaE(fill, c(status, dark: dark))
+                    assertThat("tagFill\(i) ไม่ถูกอ่านเป็น \(status)", d >= 20.0,
                                String(format: "ΔE %.1f", d))
                 }
+            }
+            // No two chips may be the SAME chip to a deutan viewer — by SOMETHING, fill or ink.
+            //
+            // `max(fill, ink)` rather than the fill alone, and that is a measurement result, not
+            // a softened bar. In dark the fill is saturated and carries the identity (5.2–45.6
+            // apart). In light the fill is a pale wash in a band `panel` splits in two, and pale
+            // แดง vs pale เขียว comes out ΔE 2.2 — the same colour — while their INKS are 12.9
+            // apart. Asserting the fill in both themes would have forced the light ramp back to
+            // the washed-out version whose "ม่วง" read as white, i.e. it would have used a
+            // number to argue for a palette that fails the thing it was asked for.
+            for i in 0..<Palette.tagSlots {
+                for j in (i + 1)..<Palette.tagSlots {
+                    let df = ColorMath.deutanDeltaE(c("tagFill\(i)", dark: dark),
+                                                    c("tagFill\(j)", dark: dark))
+                    let di = ColorMath.deutanDeltaE(c("tagInk\(i)", dark: dark),
+                                                    c("tagInk\(j)", dark: dark))
+                    assertThat("ชิป \(TagColor(rawValue: i)?.label ?? "\(i)")"
+                               + " ≠ \(TagColor(rawValue: j)?.label ?? "\(j)")",
+                               max(df, di) >= 4.0,
+                               String(format: "พื้น ΔE %.1f · ตัวอักษร ΔE %.1f", df, di))
+                }
+            }
+            // The suggestion chips in SETUP draw the tag's ink on the BARE pane with only an
+            // outline — no fill — so they are a call site this section would otherwise have
+            // named and not measured, which is the `Palette.audit` mistake in miniature. The
+            // panel is the worse of the two surfaces in light, so measure that one.
+            for i in 0..<Palette.tagSlots {
+                let v = ColorMath.contrast(c("tagInk\(i)", dark: dark), c("panel", dark: dark))
+                assertThat("ชิปแนะนำ \(TagColor(rawValue: i)?.label ?? "\(i)") บน panel",
+                           v >= 4.5, String(format: "%.2f:1", v))
+            }
+            print("     — ราคาที่จ่าย (วัดไว้ ไม่ใช่ข้อสอบ): ตัวอักษรในชิปเทียบสีสถานะ")
+            for i in 0..<Palette.tagSlots {
+                let ink = c("tagInk\(i)", dark: dark)
+                let line = ["green", "red", "amber"].map { st in
+                    String(format: "%@ %.1f", st, ColorMath.deutanDeltaE(ink, c(st, dark: dark)))
+                }.joined(separator: "  ")
+                let nm = (TagColor(rawValue: i)?.label ?? "?")
+                    .padding(toLength: 10, withPad: " ", startingAt: 0)
+                print("       \(nm) \(line)")
             }
 
             // 8. the waveform's inside/outside distinction

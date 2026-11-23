@@ -18,6 +18,16 @@ struct RoundPackage {
     /// Keyed by FILE NAME, not by the path under `songs/` — the receiving side may file the round
     /// under a different folder name, and the package's scope is one round anyway.
     var songs: [String: Entry] = [:]
+    /// The colours the sender CHOSE for the tags this round uses, `Store.tagKey` → slot index
+    /// (§8g). Only the chosen ones: a tag coloured by the hash needs nothing in the file,
+    /// because the hash is a pure function of the word and both machines compute the same answer.
+    ///
+    /// Merged ADDITIVELY and SILENTLY on the way in (`Store.mergeTagColors`): a local choice
+    /// always wins, and a tag missing from an incoming set means "I have nothing to say", never
+    /// "clear yours". It gets no `DiffRow`, unlike the note and the tag list, and that is a
+    /// deliberate asymmetry — a colour changes nothing that goes to air, and a diff row per tag
+    /// colour would bury the rows that decide what the audience hears.
+    var tagColors: [String: Int] = [:]
 
     struct Entry {
         var b = SongBase()
@@ -71,6 +81,14 @@ struct RoundPackage {
             }
             p.songs[name] = e
         }
+        // Clamped to the slots THIS build has: the index is the wire format, so a round written
+        // by a build with a longer ramp must not be able to index past the end of ours.
+        for (k, v) in ((o["tagColors"] as? [String: Any]) ?? [:]).sorted(by: { $0.key < $1.key }) {
+            guard p.tagColors.count < Store.tagColorChoiceMax,
+                  let i = v as? Int, i >= 0, i < Palette.tagSlots,
+                  let key = Store.clampTag(k).map(Store.tagKey) else { continue }
+            p.tagColors[key] = i
+        }
         return p
     }
 
@@ -94,6 +112,7 @@ struct RoundPackage {
             ss[name] = d
         }
         out["songs"] = ss
+        if !tagColors.isEmpty { out["tagColors"] = tagColors }
         guard JSONSerialization.isValidJSONObject(out) else {
             throw NSError(domain: "IntroPlayer", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "ข้อมูลไม่ถูกต้อง"])
@@ -317,6 +336,15 @@ enum Handoff {
                 RoundPackage.Entry(b: c.current, configured: c.isConfigured, auto: c.auto,
                                    note: c.note, tags: c.tags)
         }
+        // Scoped to the tags this round carries, not the whole library's palette: `round.json`
+        // describes one round, and a colour for a tag that is not in it would be noise the
+        // receiving side cannot even see the effect of.
+        for (_, e) in p.songs {
+            for t in e.tags {
+                let k = Store.tagKey(t)
+                if let slot = store.tagColorChoice[k] { p.tagColors[k] = slot }
+            }
+        }
         return p
     }
 
@@ -442,6 +470,12 @@ enum Handoff {
             c.base = c.current     // both sides now agree on the signed-off values
             store.set(c, for: path)
         }
+        // Silent and additive, and the only thing here that is NOT gated on `accepted`: see
+        // `RoundPackage.tagColors` for why a colour gets no row. It runs after the loop so a
+        // tag that only arrived with this import is already in the library when its colour
+        // lands — `Store.setTagColor` is unaffected by that, but `tagColors` reads `songs`, and
+        // ordering it the other way would have the cache rebuilt from a library missing the tag.
+        store.mergeTagColors(plan.package.tagColors)
         store.saveNow()
     }
 }

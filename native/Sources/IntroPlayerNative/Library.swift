@@ -2227,8 +2227,10 @@ enum Diagnostics {
         // ---------------------------------------------------- the colour per tag (§8g)
         print("\nสีประจำแท็ก — ต้องคนละสี และต้องเหมือนเดิมทุกครั้ง")
         var raw: [String: Any] = [:]
-        let words = ["ยุค 90", "ยุค 2000", "ผู้หญิงร้อง", "ผู้ชายร้อง",
-                     "แร็ป", "ช้า", "เร็ว", "ฮิตมาก"]
+        // Exactly `Palette.tagSlots` words, so "every tag gets a colour of its own" is a
+        // property the automatic half can actually deliver. The over-subscribed case has its
+        // own block below, because it is a DIFFERENT promise.
+        let words = ["ยุค 90", "ยุค 2000", "ผู้หญิงร้อง", "ผู้ชายร้อง", "แร็ป", "ช้า"]
         for (n, w) in words.enumerated() { raw["EP/\(n).mp3"] = ["tags": [w]] }
         let cs = Store(rawForTest: raw)
         let slots = cs.tagColors
@@ -2247,15 +2249,121 @@ enum Diagnostics {
         check("ใส่เข้ามาคนละลำดับ ได้สีเดิมทุกตัว", slots == slots2)
         // ...and a different library that happens to share a tag gives that tag the same colour,
         // which is what makes the setter's screen and the operator's screen agree without
-        // anything travelling in round.json.
+        // anything travelling in round.json. True only while nothing is over-subscribed and
+        // nobody has CHOSEN a colour — both of those make the automatic half depend on which
+        // slots are already claimed, which is exactly why a choice travels (§8g).
         let lone = Store(rawForTest: ["EP/only.mp3": ["tags": ["ผู้หญิงร้อง"]]]).tagColors
         check("ไลบรารีอื่นที่มีแท็กเดียวกัน ได้สีเดียวกัน",
               lone[Store.tagKey("ผู้หญิงร้อง")] == slots[Store.tagKey("ผู้หญิงร้อง")])
         check("ตัวพิมพ์เล็ก/ใหญ่ถือเป็นแท็กเดียวกัน",
               Store(rawForTest: ["a.mp3": ["tags": ["Pop"]]]).tagColor("pop")
                 == Store(rawForTest: ["a.mp3": ["tags": ["pop"]]]).tagColor("POP"))
-        check("จำนวนสี = เพดานแท็กทั้งไลบรารี", Palette.tagSlots == Store.tagsMaxDistinct,
-              "\(Palette.tagSlots) vs \(Store.tagsMaxDistinct)")
+        // NOT equality any more. The cap used to BE the palette size, so that every tag had a
+        // colour of its own; once the operator picks the colours, two tags sharing one is their
+        // decision, and tying the numbers together would mean naming six colours REFUSED tags
+        // that work today. Fewer colours than tags is allowed; more would be dead slots.
+        check("เพดานแท็ก >= จำนวนสี", Store.tagsMaxDistinct >= Palette.tagSlots,
+              "เพดาน \(Store.tagsMaxDistinct) / สี \(Palette.tagSlots)")
+        // Over-subscribed: more distinct tags than colours. Every tag must still GET a colour —
+        // the failure to avoid is a tag with no slot at all, or a crash from indexing past the
+        // ramp, which is what the `% tagSlots` wrap in `Palette.tagFillAt` is for.
+        var rawMany: [String: Any] = [:]
+        let overSub = words + ["เร็ว", "ฮิตมาก", "เพลงประกอบ"]
+        for (n, w) in overSub.enumerated() { rawMany["EP/m\(n).mp3"] = ["tags": [w]] }
+        let manyStore = Store(rawForTest: rawMany)
+        check("แท็กมากกว่าสี: ทุกแท็กยังได้สี", manyStore.tagColors.count == overSub.count,
+              "\(manyStore.tagColors.count)/\(overSub.count)")
+        check("แท็กมากกว่าสี: สีซ้ำได้ แต่ไม่หลุดช่วง",
+              manyStore.tagColors.values.allSatisfy { $0 >= 0 && $0 < Palette.tagSlots })
+
+        // ------- the operator's own choice
+        print("\nเลือกสีเองได้ — และต้องไม่แตะอย่างอื่น")
+        check("ชื่อสี = จำนวนช่อง", TagColor.allCases.count == Palette.tagSlots,
+              "\(TagColor.allCases.count)/\(Palette.tagSlots)")
+        let pick = Store(rawForTest: ["EP/1.mp3": ["tags": ["ยุค 90", "แร็ป"], "hook": 42.0]])
+        let autoSlot = pick.tagColor("ยุค 90")
+        let wanted = (autoSlot + 3) % Palette.tagSlots
+        pick.setTagColor("ยุค 90", wanted)
+        check("เลือกแล้วได้สีที่เลือก", pick.tagColor("ยุค 90") == wanted,
+              "ขอ \(wanted) ได้ \(pick.tagColor("ยุค 90"))")
+        check("สีที่เลือกถูกจดไว้", pick.tagColorChoice[Store.tagKey("ยุค 90")] == wanted)
+        // The whole safety story for this field: it is a `_settings` write. `updateConfig`
+        // stamps `configured = true, auto = false`, which would certify an unreviewed machine
+        // guess as reviewed and drop the song out of the Return/Tab sweep and both pre-flight
+        // warnings — §8g records that trap for the note, and a chip's colour is further still
+        // from a decision about what goes to air.
+        let after = pick.config(for: "EP/1.mp3")
+        check("เลือกสีแล้วเพลงไม่ถูกแตะ",
+              after.hook == 42.0 && !after.configured && after.tags.count == 2,
+              "hook \(after.hook) configured \(after.configured) tags \(after.tags.count)")
+        // A chosen slot is claimed BEFORE the hash runs, so the automatic half cannot sit on it.
+        check("สีที่เลือกถูกจอง — แท็กอื่นไม่มาทับ",
+              pick.tagColor("แร็ป") != wanted,
+              "แร็ป ได้ \(pick.tagColor("แร็ป")) / จองไว้ \(wanted)")
+        pick.setTagColor("ยุค 90", nil)
+        check("ล้างแล้วกลับไปเป็นอัตโนมัติ", pick.tagColor("ยุค 90") == autoSlot
+              && pick.tagColorChoice[Store.tagKey("ยุค 90")] == nil)
+        pick.setTagColor("ยุค 90", Palette.tagSlots)         // one past the end
+        pick.setTagColor("ยุค 90", -1)
+        check("สลอตนอกช่วงถูกปฏิเสธ", pick.tagColorChoice[Store.tagKey("ยุค 90")] == nil)
+        // The index is the wire format, so a file from a build with a longer ramp must not be
+        // able to point past the end of ours.
+        let fromFile = Store(rawForTest: [
+            "_settings": ["tagColors": ["ยุค 90": 1, "แร็ป": 99, "ช้า": "x"]],
+            "EP/1.mp3": ["tags": ["ยุค 90", "แร็ป", "ช้า"]],
+        ])
+        check("อ่านสีจากไฟล์: ค่าที่ใช้ได้ผ่าน, ค่าเพี้ยนถูกทิ้ง",
+              fromFile.tagColorChoice == [Store.tagKey("ยุค 90"): 1],
+              "\(fromFile.tagColorChoice)")
+        check("ค่าเพี้ยนไม่ทำให้แท็กนั้นไม่มีสี",
+              fromFile.tagColor("แร็ป") >= 0 && fromFile.tagColor("แร็ป") < Palette.tagSlots)
+
+        // ------- across the handover (§8e)
+        print("\nสีเดินทางไปกับ round.json — เติมเท่านั้น ไม่ลบของปลายทาง")
+        let sender = Store(rawForTest: [
+            "EP/a.mp3": ["tags": ["ยุค 90"]], "EP/b.mp3": ["tags": ["แร็ป"]],
+            "EP/c.mp3": ["tags": ["ไม่อยู่ในรอบนี้"]],
+        ])
+        sender.setTagColor("ยุค 90", 2)
+        sender.setTagColor("ไม่อยู่ในรอบนี้", 5)
+        let pkg = Handoff.package(round: "EP", paths: ["EP/a.mp3", "EP/b.mp3"],
+                                  store: sender, by: "test")
+        check("ส่งสีของแท็กที่อยู่ในรอบ", pkg.tagColors[Store.tagKey("ยุค 90")] == 2)
+        check("ไม่ส่งสีของแท็กที่ไม่ได้อยู่ในรอบ",
+              pkg.tagColors[Store.tagKey("ไม่อยู่ในรอบนี้")] == nil, "\(pkg.tagColors)")
+        check("ไม่ส่งแท็กที่ไม่ได้เลือกสีไว้ (สีจากชื่อคิดเองได้ทั้งสองเครื่อง)",
+              pkg.tagColors[Store.tagKey("แร็ป")] == nil, "\(pkg.tagColors)")
+        // Additive in one direction only: a local choice wins, and a tag MISSING from the
+        // incoming set means "I have nothing to say", never "clear yours" (§8g).
+        let receiver = Store(rawForTest: [
+            "EP/a.mp3": ["tags": ["ยุค 90"]], "EP/b.mp3": ["tags": ["แร็ป"]],
+        ])
+        receiver.setTagColor("ยุค 90", 4)
+        receiver.setTagColor("แร็ป", 1)
+        let took = receiver.mergeTagColors(pkg.tagColors)
+        check("ปลายทางเลือกไว้แล้ว ของตัวเองชนะ", receiver.tagColor("ยุค 90") == 4
+              && took == 0, "ได้ \(receiver.tagColor("ยุค 90")) รับมา \(took)")
+        check("แท็กที่ไม่ได้ส่งมา ไม่ถูกล้าง", receiver.tagColor("แร็ป") == 1)
+        let blank = Store(rawForTest: ["EP/a.mp3": ["tags": ["ยุค 90"]]])
+        check("ปลายทางยังไม่เลือก รับสีของผู้ส่ง",
+              blank.mergeTagColors(pkg.tagColors) == 1 && blank.tagColor("ยุค 90") == 2,
+              "ได้ \(blank.tagColor("ยุค 90"))")
+        check("สลอตนอกช่วงที่มาจากไฟล์รอบ ถูกทิ้งตอน merge",
+              Store(rawForTest: ["EP/a.mp3": ["tags": ["ยุค 90"]]])
+                  .mergeTagColors([Store.tagKey("ยุค 90"): 99]) == 0)
+        // The wire format itself, through real JSON. The one thing this suite writes, and it is
+        // a file in the SYSTEM temp dir — never the project, never config.json.
+        do {
+            let tmp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("rgf-tagtest-\(UUID().uuidString).json")
+            try pkg.write(to: tmp)
+            defer { try? FileManager.default.removeItem(at: tmp) }
+            let back = RoundPackage.read(tmp)
+            check("round.json ไป-กลับ สีไม่หาย", back?.tagColors == pkg.tagColors,
+                  "\(back?.tagColors ?? [:])")
+        } catch {
+            check("round.json ไป-กลับ สีไม่หาย", false, "\(error)")
+        }
 
         print("\nผ่าน \(pass)  ตก \(fail)")
         print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")

@@ -567,7 +567,7 @@ final class AppModel: ObservableObject {
         // tagging you may do".
         if !store.tagsInUse.contains(where: { Store.tagKey($0) == k }),
            store.tagsInUse.count >= Store.tagsMaxDistinct {
-            flash("มีแท็กครบ \(Store.tagsMaxDistinct) แบบแล้ว (สีมีเท่านี้) — ใช้แท็กเดิม หรือเลิกใช้อันที่ไม่ได้ใช้ก่อน")
+            flash("มีแท็กครบ \(Store.tagsMaxDistinct) แบบในไลบรารีแล้ว — ใช้แท็กเดิม หรือเลิกใช้อันที่ไม่ได้ใช้ก่อน")
             return false
         }
         updateConfigQuiet { $0.tags = Store.clampTags($0.tags + [t]) }
@@ -579,6 +579,17 @@ final class AppModel: ObservableObject {
         guard current != nil else { return }
         let k = Store.tagKey(t)
         updateConfigQuiet { $0.tags.removeAll { Store.tagKey($0) == k } }
+        saveState = "saving…"
+    }
+
+    /// Which colour a tag gets, §8g. Library-wide, so it deliberately does NOT go through
+    /// `updateConfig*` and does not touch the current song at all — see `Store.setTagColor`.
+    ///
+    /// `objectWillChange` by hand because `store` is a plain class, not a published property:
+    /// every other write to it arrives here through `updateConfig*`, which does the same.
+    func setTagColor(_ tag: String, _ slot: Int?) {
+        objectWillChange.send()
+        store.setTagColor(tag, slot)
         saveState = "saving…"
     }
 
