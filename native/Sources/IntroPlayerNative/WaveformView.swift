@@ -131,6 +131,37 @@ enum Palette {
 
     /// Every value above, by name, so `--palettetest` can measure the real thing rather than a
     /// copy of it that drifts.
+    // MARK: - tag chips (§8g)
+    //
+    // §8g's original rule was that a tag carries NO colour, because §6d gives every hue exactly
+    // one meaning and an amber chip beside the "unreviewed guess" badge dilutes the one warning
+    // that must never be ignored. Asked for by the owner, and granted on one condition that
+    // keeps §6d intact: **a tag chip always shows its word**, so the colour is redundant
+    // encoding — a scanning aid, never the sole carrier. What §6d forbids is a hue that is the
+    // only thing telling you a state; it does not forbid a second cue on something already
+    // named in full.
+    //
+    // The ramp deliberately contains NO green, red or amber: those three carry an outcome or a
+    // warning, and they are the ones a glance must never misread. What is left is the cool half
+    // of the wheel plus two neutrals, which is also why `tagsMaxDistinct` is 8 — the cap exists
+    // so every tag in a library can have a colour of its OWN rather than sharing one.
+    //
+    // Fill and ink are a pair per slot: the ink is measured against its own fill in
+    // `--palettetest`, which is where the `cyanOnTint` lesson came from (an accent on a tint of
+    // its own hue cannot reach 4.5:1, because only lightness can separate them and the tint has
+    // already spent it staying distinct from the surface behind it).
+    static let tagFill: [Color] = [
+        dyn(0x0F3A38, 0xD2EFEC), dyn(0x152F45, 0xD6E8F6), dyn(0x1E2A5A, 0xC8D4F5),
+        dyn(0x33214F, 0xDAC7F4), dyn(0x3C1F42, 0xEDC6F2), dyn(0x4A1E33, 0xFBDCE8),
+        dyn(0x2B3240, 0xE0E5EC), dyn(0x123043, 0xD6ECF5),
+    ]
+    static var tagSlots: Int { tagFill.count }
+    static let tagInk: [Color] = [
+        dyn(0x6FD9D0, 0x0E5551), dyn(0x7FBEE8, 0x14496B), dyn(0x9FB4FF, 0x263573),
+        dyn(0xC2A3FF, 0x4F2D85), dyn(0xDFA0E8, 0x61246B), dyn(0xFF9CC2, 0x93105F),
+        dyn(0xAFBCCF, 0x3A424E), dyn(0x74C7E8, 0x0C4A62),
+    ]
+
     static let audit: [(String, UInt32, UInt32)] = [
         ("bg", 0x0A0C10, 0xC7CDD3), ("panel", 0x161A22, 0xD9DFE6),
         ("panel2", 0x222834, 0xE8EFF5), ("panel3", 0x2F3747, 0xD2D8DF),
@@ -145,6 +176,17 @@ enum Palette {
         ("header", 0xC8402A, 0xBA2616),
         ("waveOut", 0x3E4A61, 0xA2ACB9), ("waveIn", 0x5C6D8C, 0x7C8693),
         ("hook", 0xA06BFF, 0x6E3FCD),
+        // Named one by one rather than appended as a group: `Palette.audit` first shipped
+        // naming none of the ten tints a change had added, so the suite passed 44/44 while
+        // measuring nothing the change introduced (§6d).
+        ("tagFill0", 0x0F3A38, 0xD2EFEC), ("tagInk0", 0x6FD9D0, 0x0E5551),
+        ("tagFill1", 0x152F45, 0xD6E8F6), ("tagInk1", 0x7FBEE8, 0x14496B),
+        ("tagFill2", 0x1E2A5A, 0xC8D4F5), ("tagInk2", 0x9FB4FF, 0x263573),
+        ("tagFill3", 0x33214F, 0xDAC7F4), ("tagInk3", 0xC2A3FF, 0x4F2D85),
+        ("tagFill4", 0x3C1F42, 0xEDC6F2), ("tagInk4", 0xDFA0E8, 0x61246B),
+        ("tagFill5", 0x4A1E33, 0xFBDCE8), ("tagInk5", 0xFF9CC2, 0x93105F),
+        ("tagFill6", 0x2B3240, 0xE0E5EC), ("tagInk6", 0xAFBCCF, 0x3A424E),
+        ("tagFill7", 0x123043, 0xD6ECF5), ("tagInk7", 0x74C7E8, 0x0C4A62),
         ("tintCyan", 0x12303F, 0xBDE3EE), ("tintCyanLine", 0x2A6B80, 0x6AAABB),
         ("tintWarn", 0x2A2418, 0xF3D9B0), ("tintWarnLine", 0x6B5A33, 0xBB9C64),
         ("tintSelect", 0x243049, 0xD3D9F7), ("tintSelectText", 0xCFE0FF, 0x214583),

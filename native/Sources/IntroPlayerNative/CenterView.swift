@@ -153,7 +153,7 @@ struct CenterView: View {
         if model.current != nil {
             let c = model.config()
             if !c.note.isEmpty || !c.tags.isEmpty {
-                Text(CenterView.noteText(c))
+                Text(CenterView.noteText(c, colors: model.store.tagColors))
                     .multilineTextAlignment(.leading)
                     // Two lines is the height budget above, for ANY content. Nothing else
                     // bounds it: not `Store.noteMax`, not `tagsPerSong`.
@@ -182,7 +182,7 @@ struct CenterView: View {
     ///
     /// `static` so `--tagtest` can measure exactly what the pane will draw — §6d's rule that a
     /// layout claim gets measured, not asserted.
-    static func noteText(_ c: SongConfig) -> AttributedString {
+    static func noteText(_ c: SongConfig, colors: [String: Int] = [:]) -> AttributedString {
         var out = AttributedString("")
         if !c.note.isEmpty {
             var a = AttributedString(c.note)
@@ -191,13 +191,30 @@ struct CenterView: View {
             out += a
         }
         if !c.tags.isEmpty {
-            var t = AttributedString((c.note.isEmpty ? "" : "   ")
-                                     + c.tags.joined(separator: " · "))
-            // Muted and a step smaller, never a hue: §6d gives every hue exactly one meaning
-            // and a tag has no state to report.
-            t.font = Typo.font(12)
-            t.foregroundColor = Palette.muted
-            out += t
+            if !c.note.isEmpty {
+                var gap = AttributedString("   ")
+                gap.font = Typo.font(12)
+                out += gap
+            }
+            // Each tag in its own ink (§8g). It used to be one muted run for the lot, on the
+            // rule that a tag has no state to report — which is still true, and is exactly why
+            // this is safe: the WORD is always there, so the colour is a second cue on
+            // something already named, never the only carrier. `--palettetest` holds the other
+            // half, that no tag ink can be mistaken for green, red or amber.
+            for (n, tag) in c.tags.enumerated() {
+                if n > 0 {
+                    var sep = AttributedString(" · ")
+                    sep.font = Typo.font(12)
+                    sep.foregroundColor = Palette.dim
+                    out += sep
+                }
+                var t = AttributedString(tag)
+                t.font = Typo.font(12)
+                t.foregroundColor = colors.isEmpty
+                    ? Palette.muted
+                    : Palette.tagInk[(colors[Store.tagKey(tag)] ?? 0) % Palette.tagSlots]
+                out += t
+            }
         }
         return out
     }

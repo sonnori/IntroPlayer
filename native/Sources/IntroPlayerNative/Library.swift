@@ -2155,6 +2155,39 @@ enum Diagnostics {
                   us < 500, String(format: "%.1f µs", us))
         }
 
+        // ---------------------------------------------------- the colour per tag (§8g)
+        print("\nสีประจำแท็ก — ต้องคนละสี และต้องเหมือนเดิมทุกครั้ง")
+        var raw: [String: Any] = [:]
+        let words = ["ยุค 90", "ยุค 2000", "ผู้หญิงร้อง", "ผู้ชายร้อง",
+                     "แร็ป", "ช้า", "เร็ว", "ฮิตมาก"]
+        for (n, w) in words.enumerated() { raw["EP/\(n).mp3"] = ["tags": [w]] }
+        let cs = Store(rawForTest: raw)
+        let slots = cs.tagColors
+        check("แท็ก \(words.count) แบบ ได้สีครบทุกตัว", slots.count == words.count)
+        check("ไม่มีสองแท็กใช้สีเดียวกัน (เท่ากับจำนวนสีพอดี)",
+              Set(slots.values).count == words.count,
+              "ใช้ไป \(Set(slots.values).count) จาก \(Palette.tagSlots) สี")
+        check("ทุกสลอตอยู่ในช่วงของจานสี",
+              slots.values.allSatisfy { $0 >= 0 && $0 < Palette.tagSlots })
+        // The determinism that `tagsInUse` already had to learn once: Swift seeds Dictionary
+        // hashing per process, so anything derived by walking `songs.values` must not depend on
+        // the order it comes back in. Rebuilding from a DIFFERENT insertion order must agree.
+        var raw2: [String: Any] = [:]
+        for (n, w) in words.enumerated().reversed() { raw2["EP/z\(n).mp3"] = ["tags": [w]] }
+        let slots2 = Store(rawForTest: raw2).tagColors
+        check("ใส่เข้ามาคนละลำดับ ได้สีเดิมทุกตัว", slots == slots2)
+        // ...and a different library that happens to share a tag gives that tag the same colour,
+        // which is what makes the setter's screen and the operator's screen agree without
+        // anything travelling in round.json.
+        let lone = Store(rawForTest: ["EP/only.mp3": ["tags": ["ผู้หญิงร้อง"]]]).tagColors
+        check("ไลบรารีอื่นที่มีแท็กเดียวกัน ได้สีเดียวกัน",
+              lone[Store.tagKey("ผู้หญิงร้อง")] == slots[Store.tagKey("ผู้หญิงร้อง")])
+        check("ตัวพิมพ์เล็ก/ใหญ่ถือเป็นแท็กเดียวกัน",
+              Store(rawForTest: ["a.mp3": ["tags": ["Pop"]]]).tagColor("pop")
+                == Store(rawForTest: ["a.mp3": ["tags": ["pop"]]]).tagColor("POP"))
+        check("จำนวนสี = เพดานแท็กทั้งไลบรารี", Palette.tagSlots == Store.tagsMaxDistinct,
+              "\(Palette.tagSlots) vs \(Store.tagsMaxDistinct)")
+
         print("\nผ่าน \(pass)  ตก \(fail)")
         print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
     }

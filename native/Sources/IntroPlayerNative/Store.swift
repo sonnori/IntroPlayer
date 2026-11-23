@@ -343,7 +343,7 @@ final class Store {
     private func apply(raw incoming: [String: Any]) {
         raw = incoming
         songs.removeAll()
-        tagCache = nil
+        clearTagCaches()
         for (k, v) in raw where k != "_settings" {
             guard let d = v as? [String: Any] else { continue }
             songs[k] = Store.decode(d)
@@ -434,6 +434,13 @@ final class Store {
     /// there and the tags are what truncate. A tag long enough to be a sentence is a note.
     static let tagMax = 24
     static let tagsPerSong = 6
+    /// How many DISTINCT tags a library may hold, §8g.
+    ///
+    /// It is exactly the number of colours in `Palette.tagFill`, and that is the whole reason
+    /// it exists: the owner asked for "แต่ละ tag คนละสี", and a cap equal to the palette is what
+    /// makes that true rather than nearly true. Past it, `addTag` refuses a NEW word and says
+    /// so — it never silently reuses a colour, and it never blocks a tag already in the round.
+    static let tagsMaxDistinct = 8
 
     /// nil for anything that is not a usable tag.
     static func clampTag(_ s: String) -> String? {
@@ -519,6 +526,45 @@ final class Store {
     /// rather than by remembering to add a call — unlike `invalidateStatus()`, which the caller
     /// has to get right.
     private var tagCache: [String]?
+    private var tagColorCache: [String: Int]?
+    /// Clearing the two together, in one call, so "the caches are cleared in exactly these four
+    /// places" stays a property you can check by reading this file rather than by remembering.
+    func clearTagCaches() { tagCache = nil; tagColorCache = nil }
+
+    /// Which colour slot each tag gets (§8g).
+    ///
+    /// From a HASH of the word, never from its position in `tagsInUse`: that list is ordered by
+    /// how often each tag is used, so position-based colours would repaint tags nobody touched
+    /// every time a song gained or lost one.
+    ///
+    /// FNV-1a over the UTF-8 of `tagKey`, NOT Swift's `hashValue`, which is seeded per process —
+    /// the identical defect `tagsInUse` already recorded once, where the surviving spelling of a
+    /// tag changed at random between launches. Being a pure function of the word also means the
+    /// setter and the operator see the same colour for the same tag without anything travelling
+    /// in `round.json`.
+    ///
+    /// Collisions take the next free slot, walking the keys in sorted order so the result does
+    /// not depend on dictionary iteration either. With no more than `tagsMaxDistinct` tags every
+    /// one ends up with a colour of its own.
+    var tagColors: [String: Int] {
+        if let c = tagColorCache { return c }
+        let n = max(1, Palette.tagSlots)
+        var taken = [Bool](repeating: false, count: n)
+        var out: [String: Int] = [:]
+        var keys = Set<String>()
+        for c in songs.values { for t in c.tags { keys.insert(Store.tagKey(t)) } }
+        for key in keys.sorted() {
+            var h: UInt64 = 0xcbf2_9ce4_8422_2325
+            for b in key.utf8 { h = (h ^ UInt64(b)) &* 0x1000_0000_01b3 }
+            var slot = Int(h % UInt64(n)), steps = 0
+            while taken[slot] && steps < n { slot = (slot + 1) % n; steps += 1 }
+            taken[slot] = true
+            out[key] = slot
+        }
+        tagColorCache = out
+        return out
+    }
+    func tagColor(_ tag: String) -> Int { tagColors[Store.tagKey(tag)] ?? 0 }
     var tagsInUse: [String] {
         if let c = tagCache { return c }
         // Counted per EXACT spelling, then the most-used spelling represents the key, ties
@@ -582,7 +628,7 @@ final class Store {
         // to delete it.
         if !c.tags.isEmpty { d["tags"] = c.tags }
         else if d["tags"] is [Any] { d.removeValue(forKey: "tags") }
-        tagCache = nil
+        clearTagCaches()
         if let b = c.base {
             d["base"] = ["introStart": round2(b.introStart), "introEnd": round2(b.introEnd),
                          "hook": round2(b.hook), "trimDb": b.trimDb, "ignoreEnd": b.ignoreEnd]
@@ -596,14 +642,14 @@ final class Store {
     func removeConfig(for path: String) {
         songs.removeValue(forKey: path)
         raw.removeValue(forKey: path)
-        tagCache = nil
+        clearTagCaches()
         scheduleSave()
     }
 
     func pruneOrphans(existing: Set<String>) -> Int {
         let gone = songs.keys.filter { !existing.contains($0) }
         for k in gone { songs.removeValue(forKey: k); raw.removeValue(forKey: k) }
-        if !gone.isEmpty { tagCache = nil; scheduleSave() }
+        if !gone.isEmpty { clearTagCaches(); scheduleSave() }
         return gone.count
     }
 

@@ -150,23 +150,18 @@ struct SetupPanel: View {
             FlowRow(spacing: 6, lineSpacing: 6) {
                 ForEach(c.tags, id: \.self) { t in
                     Button { model.removeTag(t) } label: {
-                        HStack(spacing: 5) {
-                            Text(t).font(Typo.font(12))
-                            Text("✕").font(Typo.font(10, latinOnly: true))
-                                .foregroundStyle(Palette.dim)
-                        }
-                        .padding(.horizontal, 8).padding(.vertical, 4)
-                        .contentShape(Rectangle())
+                        TagChip(tag: t, trailing: "✕").contentShape(Rectangle())
                     }
                     .buttonStyle(PressStyle(corner: 6))
-                    .foregroundStyle(Palette.text)
-                    .background(Palette.panel3)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.line)
-                        .allowsHitTesting(false))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
                     .help("คลิกเพื่อเอาแท็กนี้ออก")
                 }
             }
+        }
+        // The library-wide cap is invisible until it bites, and when it bites it refuses a word
+        // the setter just typed — so it is stated while there is still room to plan.
+        if model.store.tagsInUse.count >= Store.tagsMaxDistinct - 2 {
+            Text("ใช้ไปแล้ว \(model.store.tagsInUse.count)/\(Store.tagsMaxDistinct) แบบ (สีมีเท่านี้)")
+                .font(Typo.font(10)).foregroundStyle(Palette.muted)
         }
         if c.tags.count >= Store.tagsPerSong {
             // The add field is gone at the cap, so the count has to be said here or the row
@@ -183,12 +178,15 @@ struct SetupPanel: View {
                 FlowRow(spacing: 6, lineSpacing: 6) {
                     ForEach(suggestions.prefix(10), id: \.self) { t in
                         Button { model.addTag(t) } label: {
-                            Text("+ \(t)").font(Typo.font(11))
+                            Text("+ \(t)").font(Typo.font(12))
                                 .padding(.horizontal, 7).padding(.vertical, 3)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(PressStyle(corner: 6))
-                        .foregroundStyle(Palette.muted)
+                        // Its own ink on the panel, with an outline instead of a fill: the
+                        // colour says WHICH tag this will add, while the empty chip keeps "add"
+                        // and "remove" apart by shape rather than by reading the ✕.
+                        .foregroundStyle(Palette.tagInk[model.store.tagColor(t) % Palette.tagSlots])
                         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.line)
                             .allowsHitTesting(false))
                         .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -580,6 +578,36 @@ struct MarkerTimeField: View {
 ///
 /// What is NOT shared with `MarkerTimeField`: this never touches `focusMarker`. A note is not a
 /// marker, and taking marker focus here would silently redirect the next `Shift+←/→`.
+/// One tag, drawn the same way everywhere it appears (§8g).
+///
+/// **The word is always there, and that is what lets the colour exist at all.** §8g's original
+/// rule was that a tag carries no colour, because §6d gives each hue one meaning. The colour is
+/// allowed here because it is a second cue on something already named in full — never the only
+/// carrier of anything. If a chip ever loses its text, the colour has to go with it.
+struct TagChip: View {
+    @EnvironmentObject var model: AppModel
+    let tag: String
+    var compact = false
+    var trailing: String? = nil
+
+    var body: some View {
+        // `Typo.font` clamps Thai to 12 pt (§6d: below that the mark stack of a Thai word fuses
+        // into a grey smear at 1x), so "compact" buys padding, never type size.
+        let i = model.store.tagColor(tag)
+        HStack(spacing: 4) {
+            Text(tag).font(Typo.font(12)).lineLimit(1)
+            if let trailing {
+                Text(trailing).font(Typo.font(10, latinOnly: true)).opacity(0.75)
+            }
+        }
+        .foregroundStyle(Palette.tagInk[i % Palette.tagSlots])
+        .padding(.horizontal, compact ? 5 : 8)
+        .padding(.vertical, compact ? 1 : 4)
+        .background(Palette.tagFill[i % Palette.tagSlots])
+        .clipShape(RoundedRectangle(cornerRadius: 5))
+    }
+}
+
 struct NoteField: View {
     @EnvironmentObject var model: AppModel
     let value: String

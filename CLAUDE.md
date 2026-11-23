@@ -524,7 +524,7 @@ property, not the mechanism: amber is YELLOW against a BLUE accent, and deutan l
 blue-yellow axis intact. The real separation is ΔE 67 in light (74 in dark), and the carrier of
 last resort is still the word next to it.
 
-`--palettetest` measures both themes in Swift — 64 assertions over the ladder, text contrast,
+`--palettetest` measures both themes in Swift — 144 assertions over the ladder, text contrast,
 fill-vs-surface, `ink`-on-fill, the tinted chips, and the deutan pairs.
 
 > `Palette.audit` is the list it measures, and it must name **every** value. It first shipped
@@ -1351,10 +1351,61 @@ a call.
 `Store.tagKey` (`localizedLowercase`), because "Pop" and "pop" on one song are one tag by any
 reading and two spellings make the registry's suggestions useless.
 
-> **A tag carries no colour, and that is a rule, not a style choice.** A user-colourable chip
-> hands §6d's mechanism — one meaning per hue — to someone with no reason to know it exists.
-> An amber chip beside the "unreviewed guess" badge, or a green one beside `✓ ตอบถูก`, is how
-> the one warning that must never be ignored gets diluted.
+> **Superseded, and the replacement is narrower than it looks.** This used to read "a tag
+> carries no colour, and that is a rule": a user-colourable chip hands §6d's mechanism — one
+> meaning per hue — to someone with no reason to know it exists, and an amber chip beside the
+> "unreviewed guess" badge is how the one warning that must never be ignored gets diluted.
+>
+> The owner asked for a colour per tag. It is granted on one condition, which is what keeps
+> §6d intact: **a tag chip always shows its word.** The colour is therefore a second cue on
+> something already named in full — a scanning aid, never the sole carrier. §6d forbids a hue
+> that is the only thing telling you a state; it does not forbid redundant encoding. **If a
+> chip ever loses its text, the colour has to go with it.**
+>
+> Two things enforce the rest, neither of them a convention:
+>
+> - `Palette.tagFill` / `tagInk` contain **no green, red or amber** — the three that carry an
+>   outcome or a warning. `--palettetest` measures every tag ink against all three at deutan
+>   ΔE ≥ 8, against its own fill at ≥ 4.5:1, and against `panel` for ΔL*. It found four real
+>   faults on the first run: three fills that sank into the light theme's pane, and a rose that
+>   sat at **ΔE 7.1 from green** for a deutan viewer.
+> - `Store.tagsMaxDistinct` is **8, exactly the number of colours**, so "แต่ละ tag คนละสี" is
+>   true rather than nearly true. `addTag` refuses a word that is NEW to the library past the
+>   cap and says so; it never refuses a tag the round already uses, or the cap would stop
+>   meaning "how many different tags exist" and start meaning "how much tagging you may do".
+
+### Which colour a tag gets
+
+`Store.tagColors` maps tag key → slot, derived and cached like `tagsInUse`, never stored.
+
+**From a hash of the word, not from its position in the registry.** `tagsInUse` is ordered by
+how often each tag is used, so a position-based colour would repaint tags nobody touched every
+time a song gained or lost one. FNV-1a over the UTF-8 of `tagKey` — **not** Swift's `hashValue`,
+which is seeded per process, the identical defect `tagsInUse` already recorded once. Collisions
+take the next free slot, walking the keys in sorted order so the result does not depend on
+dictionary iteration either.
+
+Being a pure function of the word has a second payoff worth stating: **the setter's screen and
+the operator's screen give the same tag the same colour** without anything travelling in
+`round.json`.
+
+### Tags in the song list
+
+Shown under the title, up to three chips then `+n`.
+
+**The line is reserved for every row as soon as the library holds any tag**, rather than
+appearing only on tagged songs. §8c clamps titles to two lines because uniform row heights are
+what make a column scannable under pressure; rows that grow only where a tag happens to be is
+the worst of both — it moves every row below it and still lines nothing up. A library with no
+tags keeps exactly the row it had, because the flag is `tagsInUse.isEmpty` (cached, one lookup
+per row).
+
+**The chips are display-only.** Clicking one to filter was considered and rejected for the
+reason §13 already records for the SETUP chips: two different meanings a few pt apart on a small
+chip is §12's recurring defect, and the filter already has an unambiguous entry point above the
+list. That entry point is now labelled **`⌕ กรองตามแท็ก`** rather than `⌕ แท็ก` — the menu only
+exists once the round HAS a tag, so the first person ever to use tags has never seen the control
+before, and the shortest possible label is the worst possible one.
 
 > **`tagsInUse` cannot use "the first spelling we see".** It walks `songs.values`, and Swift
 > seeds Dictionary hashing per process — so that rule is not a rule, and "Rock" vs "rock" would
@@ -1498,7 +1549,7 @@ another to read on the day, and its content is precisely what the contestants mu
 
 ```bash
 INTROPLAYER_DIAG=1 $BIN --notetest   # 66 assertions
-INTROPLAYER_DIAG=1 $BIN --tagtest    # 62 assertions
+INTROPLAYER_DIAG=1 $BIN --tagtest    # 70 assertions
 ```
 
 Both are **read-only**, and by construction rather than by care: every `Store` they build comes
@@ -2222,6 +2273,23 @@ the day it does not help.
   actually holds (§8g).
 - The tag add field is hidden at the per-song cap, which also hid the `n/6` counter next to it —
   so hitting the limit looked like the row had broken. It says so in words instead.
+- **`Palette.audit` grew by sixteen values and `--palettetest` stayed at 64 assertions.** The
+  per-tag colours were added, named in the audit list, and measured by nothing — the identical
+  failure §6d records for the ten tints the light theme added. Completing it took the suite to
+  **144** and immediately found four real faults: `tagFill2/3/4` sat 1.1–1.6 ΔL\* from `panel`
+  in the LIGHT theme, i.e. chips that do not read as chips, and `tagInk5` was **ΔE 7.1 from
+  green** for a deutan viewer — a tag that could be read as "a human answered correctly", which
+  is the exact confusion the no-colour rule existed to prevent. Adding a value to the audit list
+  is not the same as measuring it.
+- **A `ps | grep` that matched its own `grep`** — see the installer entry below; it also makes
+  the point that `ps` output is a live process table and anything reading it is in it.
+- Esc did not work inside a text field: the key monitor's `typing` branch returns the event to
+  the field before the Esc cascade is reached, so the only way out of the note or tag field was
+  the mouse. On a shoot the keyboard IS the instrument — `S`, `R`, `P`, `I`/`O`/`H`, `L` all die
+  while a field holds focus, and the note is the first field in this app where typing letters
+  LOOKS like it is working, so nothing on screen says the transport is dead. Esc now resigns
+  first responder from anywhere, which fires each field's blur-cancels contract (§11) and so
+  keeps Esc's meaning: discard, do not write.
 - **A "does this glyph exist?" check that could not fail**, written to protect the song list's
   `※` and caught by its own negative control on the first run. Two wrong ways to ask it, both
   of which look right: `CTFontGetGlyphsForCharacters` queries the **base** font only and knows
@@ -2379,7 +2447,7 @@ INTROPLAYER_DIAG=1 $BIN --analyse     # detection + loudness per song
 INTROPLAYER_DIAG=1 $BIN --playtest    # overshoot must be 0.000, ignoreEnd must still bypass
 INTROPLAYER_DIAG=1 $BIN --revealtest  # Reveal plays on, and the intro guard re-arms after it
 INTROPLAYER_DIAG=1 $BIN --grabtest    # two-stage marker rule, 10 assertions
-INTROPLAYER_DIAG=1 $BIN --palettetest # both themes: contrast, ladder, deutan ΔE — 44 assertions
+INTROPLAYER_DIAG=1 $BIN --palettetest # both themes: contrast, ladder, deutan ΔE — 144 assertions
 INTROPLAYER_DIAG=1 $BIN --loudtest    # BS.1770 coefficients + on-air spread + limiter headroom
 INTROPLAYER_DIAG=1 $BIN --autodetect  # Intro End / Hook guesses with their evidence
 INTROPLAYER_DIAG=1 $BIN --guesstest   # clamps vs NaN/inf/1e19 + the admission rules per song
@@ -2391,7 +2459,7 @@ INTROPLAYER_DIAG=1 $BIN --takes       # running order: synthetic self-check + th
 INTROPLAYER_DIAG=1 $BIN --timefmt     # typed-field parser
 INTROPLAYER_DIAG=1 $BIN --overview    # strip data matches columnPeaks; caches stay independent
 INTROPLAYER_DIAG=1 $BIN --notetest    # note: 66 assertions. Writes NOTHING — Store(rawForTest:)
-INTROPLAYER_DIAG=1 $BIN --tagtest     # tags: 63 assertions, incl. the registry's determinism
+INTROPLAYER_DIAG=1 $BIN --tagtest     # tags: 70 assertions, incl. the registry + colour determinism
 INTROPLAYER_DIAG=1 $BIN --filtertest  # the filter cannot reach the handover or the pre-flight
 INTROPLAYER_DIAG=1 $BIN --preflight   # the handover checklist
 INTROPLAYER_DIAG=1 $BIN --updatecheck # semver compare + the configured feed (§15)

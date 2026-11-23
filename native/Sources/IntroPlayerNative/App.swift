@@ -147,6 +147,10 @@ struct IntroPlayerApp: App {
                 // The stored theme has to reach NSApp before the first paint, or the window
                 // chrome opens on the system appearance and snaps a frame later.
                 .onAppear { model.applyTheme() }
+                // Zero-size, draws nothing: it exists to stop AppKit handing first responder to
+                // the first text field in the key-view loop when the window opens. See
+                // `DropInitialFocus` — the app was opening with every letter shortcut dead.
+                .background(DropInitialFocus().frame(width: 0, height: 0))
         }
         .defaultSize(width: 1600, height: 900)
         .commands { CommandGroup(replacing: .newItem) {} }   // no File > New

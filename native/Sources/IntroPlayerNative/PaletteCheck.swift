@@ -246,6 +246,28 @@ extension Diagnostics {
                 assertThat("\(fg) บน \(bg) — \(what)", v >= 4.5, String(format: "%.2f:1", v))
             }
 
+            // 7b. The tag chips (§8g). Added with the same mistake as 7: the sixteen values
+            //     went into `Palette.audit` and the suite stayed at 64 assertions, i.e. it
+            //     named them and measured none of them. Three things are checked, because the
+            //     colour is only allowed to exist if it cannot be mistaken for a STATE.
+            print("  7b) ชิปแท็ก — อ่านออก และไม่ชนกับสีที่แปลว่าสถานะ")
+            for i in 0..<Palette.tagSlots {
+                let ink = c("tagInk\(i)", dark: dark), fill = c("tagFill\(i)", dark: dark)
+                let v = ColorMath.contrast(ink, fill)
+                assertThat("tagInk\(i) บน tagFill\(i)", v >= 4.5, String(format: "%.2f:1", v))
+                // The chip has to read as sitting ON the pane, not as part of it.
+                let sep = abs(ColorMath.lightness(fill) - ColorMath.lightness(c("panel", dark: dark)))
+                assertThat("tagFill\(i) แยกจาก panel", sep >= 2.0, String(format: "ΔL* %.1f", sep))
+                // The one that matters: amber means "the intro-end stop is not armed", green
+                // means a human answered, red means burned. A tag must never be read as any of
+                // them — by a deutan viewer either, which is why this is ΔE and not hue.
+                for status in ["green", "red", "amber"] {
+                    let d = ColorMath.deutanDeltaE(ink, c(status, dark: dark))
+                    assertThat("tagInk\(i) ไม่ชนกับ \(status)", d >= 8.0,
+                               String(format: "ΔE %.1f", d))
+                }
+            }
+
             // 8. the waveform's inside/outside distinction
             let wd = abs(ColorMath.lightness(c("waveIn", dark: dark))
                          - ColorMath.lightness(c("waveOut", dark: dark)))

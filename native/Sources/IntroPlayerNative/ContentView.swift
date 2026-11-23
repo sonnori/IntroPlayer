@@ -311,6 +311,22 @@ struct ContentView: View {
                     default: break
                     }
                 }
+                // Esc hands the keyboard back to the app, always, from any field.
+                //
+                // It used to fall through to `return e` here, so the only documented way out of
+                // a field was the mouse: Return commits and releases, but there was nothing for
+                // "I clicked in here and now every letter I press is text". On a shoot the
+                // keyboard IS the instrument — S, R, P, I/O/H, L all die while a field holds
+                // focus, and the note field is the first one in the window that makes typing
+                // letters look like it is working.
+                //
+                // Resigning fires each field's `onChange(of: focused)`, which is where blur
+                // cancels uncommitted text (§11) — so Esc keeps exactly the meaning it has
+                // everywhere else here: discard, do not write.
+                if e.keyCode == 53 {
+                    NSApp.keyWindow?.makeFirstResponder(nil)
+                    return nil
+                }
                 return e
             }
             if e.keyCode == 53 {                                                 // Esc
@@ -552,7 +568,10 @@ struct SongListView: View {
                     }
                 }
             } label: {
-                Text(model.tagFilter.isEmpty ? "⌕ แท็ก" : "⌕ \(model.tagFilter)")
+                // Spelled out rather than "⌕ แท็ก". The menu only exists once the round HAS a
+                // tag, so the first person to use tags has never seen this control before and
+                // the shortest possible label is the worst possible one.
+                Text(model.tagFilter.isEmpty ? "⌕ กรองตามแท็ก" : "⌕ \(model.tagFilter)")
                     .font(Typo.font(11))
                     .foregroundStyle(model.tagFilter.isEmpty ? Palette.muted : Palette.text)
                     .padding(.horizontal, 8).padding(.vertical, 3)
@@ -707,6 +726,40 @@ struct ColumnView: View {
     }
 }
 
+/// Stops the window from opening with the keyboard pointed at a text field.
+///
+/// When a window is first placed on screen AppKit gives first responder to
+/// `initialFirstResponder`, and when that is nil it selects the first view in the key-view
+/// loop instead. In this window that is now the SETUP panel's note field, so the app opened
+/// with every letter shortcut — S, R, P, I/O/H, L, Z, M — typing instead of acting. The note
+/// is the first field here where typing letters LOOKS like it is working, so nothing on
+/// screen said the transport was dead; reported from the first real install, by someone who
+/// had clicked nothing.
+///
+/// The fix is at the window, not in the field: the field must stay focusable by a click or
+/// §11's contract (Return commits, blur cancels) has nothing to hang on. Pointing
+/// `initialFirstResponder` at a view that refuses first responder is what makes AppKit leave
+/// the window itself holding it.
+///
+/// `makeNSView` runs once per identity, so this cannot steal focus from someone who is typing
+/// — which a per-update version would, since `ContentView` is re-initialised on every model
+/// publish (§6c).
+struct DropInitialFocus: NSViewRepresentable {
+    final class Blocker: NSView {
+        override var acceptsFirstResponder: Bool { false }
+    }
+    func makeNSView(context: Context) -> NSView {
+        let v = Blocker(frame: .zero)
+        DispatchQueue.main.async { [weak v] in
+            guard let v, let w = v.window else { return }
+            w.initialFirstResponder = v
+            if w.firstResponder is NSTextView { w.makeFirstResponder(nil) }
+        }
+        return v
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
 struct SongRow: View {
     @EnvironmentObject var model: AppModel
     let path: String
@@ -717,7 +770,10 @@ struct SongRow: View {
         let orders = model.takeOrders(of: path)
         let used = st != nil || c.played
         let active = model.current == path
-        HStack(alignment: .top, spacing: 8) {
+        // Cached behind `tagsInUse`, so this is one lookup per row rather than a walk.
+        let showTags = !model.store.tagsInUse.isEmpty
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .top, spacing: 8) {
             // Leading edge: the trailing badge slot is already contested by ✓/✗/ตั้งค่าแล้ว.
             Text(c.hasOnsiteEdits ? "✎" : " ")
                 .font(Typo.font(10)).foregroundStyle(Palette.amber)
@@ -773,6 +829,31 @@ struct SongRow: View {
                 .font(Typo.font(10))
                 .foregroundStyle(badgeColor(st, used, c))
                 .fixedSize()
+            }
+            // The tags, under the title (§8g). Asked for after the feature shipped, because a
+            // setter scanning a round could not see which song carried what without opening it.
+            //
+            // The line is RESERVED for every row as soon as the library has any tag at all,
+            // rather than appearing only on tagged songs. §8c's reason for clamping titles to
+            // two lines applies here with more force: uniform row heights are what make a
+            // column scannable under pressure, and rows that grow only where a tag happens to
+            // be is the worst of both — it moves every row below it and it still does not line
+            // anything up. A library with no tags keeps exactly the row it had.
+            if showTags {
+                HStack(spacing: 4) {
+                    // Three, then a count. A fourth chip pushes the row past the title's own
+                    // width at the 3-column layout this list is sized for.
+                    ForEach(c.tags.prefix(3), id: \.self) { TagChip(tag: $0, compact: true) }
+                    if c.tags.count > 3 {
+                        Text("+\(c.tags.count - 3)")
+                            .font(Typo.font(10, mono: true, latinOnly: true))
+                            .foregroundStyle(Palette.dim)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.leading, 52)       // past the two glyph slots and the track number
+                .frame(height: 18)
+            }
         }
         .opacity(used ? 0.45 : 1)
         .padding(.horizontal, 10).padding(.vertical, 9)

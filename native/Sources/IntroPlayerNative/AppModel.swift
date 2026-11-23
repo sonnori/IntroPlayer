@@ -561,6 +561,15 @@ final class AppModel: ObservableObject {
             flash("แท็กได้สูงสุด \(Store.tagsPerSong) อันต่อเพลง — เอาอันที่ไม่ใช้ออกก่อน")
             return false
         }
+        // The library-wide cap, §8g. Only a word that is NEW to the library counts against it:
+        // putting a tag the round already uses onto one more song must never be refused, or the
+        // cap would stop meaning "how many different tags exist" and start meaning "how much
+        // tagging you may do".
+        if !store.tagsInUse.contains(where: { Store.tagKey($0) == k }),
+           store.tagsInUse.count >= Store.tagsMaxDistinct {
+            flash("มีแท็กครบ \(Store.tagsMaxDistinct) แบบแล้ว (สีมีเท่านี้) — ใช้แท็กเดิม หรือเลิกใช้อันที่ไม่ได้ใช้ก่อน")
+            return false
+        }
         updateConfigQuiet { $0.tags = Store.clampTags($0.tags + [t]) }
         saveState = "saving…"
         return true
