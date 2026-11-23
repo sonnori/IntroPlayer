@@ -180,8 +180,22 @@ _exe_paths() {
 # `IntroPlayer [2]` produces an uncompilable pattern, whereupon pgrep exits non-zero with no
 # output and the check fails OPEN — swapping files under a running app, which is §12's clobber
 # of config.json. The space in the bundle name is harmless either way; the brackets are not.
+# The `ps` snapshot is taken into a variable FIRST, and that is the whole function.
+#
+# `ps ... | grep -F -- "$PATTERN"` starts both sides of the pipe at once, so `ps` lists the
+# very `grep` it is feeding — and that grep carries the pattern in its own argv. The check
+# therefore matched itself and reported the app as running with nothing running at all.
+# Measured before the fix: 300 runs, 300 false positives. Not a race — every time, which means
+# this installer could not install, ever, on any machine.
+#
+# It survived 125 green assertions because the harness's `ps` stub printed only the line the
+# test wanted and nothing else, i.e. it stood in for the ANSWER rather than for `ps`, omitting
+# the one property that breaks this code: that `ps` lists every process, including the ones in
+# this pipeline. Same family as Palette.audit naming none of the values it was added for.
 _pid_matching() {
-  ps -Ao pid=,command= 2>/dev/null \
+  local snap
+  snap="$(ps -Ao pid=,command= 2>/dev/null)"
+  printf '%s\n' "$snap" \
     | grep -F -- "$1" \
     | awk '{print $1}' \
     | grep -vx -e "$$" -e "$PPID" \

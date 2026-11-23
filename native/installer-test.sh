@@ -20,6 +20,16 @@ ZIP="$PROJ/dist/IntroPlayer-$VER.zip"
 APPB="$(sed -n 's/^APPBUNDLE="\(.*\)"$/\1/p' "$PROJ/native/installer.command" | head -1)"
 [ -n "$APPB" ] || { echo "อ่าน APPBUNDLE จาก installer.command ไม่ได้"; exit 2; }
 LEGACYB="IntroPlayerNative.app"
+# With a faithful `ps` stub the suite now sees this machine's real processes, so a genuinely
+# running app would fail the cases that assume nothing is running. That is a true statement
+# about the environment rather than a flake, so say it here instead of failing obscurely later.
+if REALPS="$(/bin/ps -Ao command= 2>/dev/null)"; then
+  if printf '%s\n' "$REALPS" | grep -Fq -- "$APPB/Contents/MacOS/IntroPlayerNative"; then
+    echo "✗ มีแอปเปิดอยู่บนเครื่องนี้ — ปิดก่อน (Cmd+Q) แล้วรันใหม่"
+    echo "  ชุดทดสอบอ่านตาราง process จริง จึงต้องไม่มีแอปของเราเปิดค้างอยู่"
+    exit 2
+  fi
+fi
 PASS=0; FAIL=0
 ok()   { echo "   ok   $1"; PASS=$((PASS+1)); }
 bad()  { echo "   ✗    $1"; FAIL=$((FAIL+1)); }
@@ -58,9 +68,17 @@ EOS
 # apart — with the old blanket pattern they could not be, which left the scope distinction the
 # whole `_exe_paths` refactor is built around with zero coverage, and meant the LEGACY arm of
 # that loop was never reached in any of the cases.
+# It emits the REAL process table and then the fabricated line, and that ordering is not
+# cosmetic. The previous stub printed ONLY the fabricated line, i.e. it stood in for the
+# answer the test wanted rather than for `ps` — omitting the one property of `ps` that breaks
+# the caller: it lists EVERY process, including the `grep` sitting on the other end of the
+# pipe reading its output, which carries the search pattern in its own argv. The installer
+# therefore matched itself and refused with nothing running, 300 times out of 300, while this
+# suite reported 125/125. A stub that cannot reproduce the environment cannot test against it.
 cat > "$BASE/bin/ps" <<'EOS'
 #!/bin/bash
-# STUB_RUNNING_PATH=<full command line> pretends exactly that process is alive.
+/bin/ps "$@" 2>/dev/null
+# STUB_RUNNING_PATH=<full command line> pretends exactly that process is alive, on top.
 [ -n "${STUB_RUNNING_PATH:-}" ] && echo "99999 ${STUB_RUNNING_PATH}"
 exit 0
 EOS
@@ -166,6 +184,12 @@ echo "=== 4. the real update ==="
 fresh_target
 STUB_ANSWERS="อัปเดต|ปิด" run "$BASE/log4" "$SRC"; rc=$?
 check "exit 0 (rc=$rc)" '[ "$rc" = "0" ]'
+# Named rather than left implicit in `exit 0`. The running-app check used to match the `grep`
+# reading `ps`'s own output, so it refused on every machine with nothing running — and the
+# only thing that would have caught it here was a case asserting the refusal did NOT fire.
+# "It exited 0, so it cannot have refused" is true and tells you nothing about why when it
+# stops being true.
+check "ไม่ได้อ้างว่าแอปเปิดอยู่ ทั้งที่ไม่มีอะไรเปิด" '! grep -q "ยังเปิดอยู่" "$BASE/log4"'
 echo "   --- the promise: data byte-identical ---"
 data_intact
 check "se/ ที่ผู้ใช้เปลี่ยนเอง ไม่ถูกทับ" '[ "$(shasum -a 256 < "$TARGET/se/correct.mp3")" = "$SE_BEFORE" ]'
