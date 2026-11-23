@@ -280,6 +280,21 @@ enum Library {
     }
 
     /// Columns split a round by the leading digit of the filename: 1xx / 2xx / everything else.
+    /// Narrow a list of paths to those carrying `tag`. An empty tag is the identity, which is
+    /// what makes "no filter" need no branch at the call sites.
+    ///
+    /// A free function and not a method on `AppModel`, so `--filtertest` can exercise it without
+    /// building an `AppModel` — which would run the launch snapshot and could let `guessRest`
+    /// write to the operator's real config. Matching is on `Store.tagKey`, so a difference in
+    /// Latin case never hides a song.
+    static func visible(_ paths: [String], tag: String, store: Store) -> [String] {
+        guard !tag.isEmpty else { return paths }
+        let k = Store.tagKey(tag)
+        return paths.filter { p in
+            store.config(for: p).tags.contains { Store.tagKey($0) == k }
+        }
+    }
+
     /// Display-only — nothing is stored per column.
     static let columnLabels = ["1xx", "2xx", "3xx + อื่นๆ"]
     static func column(of p: String) -> Int {
@@ -331,7 +346,7 @@ enum Diagnostics {
         guard let pkg = RoundPackage.read(url) else { print("   ✗ unreadable"); return }
         let plan = Handoff.plan(pkg, round: round, paths: paths, store: store)
         print("   rows: \(plan.rows.count)  unchanged: \(plan.unchanged.count)  fresh: \(plan.fresh.count)")
-        guard plan.rows.count == 1, let row = plan.rows.first, row.field == .hook else {
+        guard plan.rows.count == 1, let row = plan.rows.first, row.field == .marker(.hook) else {
             print("   ✗ expected one hook row"); return
         }
         print("   \(Library.baseName(row.path))  \(row.field.label)  mine \(row.mine) / theirs \(row.theirs)")
@@ -1585,6 +1600,562 @@ enum Diagnostics {
         // Obj-C exception (see `Loudness.measure`) and the process never reached these two
         // lines at all. A suite that cannot print its own verdict reads exactly like a suite
         // that passed.
+        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+    }
+
+    // MARK: - the setter's note
+
+    /// `SongConfig.note` — the sentence the setter writes for the operator to read as they open
+    /// the question (§9).
+    ///
+    /// **READ-ONLY.** Every `Store` here is built with `init(rawForTest:)`, which cannot write;
+    /// that is what lets this exercise `set`'s delete guards and `Handoff.apply` (which ends in
+    /// `saveNow()`) against controlled values instead of the operator's real file.
+    static func noteTest() {
+        var pass = 0, fail = 0
+        func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+            if ok { pass += 1 } else { fail += 1 }
+            print("   \(ok ? "ok  " : "✗   ")\(label)\(detail.isEmpty ? "" : "  — " + detail)")
+        }
+
+        // 1 ------------------------------------------------------------------ clampNote
+        print("1) clampNote — สิ่งที่โน้ตต้องทนตอนเข้ามา")
+        let long = String(repeating: "ก", count: Store.noteMax + 40)
+        let cases: [(String, String, String)] = [
+            ("ข้อความธรรมดา", "ฝั่งซ้ายน่าจะได้เปรียบ", "ฝั่งซ้ายน่าจะได้เปรียบ"),
+            ("ตัดช่องหน้าหลัง", "   ยุค 90   ", "ยุค 90"),
+            ("\\n → เว้นวรรค", "a\nb", "a b"),
+            ("\\r\\n → ช่องเดียว ไม่ใช่สอง", "a\r\nb", "a b"),
+            ("\\t → เว้นวรรค", "a\tb", "a b"),
+            ("U+2028 → เว้นวรรค", "a\u{2028}b", "a b"),
+            ("ว่างเปล่า", "", ""),
+            ("มีแต่ช่องว่าง", "  \n\t  ", ""),
+            ("ยาวเกิน → ตัดที่ \(Store.noteMax)", long, String(repeating: "ก", count: Store.noteMax)),
+        ]
+        for (label, input, want) in cases {
+            let got = Store.clampNote(input)
+            check(label, got == want, got.isEmpty ? "\"\"" : got.debugDescription)
+            check("  ^ เข้า JSON ได้",
+                  JSONSerialization.isValidJSONObject(["note": got]))
+        }
+        // The cap counts grapheme clusters, which is the unit the operator sees. §8f records
+        // the same fact for the cover-art token floor: Thai above-marks fold into their base.
+        let cluster = "ขี้แง"
+        check("วรรณยุกต์ไทยรวมกับพยัญชนะ — \(cluster) นับเป็น 3 ตัว",
+              cluster.count == 3, "\(cluster.count)")
+        // NFC on the way in, or two visually identical strings compare unequal and the handover
+        // diff offers a row where nothing changed.
+        let decomposed = "e\u{301}clair"
+        check("NFC — ตัวประกอบรวมเป็นตัวเดียว",
+              Store.clampNote(decomposed) == "\u{e9}clair"
+                  && Store.clampNote(decomposed).count == 6,
+              "\(decomposed.count) → \(Store.clampNote(decomposed).count) ตัว")
+
+        // 2 -------------------------------------------------------- it is not a marker
+        print("\n2) โน้ตไม่ใช่ marker — ห้ามพาเพลงหลุดจากรอบตรวจ")
+        check("ค่าเริ่มต้นว่าง", SongConfig().note.isEmpty)
+        var guessed = SongConfig()
+        guessed.auto = true                      // the app guessed this one; still needs a human
+        guessed.note = "คนรุ่น 40+ รู้แน่"
+        check("เขียนโน้ตแล้ว isConfigured ยัง false", !guessed.isConfigured)
+        check("เขียนโน้ตแล้ว auto ยัง true", guessed.auto)
+        var signed = SongConfig()
+        signed.configured = true
+        signed.base = signed.current
+        signed.note = "แก้ทีหลัง"
+        check("โน้ตไม่ขึ้นป้าย แก้ที่กอง (onsiteEdits ว่าง)", signed.onsiteEdits.isEmpty)
+
+        // 3 ---------------------------------------------- the raw merge and its delete guard
+        print("\n3) merge เข้า raw — คือสิ่งที่เคยลบ resetAt หายไปทั้งไฟล์")
+        let key = "EP00/x.mp3"
+        let st = Store(rawForTest: [
+            key: ["introStart": 3.0, "introEnd": 18.0, "hook": 61.0,
+                  "note": "เดิม", "somethingNewerBuildsWrite": ["a", "b"]],
+        ])
+        check("อ่าน note จากไฟล์ได้", st.config(for: key).note == "เดิม")
+        var c3 = st.config(for: key)
+        c3.note = "ใหม่"
+        st.set(c3, for: key)
+        let d3 = st.raw[key] as? [String: Any] ?? [:]
+        check("เขียนทับแล้วอ่านกลับมาเหมือนเดิม", (d3["note"] as? String) == "ใหม่")
+        check("คีย์ที่ build อื่นเขียนยังรอด", d3["somethingNewerBuildsWrite"] != nil)
+        c3.note = ""
+        st.set(c3, for: key)
+        check("ลบโน้ต → คีย์หายจากไฟล์",
+              (st.raw[key] as? [String: Any])?["note"] == nil)
+        // The guard that matters: a note this build cannot READ must not be deleted. `set` runs
+        // on every marker edit, so an unguarded removeValue would wipe it on the first drag.
+        let weird = Store(rawForTest: [key: ["introStart": 0.0, "introEnd": 15.0,
+                                             "note": ["บรรทัด 1", "บรรทัด 2"]]])
+        check("note ที่ไม่ใช่ String → อ่านเป็นว่าง", weird.config(for: key).note.isEmpty)
+        var w = weird.config(for: key)
+        w.introStart = 1.0                        // an ordinary marker edit
+        weird.set(w, for: key)
+        check("แก้ marker แล้ว note ของ build อื่นยังอยู่",
+              (weird.raw[key] as? [String: Any])?["note"] is [Any])
+
+        // 4 --------------------------------------------------- round.json, additive merge
+        print("\n4) การส่งต่อ — ว่างที่เข้ามา = ไม่มีความเห็น ไม่ใช่ ลบ")
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("notetest-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        /// local note, incoming note, expected row?, value if accepted, value if rejected
+        let table: [(String, String, Bool, String, String)] = [
+            ("",  "",  false, "",  ""),
+            ("",  "X", true,  "X", ""),
+            ("Y", "",  false, "Y", "Y"),      // ← the load-bearing row
+            ("Y", "Y", false, "Y", "Y"),
+            ("Y", "Z", true,  "Z", "Y"),
+        ]
+        for (mine, theirs, wantRow, ifYes, ifNo) in table {
+            let label = "เครื่องนี้ \(mine.isEmpty ? "—" : mine)  รับมา \(theirs.isEmpty ? "—" : theirs)"
+            for accept in [true, false] {
+                let s = Store(rawForTest: [key: ["introStart": 0.0, "introEnd": 15.0,
+                                                 "configured": true, "played": true,
+                                                 "note": mine]])
+                var pkg = RoundPackage()
+                pkg.round = "EP00"
+                var e = RoundPackage.Entry()
+                e.b = s.config(for: key).current
+                e.note = theirs
+                pkg.songs[Library.baseName(key)] = e
+                guard (try? pkg.write(to: tmp)) != nil,
+                      let reread = RoundPackage.read(tmp) else {
+                    check(label + " (เขียน/อ่าน round.json)", false); continue
+                }
+                let plan = Handoff.plan(reread, round: "EP00", paths: [key], store: s)
+                let noteRows = plan.rows.filter { $0.field == .note }
+                if accept {
+                    check(label + " → ขึ้นแถวให้เลือก \(wantRow ? "ใช่" : "ไม่")",
+                          noteRows.count == (wantRow ? 1 : 0), "แถว \(noteRows.count)")
+                }
+                Handoff.apply(plan, accepted: accept ? Set(plan.rows.map(\.id)) : [], store: s)
+                let got = s.config(for: key)
+                check("   └ \(accept ? "รับ" : "ไม่รับ") → \(got.note.isEmpty ? "—" : got.note)",
+                      got.note == (accept ? ifYes : ifNo),
+                      "ควรเป็น \((accept ? ifYes : ifNo).isEmpty ? "—" : (accept ? ifYes : ifNo))")
+                check("   └ ไม่แตะ played", got.played)
+            }
+        }
+
+        // A song the receiving side has never seen takes the sender's note with no question,
+        // exactly like its markers.
+        do {
+            let s = Store(rawForTest: [:])
+            var pkg = RoundPackage()
+            var e = RoundPackage.Entry()
+            e.b = SongBase(introStart: 2, introEnd: 20, hook: 70, trimDb: 0, ignoreEnd: false)
+            e.note = "เพลงใหม่ ยังไม่เคยมี"
+            pkg.songs[Library.baseName(key)] = e
+            let plan = Handoff.plan(pkg, round: "EP00", paths: [key], store: s)
+            Handoff.apply(plan, accepted: [], store: s)
+            check("เพลงใหม่ (fresh) รับโน้ตมาเลยโดยไม่ต้องติ้ก",
+                  s.config(for: key).note == e.note, s.config(for: key).note)
+        }
+
+        // A hand-edited round.json goes through the same clamp as everything else.
+        do {
+            let dirty = "a\nb" + String(repeating: "ก", count: Store.noteMax)
+            var pkg = RoundPackage()
+            var e = RoundPackage.Entry(); e.b = SongBase(); e.note = dirty
+            pkg.songs["x.mp3"] = e
+            try? pkg.write(to: tmp)
+            let back = RoundPackage.read(tmp)?.songs["x.mp3"]?.note ?? "#"
+            check("round.json ที่แก้มือ → ผ่าน clampNote",
+                  back == Store.clampNote(dirty) && back.count <= Store.noteMax,
+                  "\(back.count) ตัว")
+        }
+
+        // 5 ----------------------------------------------------------- the layout claim
+        print("\n5) ความกว้างจริง — cap กับกล่องในแถบกลาง")
+        // 520 pt box, 10 pt padding each side, 3 pt edge bar.
+        let avail: CGFloat = 520 - 10 - 10 - 3
+        let f = Typo.nsFont(13)
+        func lines(_ s: String) -> (CGFloat, Double) {
+            let w = NSAttributedString(string: s, attributes: [.font: f]).size().width
+            return (w, Double((w / avail).rounded(.up)))
+        }
+        let thai = String(("ฝั่งซ้ายน่าจะได้เปรียบ ดังมากยุค 90 คนรุ่น 40+ รู้แน่ เข้าเรื่องช้าหน่อยรอห้อง "
+            + "ห้องเรียนสมัยม.ต้น ถ้าไม่มีใครตอบเก็บไว้เล่นท้าย").prefix(Store.noteMax))
+        let padded = thai + String(repeating: "ก", count: max(0, Store.noteMax - thai.count))
+        let (tw, tl) = lines(padded)
+        check("ไทยยาวเต็ม cap (\(padded.count) ตัว) พอดี 2 บรรทัด", tl <= 2,
+              String(format: "%.0f pt / %.0f pt → %.0f บรรทัด", tw, avail, tl))
+        // And the honest other half: the cap is NOT what bounds the height. 120 Latin capitals
+        // are far wider than 120 Thai clusters, so `.lineLimit(2)` is the guarantee and this
+        // number is the reason it has to stay.
+        let (ww, wl) = lines(String(repeating: "W", count: Store.noteMax))
+        print(String(format: "   (กรณีเลวร้ายสุด: W x%d = %.0f pt → %.0f บรรทัด"
+                     + " — .lineLimit(2) คือสิ่งที่คุมความสูง ไม่ใช่ cap)",
+                     Store.noteMax, ww, wl))
+        // Two 13 pt lines plus the box's 7 pt padding, against the 52 pt the row already has.
+        let boxH = 2 * f.ascender - 2 * f.descender + 14
+        check("กล่อง 2 บรรทัด เตี้ยกว่ากรอปก 52 pt — ไม่เพิ่มความสูงแถบกลาง",
+              boxH <= 52, String(format: "%.1f pt", boxH))
+
+        // 6 ------------------------------------------------- the song list's ※ (§8g)
+        print("\n6) เครื่องหมาย ※ ในรายการเพลง — วัด ไม่ใช่เลือกด้วยตา")
+        let slotW: CGFloat = 9                 // SongRow's reserved .frame(width:)
+        let markF = Typo.nsFont(10)            // = Typo.font(10), i.e. clamped to thaiFloor
+        func markWidth(_ str: String) -> CGFloat {
+            NSAttributedString(string: str, attributes: [.font: markF]).size().width
+        }
+        // A missing glyph renders as .notdef, which HAS a width — so the width check below
+        // cannot stand in for this one.
+        //
+        // Two wrong ways to ask this, both of which looked right:
+        //
+        // 1. `CTFontGetGlyphsForCharacters` queries the BASE font only and knows nothing about
+        //    fallback, so it reports `※` as absent — true of SF and irrelevant, because §6d's
+        //    whole mechanism is that CoreText falls through (to HelveticaNeue here, exactly as
+        //    `ก` falls through to SukhumvitSet).
+        // 2. Testing the laid-out line for glyph 0 **can never fail.** CoreText's `LastResort`
+        //    font supplies a glyph for every codepoint in Unicode, assigned or not — U+E000
+        //    comes back as glyph 4 at 13.20 pt. The negative control below is what found that;
+        //    without it this check would have passed while reaching nothing (§6d, Palette.audit).
+        //
+        // So the discriminator is the run's FONT: landing in LastResort *is* the placeholder box.
+        func glyphPresent(_ str: String) -> Bool {
+            let line = CTLineCreateWithAttributedString(
+                NSAttributedString(string: str, attributes: [.font: markF]))
+            guard let runs = CTLineGetGlyphRuns(line) as? [CTRun], !runs.isEmpty else { return false }
+            for r in runs {
+                let attrs = CTRunGetAttributes(r) as NSDictionary
+                guard let any = attrs[kCTFontAttributeName as String] else { return false }
+                let name = CTFontCopyPostScriptName(any as! CTFont) as String
+                if name.localizedCaseInsensitiveContains("LastResort") { return false }
+            }
+            return true
+        }
+        check("※ มีกลิฟจริงในสิ่งที่วาดออกมา (ผ่าน fallback ได้)", glyphPresent("※"))
+        // Negative control, so the line above cannot pass by being unable to fail — the
+        // Palette.audit lesson (§6d): a check whose subject it does not actually reach reads
+        // exactly like a check that passed. U+E000 is private use; nothing assigns it.
+        check("...และตอบ \"ไม่มี\" ได้จริง — คุมด้วยอักขระที่ไม่มีในฟอนต์ไหนเลย",
+              !glyphPresent("\u{E000}"))
+        check("※ กว้างไม่เกินช่อง \(Int(slotW)) pt",
+              markWidth("※") <= slotW,
+              String(format: "%.2f pt @ %.0f pt", markWidth("※"), markF.pointSize))
+        // Recorded because it is true, it predates this feature, and nobody would guess it:
+        // the glyph ※ sits beside does not fit its own slot.
+        print(String(format: "   (✎ ข้างกันกว้าง %.2f pt — ล้นช่อง %d pt ของตัวเองอยู่แล้ว)",
+                     markWidth("✎"), Int(slotW)))
+
+        // The rule the glyph stands for. If absence ever stops meaning "no note" the mark is
+        // worthless, so a song with tags and nothing written must NOT be marked.
+        let storeM = Store(rawForTest: [
+            "EP/a.mp3": ["note": "ฝั่งซ้ายน่าจะได้เปรียบ"],
+            "EP/b.mp3": ["tags": ["ยุค 90"]],
+            "EP/c.mp3": ["introStart": 3.0],
+        ])
+        check("มีโน้ต → ติด ※", !storeM.config(for: "EP/a.mp3").note.isEmpty)
+        check("มีแต่แท็ก → ไม่ติด ※", storeM.config(for: "EP/b.mp3").note.isEmpty)
+        check("ไม่มีทั้งสอง → ไม่ติด ※", storeM.config(for: "EP/c.mp3").note.isEmpty)
+        // ...but the tooltip is note AND tags, because a hover is asked for.
+        check("แท็กล้วน → ไม่มีกลิฟ แต่ทูลทิปยังเห็น",
+              CenterView.plainNoteText(storeM.config(for: "EP/b.mp3")) == "ยุค 90")
+
+        print("\nผ่าน \(pass)  ตก \(fail)")
+        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+    }
+
+    // MARK: - the tag filter
+
+    /// `Library.visible` and the contract around it (§8g).
+    ///
+    /// **READ-ONLY**, via `Store(rawForTest:)`.
+    ///
+    /// What this proves: the filter narrows, an empty tag is the identity, Latin case never
+    /// hides a song, the counts the strip prints add up, and — the one that matters — that
+    /// `Handoff.package` and `Preflight.fast` still cover a song the filter hides, because they
+    /// are handed the ROUND and not the view.
+    ///
+    /// **What it does NOT prove** is that the UI calls the right accessor; no headless check can,
+    /// and building an `AppModel` here would run the launch snapshot and let `guessRest` write to
+    /// the operator's real config. That half is protected by construction instead: the unfiltered
+    /// column accessor was DELETED rather than kept beside the filtered one, so handing a
+    /// narrowed list to the handover now means typing `visibleSongs` somewhere it does not
+    /// belong — a visible mistake instead of an invisible one.
+    static func filterTest() {
+        var pass = 0, fail = 0
+        func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+            if ok { pass += 1 } else { fail += 1 }
+            print("   \(ok ? "ok  " : "✗   ")\(label)\(detail.isEmpty ? "" : "  — " + detail)")
+        }
+        func names(_ ps: [String]) -> String {
+            ps.isEmpty ? "—" : ps.map(Library.baseName).sorted().joined(separator: ", ")
+        }
+
+        func song(_ tags: [String]) -> [String: Any] {
+            ["introStart": 1.0, "introEnd": 16.0, "hook": 61.0, "configured": true, "tags": tags]
+        }
+        let round = "EP09"
+        let paths = ["EP09/101_a.mp3", "EP09/102_b.mp3", "EP09/201_c.mp3", "EP09/301_d.mp3"]
+        let st = Store(rawForTest: [
+            paths[0]: song(["ยุค 90", "ผู้หญิงร้อง"]),
+            paths[1]: song(["ยุค 90"]),
+            paths[2]: song(["Rock"]),
+            paths[3]: song([]),
+        ])
+
+        print("1) Library.visible")
+        check("แท็กว่าง = ไม่กรอง (คือสิ่งที่ทำให้ไม่ต้องมี branch ทุกที่)",
+              Library.visible(paths, tag: "", store: st) == paths)
+        let p90 = Library.visible(paths, tag: "ยุค 90", store: st)
+        check("กรองตามแท็ก", p90.count == 2 && p90.allSatisfy { paths.prefix(2).contains($0) },
+              names(p90))
+        check("ไม่สนตัวพิมพ์เล็ก/ใหญ่",
+              Library.visible(paths, tag: "rOcK", store: st) == [paths[2]],
+              names(Library.visible(paths, tag: "rOcK", store: st)))
+        check("แท็กที่ไม่มีใครติด → ว่าง",
+              Library.visible(paths, tag: "ไม่มีแท็กนี้", store: st).isEmpty)
+        check("เพลงที่ไม่มีแท็กเลย ถูกซ่อนเสมอ", !p90.contains(paths[3]))
+        // The two numbers the strip prints must add up, or it is lying about what it hides.
+        let hidden = paths.count - p90.count
+        check("เห็น + ซ่อน = ทั้งรอบ", p90.count + hidden == paths.count,
+              "\(p90.count) + \(hidden) = \(paths.count)")
+
+        print("\n2) การส่งต่อกับ pre-flight ไม่สนตัวกรอง — รับรอบ ไม่ใช่สิ่งที่เห็น")
+        // The whole point of the separate accessor: these take the ROUND. A song the filter
+        // hides must still be in the package and still be checked.
+        let pkg = Handoff.package(round: round, paths: paths, store: st, by: "diag")
+        check("round.json มีทุกเพลงในรอบ (\(paths.count))",
+              pkg.songs.count == paths.count, "\(pkg.songs.count)")
+        check("รวมเพลงที่ตัวกรองจะซ่อน",
+              pkg.songs[Library.baseName(paths[3])] != nil)
+        // Missing files, so every row is `missingFile` — which is exactly what proves coverage.
+        let pf = Preflight.fast(round: round, paths: paths, store: st)
+        check("pre-flight ตรวจทุกเพลงในรอบ",
+              Set(pf.map(\.path)) == Set(paths), "\(Set(pf.map(\.path)).count)/\(paths.count)")
+        // And the counterfactual: had the filter leaked into the accessor those two would shrink.
+        let leaked = Handoff.package(round: round, paths: p90, store: st, by: "diag")
+        check("ถ้าเผลอเอา visibleSongs ไปให้ → ส่งต่อหาย \(paths.count - p90.count) เพลง (คือสิ่งที่ต้องกัน)",
+              leaked.songs.count == p90.count, "\(leaked.songs.count)")
+
+        print("\n3) ไม่เก็บลงไฟล์ — กรองต้องตายพร้อม process")
+        st.settingsChanged()
+        let keys = Set(((st.raw["_settings"] as? [String: Any]) ?? [:]).keys)
+        let suspect = keys.filter {
+            let k = $0.lowercased()
+            return k.contains("filter") || k.contains("tagfilter")
+        }
+        check("_settings ไม่มีคีย์เกี่ยวกับตัวกรอง", suspect.isEmpty,
+              suspect.isEmpty ? "\(keys.count) คีย์ ไม่มีอันไหนเกี่ยว"
+                              : suspect.sorted().joined(separator: ", "))
+
+        print("\nผ่าน \(pass)  ตก \(fail)")
+        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+    }
+
+    // MARK: - tags
+
+    /// `SongConfig.tags` — short reusable labels, the derived registry, and the UNION merge.
+    ///
+    /// **READ-ONLY**, by the same mechanism as `--notetest`: every `Store` is built with
+    /// `init(rawForTest:)`, which cannot write.
+    static func tagTest() {
+        var pass = 0, fail = 0
+        func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+            if ok { pass += 1 } else { fail += 1 }
+            print("   \(ok ? "ok  " : "✗   ")\(label)\(detail.isEmpty ? "" : "  — " + detail)")
+        }
+        func show(_ ts: [String]) -> String { ts.isEmpty ? "—" : ts.joined(separator: " · ") }
+
+        // 1 ------------------------------------------------------------------- clampTag
+        print("1) clampTag — หนึ่งแท็ก")
+        let tagCases: [(String, String, String?)] = [
+            ("ธรรมดา",            "ยุค 90",     "ยุค 90"),
+            ("ตัดช่องหน้าหลัง",     "  ยุค 90  ", "ยุค 90"),
+            ("ยุบช่องว่างซ้อน",     "ยุค   90", "ยุค 90"),
+            ("ขึ้นบรรทัดใหม่",    "a\nb",      "a b"),
+            ("ตัด · ออก (ตัวคั่นของแถบกลาง)", "ยุค · 90", "ยุค 90"),
+            ("ว่าง → nil",      "",           nil),
+            ("มีแต่ช่องว่าง → nil", "   \n ",    nil),
+            ("มีแต่ · → nil",      "·",          nil),
+        ]
+        for (label, input, want) in tagCases {
+            let got = Store.clampTag(input)
+            check(label, got == want, got.map { "\"\($0)\"" } ?? "nil")
+        }
+        let longTag = String(repeating: "ก", count: Store.tagMax + 10)
+        check("ยาวเกิน → ตัดที่ \(Store.tagMax)",
+              Store.clampTag(longTag)?.count == Store.tagMax,
+              "\(Store.clampTag(longTag)?.count ?? -1)")
+
+        // 2 ------------------------------------------------------------------ clampTags
+        print("\n2) clampTags — ซ้อนกัน กับเพดานต่อเพลง")
+        let dedup = Store.clampTags(["Pop", "pop", "POP", "ยุค 90", "ยุค 90"])
+        check("Latin ต่างแค่ตัวพิมพ์เล็ก/ใหญ่ = แท็กเดียว การสะกดแรกชนะ",
+              dedup == ["Pop", "ยุค 90"], show(dedup))
+        let many = Store.clampTags((1...Store.tagsPerSong + 4).map { "t\($0)" })
+        check("เกิน \(Store.tagsPerSong) → ตัด", many.count == Store.tagsPerSong, show(many))
+        check("รักษาลำดับที่คนพิมพ์", many == ["t1", "t2", "t3", "t4", "t5", "t6"], show(many))
+
+        // 3 ----------------------------------------------- the registry, and its cache
+        print("\n3) ทะเบียน — ไม่เก็บ คิดจากของที่ใช้อยู่")
+        func songDict(_ tags: [String]) -> [String: Any] {
+            ["introStart": 0.0, "introEnd": 15.0, "configured": true, "tags": tags]
+        }
+        let reg = Store(rawForTest: [
+            "EP/a.mp3": songDict(["ยุค 90", "ผู้หญิงร้อง"]),
+            "EP/b.mp3": songDict(["ยุค 90"]),
+            "EP/c.mp3": songDict(["ยุค 90", "เพลงเร็ว"]),
+        ])
+        check("เรียงตามความถี่ แล้วค่อยตามชื่อ",
+              reg.tagsInUse.first == "ยุค 90" && reg.tagsInUse.count == 3, show(reg.tagsInUse))
+        // The cache is the only reason this is cheap enough to read from `body`, and a stale one
+        // would keep offering a tag nobody carries any more.
+        var ra = reg.config(for: "EP/a.mp3"); ra.tags = []
+        reg.set(ra, for: "EP/a.mp3")
+        check("set → ทะเบียนอัพเดต",
+              !reg.tagsInUse.contains("ผู้หญิงร้อง"), show(reg.tagsInUse))
+        reg.removeConfig(for: "EP/c.mp3")
+        check("removeConfig → ทะเบียนอัพเดต",
+              !reg.tagsInUse.contains("เพลงเร็ว"), show(reg.tagsInUse))
+        _ = reg.pruneOrphans(existing: [])
+        check("pruneOrphans → ทะเบียนว่าง", reg.tagsInUse.isEmpty, show(reg.tagsInUse))
+        // First spelling wins, so nothing silently rewrites what somebody typed.
+        let spell = Store(rawForTest: ["EP/a.mp3": songDict(["Rock"]),
+                                       "EP/b.mp3": songDict(["rock"])])
+        check("สะกดแรกชนะ และนับรวมเป็นอันเดียว",
+              spell.tagsInUse == ["Rock"], show(spell.tagsInUse))
+        check("songsTagged ไม่สนตัวพิมพ์เล็ก/ใหญ่",
+              spell.songsTagged("ROCK").count == 2, "\(spell.songsTagged("ROCK").count)")
+        // Pins the RULE, not the hash seed. This is what the flake was: `tagsInUse` walks
+        // `songs.values`, whose order is seeded per process, so "the first spelling we see"
+        // picked a different winner on different launches.
+        let majority = Store(rawForTest: [
+            "EP/a.mp3": songDict(["rock"]), "EP/b.mp3": songDict(["rock"]),
+            "EP/c.mp3": songDict(["rock"]), "EP/d.mp3": songDict(["Rock"]),
+        ])
+        check("สะกดที่ใช้มากสุดชนะ (3 ต่อ 1)",
+              majority.tagsInUse == ["rock"], show(majority.tagsInUse))
+        let minority = Store(rawForTest: [
+            "EP/a.mp3": songDict(["Rock"]), "EP/b.mp3": songDict(["Rock"]),
+            "EP/c.mp3": songDict(["Rock"]), "EP/d.mp3": songDict(["rock"]),
+        ])
+        check("สลับข้างก็ได้คำตอบกลับกัน",
+              minority.tagsInUse == ["Rock"], show(minority.tagsInUse))
+
+        // 4 ------------------------------------------------------- not a marker, again
+        print("\n4) แท็กไม่ใช่ marker")
+        var guessed = SongConfig(); guessed.auto = true
+        guessed.tags = ["ยุค 90"]
+        check("ติดแท็กแล้ว isConfigured ยัง false", !guessed.isConfigured)
+        var signed = SongConfig(); signed.configured = true; signed.base = signed.current
+        signed.tags = ["แก้ทีหลัง"]
+        check("แท็กไม่ขึ้นป้าย แก้ที่กอง", signed.onsiteEdits.isEmpty)
+
+        // 5 ------------------------------------------------------------- union on merge
+        print("\n5) การส่งต่อ — union เท่านั้น")
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tagtest-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let key = "EP00/x.mp3"
+
+        /// local, incoming, expect a row?, result if accepted, result if rejected
+        let table: [([String], [String], Bool, [String], [String])] = [
+            ([],        [],        false, [],             []),
+            ([],        ["A"],     true,  ["A"],          []),
+            (["B"],     [],        false, ["B"],          ["B"]),      // removed-locally stays
+            (["B"],     ["B"],     false, ["B"],          ["B"]),
+            (["B"],     ["A"],     true,  ["B", "A"],     ["B"]),      // UNION, not replace
+            (["B"],     ["b"],     false, ["B"],          ["B"]),      // case is not new
+            (["B"],     ["A", "B"], true, ["B", "A"],     ["B"]),
+        ]
+        for (mine, theirs, wantRow, ifYes, ifNo) in table {
+            for accept in [true, false] {
+                let s = Store(rawForTest: [key: ["introStart": 0.0, "introEnd": 15.0,
+                                                 "configured": true, "played": true,
+                                                 "tags": mine]])
+                var pkg = RoundPackage()
+                var e = RoundPackage.Entry()
+                e.b = s.config(for: key).current
+                e.tags = theirs
+                pkg.songs[Library.baseName(key)] = e
+                guard (try? pkg.write(to: tmp)) != nil, let back = RoundPackage.read(tmp) else {
+                    check("round.json เขียน/อ่าน", false); continue
+                }
+                let plan = Handoff.plan(back, round: "EP00", paths: [key], store: s)
+                let rows = plan.rows.filter { $0.field == .tags }
+                if accept {
+                    check("นี่ \(show(mine))  รับ \(show(theirs)) → แถว \(wantRow ? "ใช่" : "ไม่")",
+                          rows.count == (wantRow ? 1 : 0), "\(rows.count)")
+                }
+                Handoff.apply(plan, accepted: accept ? Set(plan.rows.map(\.id)) : [], store: s)
+                let got = s.config(for: key)
+                check("   └ \(accept ? "รับ" : "ไม่รับ") → \(show(got.tags))",
+                      got.tags == (accept ? ifYes : ifNo),
+                      "ควรเป็น \(show(accept ? ifYes : ifNo))")
+                check("   └ ไม่แตะ played", got.played)
+            }
+        }
+        // Accepting cannot blow the per-song cap however many arrive.
+        do {
+            let s = Store(rawForTest: [key: ["introStart": 0.0, "introEnd": 15.0,
+                                             "tags": ["a", "b", "c"]]])
+            var pkg = RoundPackage(); var e = RoundPackage.Entry()
+            e.b = s.config(for: key).current
+            e.tags = (1...Store.tagsPerSong + 5).map { "z\($0)" }
+            pkg.songs[Library.baseName(key)] = e
+            let plan = Handoff.plan(pkg, round: "EP00", paths: [key], store: s)
+            Handoff.apply(plan, accepted: Set(plan.rows.map(\.id)), store: s)
+            let n = s.config(for: key).tags.count
+            check("รับมาเยอะก็ไม่เกิน \(Store.tagsPerSong)", n <= Store.tagsPerSong, "\(n)")
+        }
+        // A song the receiving side has never seen takes the sender's tags outright.
+        do {
+            let s = Store(rawForTest: [:])
+            var pkg = RoundPackage(); var e = RoundPackage.Entry()
+            e.b = SongBase(introStart: 2, introEnd: 20, hook: 70, trimDb: 0, ignoreEnd: false)
+            e.tags = ["ยุค 90", "เพลงเร็ว"]
+            pkg.songs[Library.baseName(key)] = e
+            let plan = Handoff.plan(pkg, round: "EP00", paths: [key], store: s)
+            Handoff.apply(plan, accepted: [], store: s)
+            check("เพลงใหม่ (fresh) รับแท็กมาเลย",
+                  s.config(for: key).tags == e.tags, show(s.config(for: key).tags))
+        }
+
+        // 6 ------------------------------------------------------------- the layout claim
+        print("\n6) กล่องในแถบกลาง — โน้ต + แท็ก แชร์ 2 บรรทัดกัน")
+        let avail: CGFloat = 520 - 10 - 10 - 3
+        func measure(_ c: SongConfig) -> (CGFloat, Double) {
+            let a = NSAttributedString(CenterView.noteText(c))
+            let w = a.size().width
+            return (w, Double((w / avail).rounded(.up)))
+        }
+        var typical = SongConfig()
+        typical.note = "ฝั่งซ้ายน่าจะได้เปรียบ คนรุ่น 40+ รู้แน่"
+        typical.tags = ["ยุค 90", "ผู้หญิงร้อง"]
+        let (w1, l1) = measure(typical)
+        check("กรณีปกติ (โน้ต \(typical.note.count) ตัว + 2 แท็ก) อ่านครบ", l1 <= 2,
+              String(format: "%.0f pt → %.0f บรรทัด", w1, l1))
+        var worst = SongConfig()
+        worst.note = String(repeating: "ก", count: Store.noteMax)
+        worst.tags = (1...Store.tagsPerSong).map { _ in String(repeating: "ก", count: Store.tagMax) }
+        let (w2, l2) = measure(worst)
+        // Expected to overflow, and that is the documented trade: `.lineLimit(2)` keeps the box
+        // at its height and the TAGS are what get cut, because the note is drawn first.
+        print(String(format: "   (กรณีเลวร้ายสุด: โน้ตเต็ม + %d แท็กเต็ม = %.0f pt → %.0f บรรทัด"
+                     + " — โน้ตมาก่อน แท็กจึงเป็นสิ่งที่ถูกตัด)",
+                     Store.tagsPerSong, w2, l2))
+        check("โน้ตมาก่อนแท็กเสมอ",
+              NSAttributedString(CenterView.noteText(typical)).string.hasPrefix(typical.note))
+        check("ไม่มีอะไรเลย → กล่องว่าง (ไม่วาด)",
+              NSAttributedString(CenterView.noteText(SongConfig())).string.isEmpty)
+        // `noteText` is built from `body`, which re-renders at the player's tick rate (§8f's
+        // memoised-cover lesson). Measured so the decision not to memoise it is a measurement
+        // and not a shrug. Anything approaching the 20 ms guard tick would need a cache.
+        do {
+            let t0 = CFAbsoluteTimeGetCurrent()
+            for _ in 0..<1000 { _ = CenterView.noteText(worst) }
+            let us = (CFAbsoluteTimeGetCurrent() - t0) * 1_000_000 / 1000
+            check(String(format: "noteText กรณีเลวร้ายสุด %.1f µs — สร้างใหม่ทุก frame ได้", us),
+                  us < 500, String(format: "%.1f µs", us))
+        }
+
+        print("\nผ่าน \(pass)  ตก \(fail)")
         print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
     }
 

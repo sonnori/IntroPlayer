@@ -247,9 +247,82 @@ final class AppModel: ObservableObject {
     var playlists: [String] {
         Array(Set(songs.map(Library.playlist(of:)))).sorted { $0.localizedCompare($1) == .orderedAscending }
     }
+    /// Every song in the round. **This is the round**, and it is what the header counts, the
+    /// review sweep, the handover and the pre-flight must keep using — see `visibleSongs`.
     func songsIn(_ pl: String) -> [String] { songs.filter { Library.playlist(of: $0) == pl } }
-    func songsIn(column i: Int) -> [String] {
-        songsIn(currentPlaylist).filter { Library.column(of: $0) == i }
+
+    // MARK: - the tag filter (§8g)
+
+    /// Which tag the song LIST is narrowed to. Empty = off.
+    ///
+    /// **Deliberately not persisted.** A filter that survives a relaunch is how an operator
+    /// opens the app on a show day to a round missing two thirds of its questions, with the
+    /// reason in a strip they have not learned to read yet. §8c measured that exact failure for
+    /// `_settings.lastPlaylist` — the scan finds the round, the picker lists it, the app opens
+    /// somewhere else, and it was reported from real use as "the app can't find my songs". A
+    /// filter is the same trap with a weaker hint, so it dies with the process.
+    @Published private(set) var tagFilter = ""
+
+    func setTagFilter(_ t: String) {
+        let next = Store.clampTag(t) ?? ""
+        guard next != tagFilter else { return }
+        // Refuse a filter that would show nothing. The menu only offers tags present in this
+        // round, so this is unreachable from the UI — which is exactly why it belongs here
+        // rather than there: "the selection can never be hidden" should be true by
+        // construction, not because one caller happens to behave.
+        if !next.isEmpty,
+           Library.visible(songsIn(currentPlaylist), tag: next, store: store).isEmpty {
+            flash("รอบนี้ไม่มีเพลงที่ติดแท็ก \"\(next)\"")
+            return
+        }
+        tagFilter = next
+        // Keep the selection inside what is on screen, so ↑/↓ cannot walk out of the list.
+        // `select` cannot undo this: `first` is visible under the filter we just set.
+        if let cur = current, !next.isEmpty, !matchesTagFilter(cur),
+           let first = visibleSongs(currentPlaylist).first {
+            select(first)
+        }
+        objectWillChange.send()
+    }
+
+    func clearTagFilter() {
+        guard !tagFilter.isEmpty else { return }
+        tagFilter = ""
+        objectWillChange.send()
+    }
+
+    func matchesTagFilter(_ path: String) -> Bool {
+        tagFilter.isEmpty || !Library.visible([path], tag: tagFilter, store: store).isEmpty
+    }
+
+    /// The songs the LIST shows, which is a different question from "the songs in this round".
+    ///
+    /// A separate accessor, and the unfiltered column variant is **gone** rather than kept
+    /// beside it, because of what the 26 `songsIn(` call sites are: only four are the list and
+    /// its navigation. The rest are `Handoff.export`/`plan`/`apply`, `Preflight.fast`,
+    /// `reviewRemaining`, `onsiteFieldCount`, `resetPlayed`, `usedInRound` and every header
+    /// count — so filtering inside `songsIn(_:)` would have quietly handed a round over with
+    /// two thirds of its questions missing. Now the only way to do that is to type
+    /// `visibleSongs` somewhere it does not belong, which is a visible mistake.
+    func visibleSongs(_ pl: String) -> [String] {
+        Library.visible(songsIn(pl), tag: tagFilter, store: store)
+    }
+    func visibleSongs(column i: Int) -> [String] {
+        visibleSongs(currentPlaylist).filter { Library.column(of: $0) == i }
+    }
+    /// How many of the round the filter is hiding — the number the strip has to show, because a
+    /// filter that does not say what it hides is indistinguishable from missing files (§8c).
+    var tagFilterHidden: Int {
+        tagFilter.isEmpty ? 0 : songsIn(currentPlaylist).count - visibleSongs(currentPlaylist).count
+    }
+    /// Tags actually present in this round, with their counts. Only these are offered, so
+    /// picking one can never produce an empty list.
+    func tagCounts(inRound pl: String) -> [(tag: String, count: Int)] {
+        let paths = songsIn(pl)
+        return store.tagsInUse.compactMap { t in
+            let n = Library.visible(paths, tag: t, store: store).count
+            return n > 0 ? (t, n) : nil
+        }
     }
     var showPlaylistPicker: Bool {
         let p = playlists
@@ -286,7 +359,9 @@ final class AppModel: ObservableObject {
         // Otherwise the centre pane keeps playing a song from the round you just left, and
         // Correct/Wrong logs it under THAT round's playlist.
         if let cur = current, Library.playlist(of: cur) == p { return }
-        if let first = songsIn(p).first {
+        // Prefer a song the filter actually shows; falling back to a hidden one is fine
+        // because `select` then clears the filter and says why.
+        if let first = visibleSongs(p).first ?? songsIn(p).first {
             select(first)
         } else {
             // An EMPTY round (a setter making `songs/EP06/` before copying files into it —
@@ -313,6 +388,17 @@ final class AppModel: ObservableObject {
     private static let analysisCacheMax = 4
 
     func select(_ path: String) {
+        // A filter must never be able to hide the selected song. ↑/↓ stay inside the filtered
+        // list by construction, but `Tab`, `Return`'s advance, a log row, the donor jump and
+        // `nextNeedingReview` all target the WHOLE round on purpose — the review sweep is about
+        // the round, not about what is on screen. One guard at the one choke point, instead of
+        // a filtered variant of every caller. It has to SAY so, or the filter looks like it
+        // switched itself off.
+        if !tagFilter.isEmpty, !matchesTagFilter(path) {
+            let t = tagFilter
+            tagFilter = ""
+            flash("เลิกกรอง \"\(t)\" — เพลงที่เลือกไม่มีแท็กนี้")
+        }
         current = path
         activeCol = Library.column(of: path)
         analysisTask?.cancel()
@@ -364,7 +450,7 @@ final class AppModel: ObservableObject {
     }
 
     func move(by d: Int) {
-        let list = songsIn(column: activeCol)
+        let list = visibleSongs(column: activeCol)
         guard !list.isEmpty else { return }
         let i = current.flatMap { list.firstIndex(of: $0) } ?? -1
         select(list[max(0, min(list.count - 1, i + d))])
@@ -373,7 +459,7 @@ final class AppModel: ObservableObject {
     func moveColumn(by d: Int) {
         for step in 1...Library.columnLabels.count {
             let i = ((activeCol + d * step) % 3 + 3) % 3
-            let list = songsIn(column: i)
+            let list = visibleSongs(column: i)
             if let first = list.first { activeCol = i; select(first); return }
         }
     }
@@ -433,6 +519,58 @@ final class AppModel: ObservableObject {
         store.set(c, for: p)
         player.remode(config: c)   // ticking Ignore Intro End mid-play must extend the schedule
         objectWillChange.send()
+    }
+
+    /// The setter's note for the operator (§9 `note`).
+    ///
+    /// Goes through `updateConfigQuiet`, which is the whole point: `updateConfig` stamps
+    /// `configured = true, auto = false`, so writing a note through it would certify an
+    /// unreviewed machine guess as human-reviewed — dropping the song out of the
+    /// `Return`/`Tab` sweep AND out of the pre-flight's `stillAuto` and `hookDefault`
+    /// warnings, so a round nobody had looked at would pass the handover check. That is the
+    /// typed marker field writing on blur (§11) and `applyGuess` certifying itself (§7a4),
+    /// in a third costume — and a note is exactly the thing a setter writes BEFORE deciding
+    /// where the markers go.
+    ///
+    /// `updateConfigQuiet` and not a path of its own: it brings `pushUndo`, so `Cmd+Z` puts a
+    /// note back, and it is the rule `trimDb` and `played` already use. §7a4 records what an
+    /// unguarded twin of an existing write path costs.
+    func setNote(_ s: String) {
+        guard let p = current else { return }
+        let n = Store.clampNote(s)
+        // An unchanged value is not an edit: it would push an undo entry and cost the operator
+        // a real one off the bottom of the 40-deep stack. Same reasoning as `MarkerTimeField`
+        // refusing a no-op commit.
+        guard n != store.config(for: p).note else { return }
+        updateConfigQuiet { $0.note = n }
+        saveState = "saving…"
+    }
+
+    /// Add a tag to the current song. Returns false when there was nothing usable to add, so
+    /// the caller can say why rather than appearing to do nothing.
+    ///
+    /// `updateConfigQuiet` for the same reason as `setNote`: a tag is not a marker and must not
+    /// certify a song as reviewed.
+    @discardableResult
+    func addTag(_ raw: String) -> Bool {
+        guard let p = current, let t = Store.clampTag(raw) else { return false }
+        let c = store.config(for: p)
+        let k = Store.tagKey(t)
+        if c.tags.contains(where: { Store.tagKey($0) == k }) { return false }
+        guard c.tags.count < Store.tagsPerSong else {
+            flash("แท็กได้สูงสุด \(Store.tagsPerSong) อันต่อเพลง — เอาอันที่ไม่ใช้ออกก่อน")
+            return false
+        }
+        updateConfigQuiet { $0.tags = Store.clampTags($0.tags + [t]) }
+        saveState = "saving…"
+        return true
+    }
+
+    func removeTag(_ t: String) {
+        guard current != nil else { return }
+        let k = Store.tagKey(t)
+        updateConfigQuiet { $0.tags.removeAll { Store.tagKey($0) == k } }
+        saveState = "saving…"
     }
 
     func mark(_ key: WritableKeyPath<SongConfig, Double>) {
@@ -1184,6 +1322,12 @@ final class AppModel: ObservableObject {
         d.introStart = s.introStart; d.introEnd = s.introEnd; d.hook = s.hook
         d.ignoreEnd = s.ignoreEnd
         if s.trimDb != 0 { d.trimDb = s.trimDb }
+        // The donor exists because a REUSED song should not start blank (§8c), and a note is a
+        // fact about the song, not about the round — so it comes along. Additive, like the
+        // handover merge: a donor with no note never clears one already written here.
+        if !s.note.isEmpty { d.note = s.note }
+        // Union, not replace: a tag already written here is not the donor's to remove.
+        if !s.tags.isEmpty { d.tags = Store.clampTags(d.tags + s.tags) }
         d.configured = true; d.auto = false        // never `played` — that is per taping
         store.set(d, for: p)
         player.seek(to: d.introStart, config: d)

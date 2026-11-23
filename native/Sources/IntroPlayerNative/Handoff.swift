@@ -23,6 +23,12 @@ struct RoundPackage {
         var b = SongBase()
         var configured = false
         var auto = false
+        /// The setter's note for the operator. Travels because that is the entire point of the
+        /// field — it is written on one machine to be read on another (§8e). Merged
+        /// ADDITIVELY on the way back: see `Handoff.plan`.
+        var note = ""
+        /// Merged as a set UNION, which is the additive rule for a list.
+        var tags: [String] = []
     }
 
     static func url(forRound playlist: String) -> URL {
@@ -52,6 +58,10 @@ struct RoundPackage {
             if let x = d["ignoreEnd"]  as? Bool { e.b.ignoreEnd = x }
             if let x = d["configured"] as? Bool { e.configured = x }
             if let x = d["auto"]       as? Bool { e.auto = x }
+            if let x = d["note"]       as? String { e.note = Store.clampNote(x) }
+            if let x = d["tags"]       as? [Any] {
+                e.tags = Store.clampTags(x.compactMap { $0 as? String })
+            }
             // A degenerate range disarms the intro-end guard downstream, so repair on the way in
             // rather than trusting the sender's file.
             if e.b.introEnd <= e.b.introStart {
@@ -79,6 +89,8 @@ struct RoundPackage {
             if e.b.trimDb != 0 { d["trimDb"] = e.b.trimDb }
             if e.configured { d["configured"] = true }
             if e.auto { d["auto"] = true }
+            if !e.note.isEmpty { d["note"] = e.note }
+            if !e.tags.isEmpty { d["tags"] = e.tags }
             ss[name] = d
         }
         out["songs"] = ss
@@ -217,15 +229,52 @@ enum Preflight {
 
 // MARK: - Import
 
+/// Which field a diff row is about.
+///
+/// `MarkerField` could not simply grow a `.note` case: it is `CaseIterable` and drives
+/// `onsiteEdits`, `revert`, the setup panel's field cards and `--handoff`, every one of which
+/// would then have to answer "what does reverting a sentence mean". Here the note is only ever
+/// a label and two strings, which is all the diff table needs.
+///
+/// `key` for a marker is its `rawValue`, so every existing row id is unchanged.
+enum DiffField: Hashable {
+    case marker(MarkerField)
+    case note
+    case tags
+
+    var key: String {
+        switch self {
+        case .marker(let f): return f.rawValue
+        case .note: return "note"
+        case .tags: return "tags"
+        }
+    }
+    var label: String {
+        switch self {
+        case .marker(let f): return f.label
+        case .note: return "โน้ตคนรัน"
+        case .tags: return "แท็ก"
+        }
+    }
+    /// Rendered on its own lines rather than in a value column — a sentence or a tag list
+    /// cannot be compared in ~160 pt, and reading both sides IS the decision the row exists for.
+    var isProse: Bool {
+        switch self {
+        case .marker: return false
+        case .note, .tags: return true
+        }
+    }
+}
+
 /// One field the incoming package disagrees with the local file about. The comparison is
 /// incoming-vs-local (not incoming-vs-base), so it is still correct when BOTH sides edited the
 /// same song since the handover — the setter sees both values and picks.
 struct DiffRow: Identifiable {
     let path: String
-    let field: MarkerField
+    let field: DiffField
     let mine: String
     let theirs: String
-    var id: String { "\(path)\u{1}\(field.rawValue)" }
+    var id: String { "\(path)\u{1}\(field.key)" }
 }
 
 /// What importing a package would do, computed before anything is written.
@@ -245,6 +294,17 @@ struct ImportPlan {
 }
 
 enum Handoff {
+    /// Tags in `incoming` that `local` does not already have, compared on `Store.tagKey` so a
+    /// difference in Latin case is not a new tag. Order follows the sender.
+    static func tagsAdded(_ local: [String], _ incoming: [String]) -> [String] {
+        let have = Set(local.map(Store.tagKey))
+        var seen = Set<String>()
+        return incoming.filter { t in
+            let k = Store.tagKey(t)
+            return !have.contains(k) && seen.insert(k).inserted
+        }
+    }
+
     /// Build the package from what is on disk right now, for one round.
     static func package(round: String, paths: [String], store: Store, by: String) -> RoundPackage {
         var p = RoundPackage()
@@ -254,7 +314,8 @@ enum Handoff {
         for path in paths {
             let c = store.config(for: path)
             p.songs[Library.baseName(path)] =
-                RoundPackage.Entry(b: c.current, configured: c.isConfigured, auto: c.auto)
+                RoundPackage.Entry(b: c.current, configured: c.isConfigured, auto: c.auto,
+                                   note: c.note, tags: c.tags)
         }
         return p
     }
@@ -288,8 +349,39 @@ enum Handoff {
             for f in MarkerField.allCases {
                 let a = f.text(mine), b = f.text(e.b)
                 if a != b {
-                    diffs.append(DiffRow(path: path, field: f, mine: a, theirs: b))
+                    diffs.append(DiffRow(path: path, field: .marker(f), mine: a, theirs: b))
                 }
+            }
+            // The note merges ADDITIVELY: an EMPTY incoming value means "I have nothing to say
+            // about this song", never "delete yours", so it raises no row and changes nothing.
+            //
+            // That one rule is what makes §13's `round.json` gap stop blocking this feature.
+            // `RoundPackage.write` rebuilds its dictionary from the struct, so a build that does
+            // not know the field DROPS it rather than merging it — and a round sent
+            // setter(new) → operator(old) → setter(new) therefore comes back with the note
+            // missing. Under this rule that reads as silence and the local note survives; under
+            // a symmetric rule it would read as a deletion, and the sheet pre-accepts every row.
+            //
+            // The cost, so nobody has to rediscover it: a note DELETED on the operator's machine
+            // cannot travel — it has to be said out loud. That is the safe direction of the two.
+            if !e.note.isEmpty, e.note != local.note {
+                diffs.append(DiffRow(path: path, field: .note,
+                                     mine: local.note, theirs: e.note))
+            }
+            // Tags are the same rule for a list: UNION. A row is raised only for tags the
+            // receiving side does not already have, and `theirs` shows the RESULT of accepting
+            // rather than the sender's list, because the union is what would actually happen.
+            //
+            // It is still a row with a checkbox and not a silent merge: the setter gets to
+            // decline a tag, and a union they cannot see is a change nobody reviewed. What does
+            // NOT travel, by the same additive direction as the note, is a tag the operator
+            // REMOVED — that has to be said out loud.
+            let added = Handoff.tagsAdded(local.tags, e.tags)
+            if !added.isEmpty {
+                diffs.append(DiffRow(
+                    path: path, field: .tags,
+                    mine: local.tags.isEmpty ? "" : local.tags.joined(separator: " · "),
+                    theirs: Store.clampTags(local.tags + added).joined(separator: " · ")))
             }
             if diffs.isEmpty { plan.unchanged.append(path) } else { plan.rows += diffs }
         }
@@ -312,7 +404,7 @@ enum Handoff {
             var c = store.config(for: path)
             let isFresh = plan.fresh.contains(path)
             for f in MarkerField.allCases {
-                let rowID = "\(path)\u{1}\(f.rawValue)"
+                let rowID = "\(path)\u{1}\(DiffField.marker(f).key)"
                 let take = isFresh || accepted.contains(rowID)
                 guard take else { continue }
                 switch f {
@@ -322,6 +414,20 @@ enum Handoff {
                 case .trimDb:     c.trimDb = e.b.trimDb
                 case .ignoreEnd:  c.ignoreEnd = e.b.ignoreEnd
                 }
+            }
+            // A fresh song has nothing to lose, same as the markers above. For a known song this
+            // only ever fires for a row `plan` actually raised, so an empty incoming note cannot
+            // reach here and cannot erase a local one.
+            if isFresh || accepted.contains("\(path)\u{1}\(DiffField.note.key)") {
+                c.note = Store.clampNote(e.note)
+            }
+            if isFresh {
+                c.tags = Store.clampTags(e.tags)
+            } else if accepted.contains("\(path)\u{1}\(DiffField.tags.key)") {
+                // Union, not replace — a tag this machine added must survive accepting the
+                // sender's. `clampTags` caps and dedups, so the result cannot exceed the
+                // per-song limit however many arrive.
+                c.tags = Store.clampTags(c.tags + Handoff.tagsAdded(c.tags, e.tags))
             }
             if isFresh {
                 c.configured = e.configured

@@ -16,7 +16,8 @@ struct CenterView: View {
                         .lineLimit(1).foregroundStyle(Palette.text)
                     Text(subtitle).font(Typo.font(13)).foregroundStyle(Palette.muted)
                 }
-                Spacer(minLength: 0)
+                Spacer(minLength: 12)
+                noteBox
             }
 
             guardStrip
@@ -118,6 +119,93 @@ struct CenterView: View {
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.line)
             .allowsHitTesting(false))
+    }
+
+    /// The setter's note, where the operator reads it: beside the title, at the moment they open
+    /// the question. Read-only here — it is typed in SETUP.
+    ///
+    /// **It costs zero height, and that is the reason it is HERE.** This row is already 52 pt
+    /// tall because of `coverFrame`, and the title is `lineLimit(1)`, so a box up to two 13 pt
+    /// lines (46 pt with its padding) fits inside the row's existing height. §15 is why that
+    /// matters: the only flexible child of this pane is the waveform, with a hard
+    /// `minHeight: 160` floor, and past that floor content that overruns the window centres and
+    /// clips BOTH ends — the title off the top and ✓ Correct / ✗ Wrong off the bottom, with no
+    /// scroller. `App.swift`'s declared `minHeight: 640` is already 13–67 pt short of what this
+    /// pane needs with no banners up. A free-text field of unbounded length in the centre pane
+    /// is the one shape that could push the scoring buttons off the screen.
+    ///
+    /// `.lineLimit(2)` below is what makes that impossible rather than unlikely, and it is NOT
+    /// the length cap doing it: `Store.noteMax` is tuned for Thai, and 120 Latin capitals are
+    /// far wider than 120 Thai clusters. The cap keeps truncation rare; the line limit is the
+    /// guarantee. Don't remove it on the grounds that the text is already bounded.
+    ///
+    /// No hue. A note is not a warning and it sits ~60 pt from the guard strip, where amber has
+    /// exactly one meaning (§6d). The edge bar is `lineStrong`, the same neutral the focused
+    /// marker card uses.
+    ///
+    /// Rendered only when there IS a note. Absence then means "this song has no note", which is
+    /// unambiguous — and an always-present empty frame in the operator's eyeline is the same
+    /// decoration §6e removed when it took out the green dot. Nothing below or beside it moves
+    /// when it appears: the title truncates rather than reflows, and truncating a title is not a
+    /// hit target (which is what the cover frame's always-rendered rule is actually protecting).
+    @ViewBuilder
+    private var noteBox: some View {
+        if model.current != nil {
+            let c = model.config()
+            if !c.note.isEmpty || !c.tags.isEmpty {
+                Text(CenterView.noteText(c))
+                    .multilineTextAlignment(.leading)
+                    // Two lines is the height budget above, for ANY content. Nothing else
+                    // bounds it: not `Store.noteMax`, not `tagsPerSong`.
+                    .lineLimit(2)
+                    .padding(.horizontal, 10).padding(.vertical, 7)
+                    .frame(maxWidth: 520, alignment: .leading)
+                    .background(Palette.panel2)
+                    .overlay(alignment: .leading) {
+                        Rectangle().fill(Palette.lineStrong).frame(width: 3)
+                            .allowsHitTesting(false)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .help(CenterView.plainNoteText(c))
+                    .accessibilityLabel(CenterView.plainNoteText(c))
+            }
+        }
+    }
+
+    /// One paragraph, two styles. The note and the tags share the same two lines rather than
+    /// taking a line each, because a separate tag row costs ~15 pt of real height and the
+    /// argument above is that this box costs none.
+    ///
+    /// **The note comes first and the tags trail**, and that order is the whole decision: with
+    /// `.lineLimit(2)` something has to truncate, and losing the sentence the setter wrote is
+    /// worse than losing the last of a list the setter can also see in SETUP.
+    ///
+    /// `static` so `--tagtest` can measure exactly what the pane will draw — §6d's rule that a
+    /// layout claim gets measured, not asserted.
+    static func noteText(_ c: SongConfig) -> AttributedString {
+        var out = AttributedString("")
+        if !c.note.isEmpty {
+            var a = AttributedString(c.note)
+            a.font = Typo.font(13)
+            a.foregroundColor = Palette.text
+            out += a
+        }
+        if !c.tags.isEmpty {
+            var t = AttributedString((c.note.isEmpty ? "" : "   ")
+                                     + c.tags.joined(separator: " · "))
+            // Muted and a step smaller, never a hue: §6d gives every hue exactly one meaning
+            // and a tag has no state to report.
+            t.font = Typo.font(12)
+            t.foregroundColor = Palette.muted
+            out += t
+        }
+        return out
+    }
+
+    /// The same text for a tooltip and for VoiceOver, which take a plain `String`.
+    static func plainNoteText(_ c: SongConfig) -> String {
+        [c.note, c.tags.joined(separator: " · ")]
+            .filter { !$0.isEmpty }.joined(separator: " — ")
     }
 
     private var guardStrip: some View {

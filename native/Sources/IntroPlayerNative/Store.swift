@@ -73,6 +73,34 @@ struct SongConfig {
     var played: Bool = false
     var configured: Bool = false
     var auto: Bool = false          // introStart was guessed, not placed by the GM
+    /// Free text the setter writes for the OPERATOR to read in the moment they open the question
+    /// — "ฝั่งซ้ายน่าจะได้เปรียบ", "คนรุ่น 40+ รู้แน่".
+    ///
+    /// Deliberately NOT part of `SongBase` and NOT a `MarkerField` case. It changes nothing that
+    /// goes to air, so it has no `base`, no `revert` and no on-site badge — and adding a
+    /// text-valued case to a `CaseIterable` that drives `onsiteEdits`, `revert`, the setup
+    /// panel's field cards and `--handoff` would force every one of those switches to answer
+    /// "what does reverting a sentence mean". The handover carries it through `DiffField.note`
+    /// instead, where it is only ever a label and two strings.
+    ///
+    /// It must also never stamp `configured` — see `AppModel.setNote`.
+    var note: String = ""
+    /// Short reusable labels, for the facts that repeat across songs where the note is a
+    /// sentence that does not — "ยุค 90", "ผู้หญิงร้อง", "คนรุ่น 40+".
+    ///
+    /// **Stored as the strings themselves, not as ids into a registry.** Ids look tidier and
+    /// are wrong here for two reasons that both bite at the handover: two machines each minting
+    /// `t4` collide, so a merge would have to reconcile two registries instead of taking a set
+    /// union; and an id is unreadable in a file people hand-edit and that the web fallback
+    /// round-trips without understanding. The registry is therefore DERIVED from use
+    /// (`Store.tagsInUse`), never stored — the same reasoning as `onsiteEdits` deriving from
+    /// `base` rather than from a flag (§8e): a stored index can go stale, a derived one cannot.
+    ///
+    /// Carries no colour. A user-colourable chip would hand §6d's mechanism — one meaning per
+    /// hue — to someone with no reason to know it exists, and an amber chip beside the
+    /// "unreviewed guess" badge or a green one beside "✓ ตอบถูก" is how the one warning
+    /// that must never be ignored gets diluted.
+    var tags: [String] = []
     /// The values the setter signed off at handover. Written ONLY by export/import — never by an
     /// ordinary marker edit — so anything differing from it is an edit made after the handover.
     /// nil means this song has never been through a handover, so there is nothing to compare to.
@@ -293,12 +321,29 @@ final class Store {
     /// is a number that did NOT appear, which is not something an operator can check.
     var lastRanVersion = ""
 
-    init() { load() }
+    /// A store that can never write. Set only by `init(rawForTest:)`.
+    ///
+    /// Not test scaffolding — a safety property. The headless checks run in the operator's own
+    /// folder against their real `config.json`, and several of the things worth checking here
+    /// (`set`'s read-it-before-you-delete-it guards, `Handoff.apply`, which ends in `saveNow()`)
+    /// only mean anything if you can put a controlled value in front of them. This makes that
+    /// possible without the diagnostic being able to touch the file at all.
+    private let readOnly: Bool
+
+    init() { readOnly = false; load() }
+
+    /// Only for the headless self-checks. The store cannot write.
+    init(rawForTest r: [String: Any]) { readOnly = true; apply(raw: r) }
 
     func load() {
-        raw = (try? Data(contentsOf: AppPaths.config))
-            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        apply(raw: (try? Data(contentsOf: AppPaths.config))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:])
+    }
+
+    private func apply(raw incoming: [String: Any]) {
+        raw = incoming
         songs.removeAll()
+        tagCache = nil
         for (k, v) in raw where k != "_settings" {
             guard let d = v as? [String: Any] else { continue }
             songs[k] = Store.decode(d)
@@ -346,6 +391,88 @@ final class Store {
         v.isFinite ? min(max(0, v), maxMarker) : 0
     }
 
+    /// How long a note may be, counted in grapheme clusters.
+    ///
+    /// This is a LAYOUT constant, not a preference. The note is displayed in `CenterView`'s
+    /// title row, inside the horizontal slack that row already has beside a 52 pt cover frame —
+    /// which is what makes it cost zero height, and the reason that matters is §15: the only
+    /// flexible child of that pane is the waveform, it has a hard `minHeight: 160` floor, and
+    /// past the floor content that overruns the window centres and clips BOTH ends. The song
+    /// title goes off the top and ✓ Correct / ✗ Wrong go off the bottom, with no scroller.
+    ///
+    /// Two things do that job and they are not interchangeable. `CenterView`'s `.lineLimit(2)`
+    /// is the HEIGHT GUARANTEE — structural, true for any content, including a line of Latin
+    /// capitals that are far wider than Thai. This cap is the READABILITY bound: tuned so that
+    /// ordinary Thai prose fits those two lines and truncation stays the backstop rather than
+    /// the normal case. `--notetest` measures the fit instead of trusting it.
+    ///
+    /// Capping the length is better than relying on the ellipsis: this is read while a question
+    /// is going out, hover is not available then, and a note too long to take in at a glance has
+    /// already failed at its job.
+    static let noteMax = 120
+
+    /// Everything a note has to survive on the way in: a hand-edit, another build, a paste.
+    static func clampNote(_ s: String) -> String {
+        // Flattened to one line. A pasted newline is the one input that can defeat the height
+        // argument above, and the field that writes this is single-line so it cannot produce one.
+        var n = s
+        for bad in ["\r\n", "\n", "\r", "\t", "\u{2028}", "\u{2029}"] {
+            n = n.replacingOccurrences(of: bad, with: " ")
+        }
+        // NFC. Two visually identical Thai strings compare unequal otherwise, and the handover
+        // diff would then offer the setter a row where nothing had changed — same family as
+        // §8f's grapheme-cluster floor.
+        n = n.precomposedStringWithCanonicalMapping
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if n.count > noteMax { n = String(n.prefix(noteMax)) }
+        return n.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// A tag is a LABEL, so it is bounded much harder than a note. Both numbers are about the
+    /// same 2-line box in `CenterView`: six tags of 24 and a 120-character note cannot all fit,
+    /// and `.lineLimit(2)` is what decides what you see — which is why the note comes FIRST
+    /// there and the tags are what truncate. A tag long enough to be a sentence is a note.
+    static let tagMax = 24
+    static let tagsPerSong = 6
+
+    /// nil for anything that is not a usable tag.
+    static func clampTag(_ s: String) -> String? {
+        var n = s
+        for bad in ["\r\n", "\n", "\r", "\t", "\u{2028}", "\u{2029}"] {
+            n = n.replacingOccurrences(of: bad, with: " ")
+        }
+        // The separator the centre pane joins tags with. A tag containing it would read as two
+        // tags there and as one everywhere else.
+        n = n.replacingOccurrences(of: " · ", with: " ")
+            .replacingOccurrences(of: "·", with: " ")
+        while n.contains("  ") { n = n.replacingOccurrences(of: "  ", with: " ") }
+        n = n.precomposedStringWithCanonicalMapping
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if n.count > tagMax { n = String(n.prefix(tagMax)) }
+        n = n.trimmingCharacters(in: .whitespacesAndNewlines)
+        return n.isEmpty ? nil : n
+    }
+
+    /// The dedup key. Thai has no case, but "Pop" and "pop" on one song are one tag by any
+    /// reading, and two spellings in the registry make its suggestions useless.
+    ///
+    /// Which spelling survives is decided differently in the two places it matters, and both
+    /// rules have to be DETERMINISTIC. Here the input is an ordered array, so first-seen is a
+    /// real rule and nothing rewrites what somebody typed. `tagsInUse` reads a Dictionary,
+    /// where first-seen is not a rule at all — see the note there.
+    static func tagKey(_ s: String) -> String { s.localizedLowercase }
+
+    static func clampTags(_ raw: [String]) -> [String] {
+        var out: [String] = []
+        var seen = Set<String>()
+        for t in raw {
+            guard let c = clampTag(t), seen.insert(tagKey(c)).inserted else { continue }
+            out.append(c)
+            if out.count >= tagsPerSong { break }
+        }
+        return out
+    }
+
     private static func decode(_ d: [String: Any]) -> SongConfig {
         var c = SongConfig()
         // NaN/Infinity would crash saveNow(): JSONSerialization raises an Obj-C exception that
@@ -358,6 +485,8 @@ final class Store {
         if let v = d["played"] as? Bool { c.played = v }
         if let v = d["configured"] as? Bool { c.configured = v }
         if let v = d["auto"] as? Bool { c.auto = v }
+        if let v = d["note"] as? String { c.note = clampNote(v) }
+        if let v = d["tags"] as? [Any] { c.tags = clampTags(v.compactMap { $0 as? String }) }
         if let bd = d["base"] as? [String: Any] {
             var b = SongBase()
             if let v = bd["introStart"] as? Double { b.introStart = clampMarker(v) }
@@ -382,6 +511,51 @@ final class Store {
         return c
     }
 
+    /// Every tag in use anywhere, most-used first then alphabetical — the registry, DERIVED.
+    ///
+    /// Cached because `SetupPanel` reads it from `body`, which re-renders at the player's tick
+    /// rate (§8f's memoised-cover lesson). The cache is cleared in the four places `songs`
+    /// changes and nowhere else, which is a completeness you can check by reading this file
+    /// rather than by remembering to add a call — unlike `invalidateStatus()`, which the caller
+    /// has to get right.
+    private var tagCache: [String]?
+    var tagsInUse: [String] {
+        if let c = tagCache { return c }
+        // Counted per EXACT spelling, then the most-used spelling represents the key, ties
+        // broken lexicographically.
+        //
+        // The obvious rule — "the first spelling we see wins" — is not a rule here, because
+        // this walks `songs.values`, and Dictionary iteration order is not stable across
+        // launches: Swift seeds its hashing per process. So "Rock" and "rock" in one library
+        // would have relabelled the suggestion chip at random on each launch, and `--tagtest`
+        // caught it by failing on one run after passing on the previous one. A check that
+        // passes by luck is worse than no check.
+        var perSpelling: [String: Int] = [:]
+        for c in songs.values { for t in c.tags { perSpelling[t, default: 0] += 1 } }
+        var total: [String: Int] = [:]
+        var best: [String: String] = [:]
+        for (t, n) in perSpelling.sorted(by: { $0.key < $1.key }) {   // stable input order
+            let k = Store.tagKey(t)
+            total[k, default: 0] += n
+            if let cur = best[k] {
+                if n > perSpelling[cur]! { best[k] = t }               // ties keep the earlier
+            } else {
+                best[k] = t
+            }
+        }
+        let out = total.keys
+            .sorted { a, b in
+                total[a]! != total[b]! ? total[a]! > total[b]! : (best[a]! < best[b]!)
+            }
+            .compactMap { best[$0] }
+        tagCache = out
+        return out
+    }
+    func songsTagged(_ tag: String) -> [String] {
+        let k = Store.tagKey(tag)
+        return songs.filter { $0.value.tags.contains { Store.tagKey($0) == k } }.map(\.key)
+    }
+
     func config(for path: String) -> SongConfig { songs[path] ?? SongConfig() }
 
     func set(_ c: SongConfig, for path: String) {
@@ -396,6 +570,19 @@ final class Store {
         if c.played { d["played"] = true } else { d.removeValue(forKey: "played") }
         if c.configured { d["configured"] = true } else { d.removeValue(forKey: "configured") }
         if c.auto { d["auto"] = true } else { d.removeValue(forKey: "auto") }
+        // Read-it-before-you-delete-it, the same rule `writeSettings` applies to `updateFeed`
+        // and `resetAt`: only remove a key we successfully READ as empty. If a newer build ever
+        // stores the note as something other than a bare string, this build decodes `""` — and
+        // `set` runs on every marker edit, so an unguarded `removeValue` here would delete the
+        // newer build's field on the first drag.
+        if !c.note.isEmpty { d["note"] = c.note }
+        else if d["note"] is String { d.removeValue(forKey: "note") }
+        // Same guard, same reason. `[Any]` and not `[String]`: a newer build could write a list
+        // of objects, and the point is to recognise "a list we did not understand" rather than
+        // to delete it.
+        if !c.tags.isEmpty { d["tags"] = c.tags }
+        else if d["tags"] is [Any] { d.removeValue(forKey: "tags") }
+        tagCache = nil
         if let b = c.base {
             d["base"] = ["introStart": round2(b.introStart), "introEnd": round2(b.introEnd),
                          "hook": round2(b.hook), "trimDb": b.trimDb, "ignoreEnd": b.ignoreEnd]
@@ -409,13 +596,14 @@ final class Store {
     func removeConfig(for path: String) {
         songs.removeValue(forKey: path)
         raw.removeValue(forKey: path)
+        tagCache = nil
         scheduleSave()
     }
 
     func pruneOrphans(existing: Set<String>) -> Int {
         let gone = songs.keys.filter { !existing.contains($0) }
         for k in gone { songs.removeValue(forKey: k); raw.removeValue(forKey: k) }
-        if !gone.isEmpty { scheduleSave() }
+        if !gone.isEmpty { tagCache = nil; scheduleSave() }
         return gone.count
     }
 
@@ -476,6 +664,7 @@ final class Store {
     var onSaveStateChange: (() -> Void)?
 
     func scheduleSave() {
+        guard !readOnly else { return }
         saveWork?.cancel()
         let w = DispatchWorkItem { [weak self] in self?.saveNow() }
         saveWork = w
@@ -483,6 +672,7 @@ final class Store {
     }
 
     func saveNow() {
+        guard !readOnly else { return }
         writeSettings()
         guard JSONSerialization.isValidJSONObject(raw) else {
             saveFailed = true; saveState = "บันทึกไม่ได้ (ข้อมูลเสีย)"; onSaveStateChange?(); return

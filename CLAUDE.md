@@ -321,6 +321,7 @@ native/
     ├── PaletteCheck.swift contrast / ΔL* / deutan ΔE2000 maths for --palettetest (§6d)
     ├── Store.swift        config.json + log.json, same schema as the web app (§9, §8d)
     ├── Snapshot.swift     a copy of the questions, taken at launch — §5c
+    │                      (note + tags have no file of their own — Store/CenterView/SetupPanel, §8g)
     ├── Library.swift      songs/ scan, path helpers, columns, Diagnostics
     ├── Handoff.swift      round.json, pre-flight checks, import plan/diff (§8e)
     ├── HandoverPanel.swift export sheet, diff/accept sheet, receive banner
@@ -376,6 +377,9 @@ INTROPLAYER_DIAG=1 $BIN --remodetest   # marker edits DURING playback must never
 INTROPLAYER_DIAG=1 $BIN --takes        # take model self-check, then the real log's running order
 INTROPLAYER_DIAG=1 $BIN --timefmt      # typed-field parser: round-trip, accepts, rejects (read-only)
 INTROPLAYER_DIAG=1 $BIN --overview     # overview strip: same data as columnPeaks, caches independent
+INTROPLAYER_DIAG=1 $BIN --notetest     # the note: clamps, merge rule, measured layout, the ※ (§8g)
+INTROPLAYER_DIAG=1 $BIN --tagtest      # tags: derived registry, UNION merge, the 2-line box (§8g)
+INTROPLAYER_DIAG=1 $BIN --filtertest   # the tag filter narrows the LIST and nothing else (§8g)
 INTROPLAYER_DIAG=1 $BIN --updatecheck  # semver compare, feed resolution, blocked URL schemes (§15)
 INTROPLAYER_DIAG=1 $BIN --updatestage  # download + unpack + verify a real release, then delete (§15)
 $BIN --version                         # NOT gated: writes nothing, and is the flag a support
@@ -1257,6 +1261,255 @@ from `body`, which re-renders at the player's tick rate.
 
 ---
 
+## 8g. The setter's note, and tags (`note` / `tags`)
+
+Asked for as "a function to create tags and assign tags to each song". Built with the centre of
+gravity moved, and the reason is one sentence of the owner's: the tags are *"เหมือนเป็น note
+สำหรับคนเปิดโจทย์ เช่น โจทย์นี้ ฝั่งนี้น่าจะได้เปรียบ ใครน่ารู้"* — a note for the person opening the question.
+
+### Why both, and why the note is the primary field
+
+Those examples are two different species:
+
+| the owner's words | species | the right tool |
+|---|---|---|
+| "ฝั่งนี้น่าจะได้เปรียบ" | a sentence, used once | **`note`** |
+| "ใครน่ารู้" → `ยุค 90` · `คนรุ่น 40+` | a short fact, repeats across songs | **`tags`** |
+
+> **Building only tags and handing them this job produces something worse than either.** A
+> registry full of one-off sentences, autocomplete that never matches, chips wrapping four
+> lines, and a filter with nothing to filter on. That is not a mistake somebody has to make —
+> it is what the feature turns into on its own if the prose has nowhere else to go.
+
+### Where they are read, and the measurement that decides it
+
+**Read in `CenterView`'s title row. Written in SETUP.** The split is not tidiness.
+
+The read placement costs **zero height**, which is the only reason a free-text field is allowed
+anywhere near the centre pane. That row is already 52 pt tall because of `coverFrame`, the title
+is `lineLimit(1)`, and the trailing `Spacer` was ~1400 pt of unused width. A box of two 13 pt
+lines measures **44.6 pt** — it fits inside height the row already spends. §15 is why that
+matters: the pane's only flexible child is the waveform, with a hard `minHeight: 160` floor, and
+past that floor content that overruns the window centres and clips **both** ends — the song
+title off the top and ✓ Correct / ✗ Wrong off the bottom, with no scroller. `App.swift`'s
+declared `minHeight: 640` is already 13–67 pt short before this feature existed.
+
+Three things about that box are load-bearing:
+
+- **`.lineLimit(2)` is the height guarantee. The length caps are not.** Measured: 120 Thai
+  clusters is 818 pt → 2 lines in the 497 pt box, but 120 Latin capitals is **1501 pt → 4
+  lines**. `Store.noteMax` keeps truncation rare for the content people actually write; the line
+  limit is what makes overflow impossible. Don't drop it because the text "is already bounded".
+- **The note is drawn FIRST and the tags trail**, in one paragraph sharing those two lines rather
+  than taking a line each (a separate tag row costs ~15 pt of real height). With a line limit
+  something has to truncate, and losing the sentence the setter wrote is worse than losing the
+  tail of a list that is also visible in SETUP.
+- **Rendered only when there is something to show.** Absence then means "no note", which is
+  unambiguous; an always-present empty frame in the operator's eyeline is the decoration §6e
+  removed when it took out the green dot. The cover frame's always-render rule does not apply —
+  it protects against a *hit target* moving, and a title truncating is not one.
+
+The write placement keeps the one thing that makes the key monitor's `typing` branch true out of
+the centre pane. A note is held in focus far longer than a numeric time field, so it does not get
+to sit beside the transport. See §11 for the cost that remains and is not fixable from here: a
+digit typed while a song plays still reaches `1`/`2`.
+
+### `note`
+
+≤120 grapheme clusters, flattened to one line, NFC, trimmed. The cap is a layout constant, the
+NFC is so two visually identical Thai strings don't produce a handover diff where nothing
+changed (§8f's grapheme-cluster lesson), and the one-line flattening is the only input that can
+defeat the height argument above.
+
+**Writes go through `updateConfigQuiet`, never `updateConfig`.** This is the whole safety story
+for the field: `updateConfig` stamps `configured = true, auto = false`, so a note written through
+it would certify an unreviewed machine guess as human-reviewed — dropping the song out of the
+`Return`/`Tab` sweep **and** out of the pre-flight's `stillAuto` and `hookDefault` warnings, so a
+round nobody looked at would pass the handover check. That is §11's typed field committing on
+blur and §7a4's `applyGuess` certifying itself, in a third costume. And a note is exactly what
+a setter writes *before* deciding where the markers go.
+
+Commit on **Return**; losing focus **cancels** — the same contract as `MarkerTimeField`, for the
+same three reasons (§11). Clearing the field and pressing Return is how a note is deleted.
+
+### `tags`
+
+Stored as **the strings themselves, not ids into a registry.** Ids look tidier and are wrong
+here for two reasons that both bite at the handover: two machines each minting `t4` collide, so
+a merge would have to reconcile two registries instead of taking a set union; and an id is
+unreadable in a file people hand-edit and that the web fallback round-trips without
+understanding.
+
+The registry is therefore **derived from use** (`Store.tagsInUse`), never stored — the same
+reasoning as `onsiteEdits` deriving from `base` rather than a flag (§8e). A tag stops being
+offered the moment the last song carrying it drops it. It is cached, because `SetupPanel` reads
+it from `body`, and the cache is cleared in the four places `songs` changes **and nowhere else**,
+which is a completeness you can check by reading `Store.swift` rather than by remembering to add
+a call.
+
+≤6 per song, ≤24 clusters each. Both numbers are about the same two lines above. Deduped on
+`Store.tagKey` (`localizedLowercase`), because "Pop" and "pop" on one song are one tag by any
+reading and two spellings make the registry's suggestions useless.
+
+> **A tag carries no colour, and that is a rule, not a style choice.** A user-colourable chip
+> hands §6d's mechanism — one meaning per hue — to someone with no reason to know it exists.
+> An amber chip beside the "unreviewed guess" badge, or a green one beside `✓ ตอบถูก`, is how
+> the one warning that must never be ignored gets diluted.
+
+> **`tagsInUse` cannot use "the first spelling we see".** It walks `songs.values`, and Swift
+> seeds Dictionary hashing per process — so that rule is not a rule, and "Rock" vs "rock" would
+> have relabelled the suggestion chip at random on each launch. The most-used spelling wins,
+> ties broken lexicographically. Found by `--tagtest` failing on one run after passing on the
+> previous one: **a check that passes by luck is worse than no check.**
+
+### The handover: additive, in one direction only
+
+Both travel in `round.json` — that is the entire point of a note, written on one machine to be
+read on another (§8e). One rule governs the merge:
+
+> **An empty or absent incoming value means "I have nothing to say", never "delete yours."**
+
+| | rule |
+|---|---|
+| `note` | empty incoming → no row, nothing changes · both sides non-empty and different → one row, the setter picks |
+| `tags` | **union**, as a row with a checkbox so the setter can decline · `theirs` shows the RESULT of accepting, not the sender's list |
+
+**That rule is what stops §13's `round.json` gap from blocking this.** `RoundPackage.write`
+rebuilds its dictionary from the struct, so a build that does not know a field **drops** it
+rather than merging it — a round sent setter(new) → operator(old) → setter(new) comes back with
+the field missing. Under an additive rule that reads as *silence* and the local value survives.
+Under a symmetric one it reads as a *deletion*, and the diff sheet pre-accepts every row. The
+proper fix (hold `raw` per song, read `version`, add `writtenBy`) is still worth doing and is
+still in §13 — it is just no longer a prerequisite.
+
+The cost, stated so nobody rediscovers it: **a note or tag REMOVED on the operator's machine
+does not travel.** It has to be said out loud. That is the safe direction of the two.
+
+A diff row for either is rendered on **its own lines**, not in a value column: a sentence or a
+tag list cannot be compared in ~160 pt, and reading both sides is the entire decision the row
+exists for. `copyConfig(from:)` carries both (additively) — the donor exists because a reused
+song should not start blank (§8c), and a note is a fact about the song, not about the round.
+
+### The filter: a separate accessor, because of what the other 22 call sites are
+
+Narrowing the list to one tag is three lines of filtering and one real decision: **where**.
+
+`songsIn(_:)` has 26 call sites and only **four** are the list and its navigation. The rest are
+`Handoff.export` / `plan` / `apply`, `Preflight.fast`, `reviewRemaining`, `nextNeedingReview`,
+`onsiteSongs`, `onsiteFieldCount`, `resetPlayed`, `usedInRound`, the playlist picker's per-round
+counts and the `Songs (n)` header. So the natural minimal diff — filter inside `songsIn(_:)` —
+would have quietly handed a round over with two thirds of its questions missing, scored the
+review sweep against a view instead of the round, and made `✓ ยืนยันครบทุกเพลงในรอบนี้` a lie.
+
+| | |
+|---|---|
+| `songsIn(_:)` | **the round.** Counts, review sweep, handover, pre-flight, reset |
+| `visibleSongs(_:)` / `visibleSongs(column:)` | **what the list shows.** Rows, column counts, ↑↓, `[` `]` |
+
+**The unfiltered column accessor was deleted, not kept beside the new one.** That is the part
+that actually protects this: no headless check can prove the UI calls the right accessor, so the
+remaining defence is that narrowing the handover now requires typing `visibleSongs` somewhere it
+does not belong — a visible mistake instead of an invisible one. `--filtertest` pins the other
+half, including the counterfactual (`Handoff.package` handed the filtered list loses 2 of 4
+songs) so the cost of getting it wrong is written down as a number.
+
+Four properties, each for a reason:
+
+- **It dies with the process.** `tagFilter` is on `AppModel`, has no `_settings` key, and
+  `--filtertest` asserts none appears. A filter that survived a relaunch is how an operator opens
+  the app on a show day to a round missing most of its questions — and §8c already measured that
+  exact failure for `lastPlaylist`, reported from real use as "the app can't find my songs".
+- **It always says what it is hiding.** The strip states the tag, `เห็น n จาก N`, `ซ่อนอยู่ k`,
+  and carries its own way out. The `Songs (N)` header above it stays unfiltered on purpose, so
+  the two numbers together say "this is a view, not the round".
+- **The selection can never be hidden.** `select` clears the filter and TOASTS when handed a song
+  the filter excludes — one guard at the one choke point, because `Tab`, `Return`'s advance, a
+  log row and `nextNeedingReview` all target the whole round on purpose. And `setTagFilter`
+  refuses a filter that would show nothing, even though the menu only offers tags present in the
+  round: the invariant should hold by construction, not because one caller behaves.
+- **No hue.** `Palette.tintSelect` — the selection emphasis the active column header already
+  uses — not a colour with a meaning. §6d gives each hue exactly one, and amber in particular
+  means the intro-end stop is not armed and nothing else.
+
+### Where the note is visible: three surfaces, one rule each
+
+| surface | shows | why that much |
+|---|---|---|
+| the song list, `※` | **that there is a note** | a 9 pt slot holds a glyph, nothing more |
+| `CenterView`'s box | note + tags, 2 lines | the height the title row already spends (§8g above) |
+| the row's tooltip | note + tags, in full | a hover is asked for, so it can afford to be complete |
+
+**`※` in the song list.** Until this, nothing in the list said *where* the annotations were, so
+a setter scanning a round had to open every song to find out.
+
+- **A second reserved slot, not a share of `✎`'s.** A song edited on set can also carry a note,
+  and one slot would have to hide one of the two. Reserved whether or not it is filled, because
+  a slot that appears only when filled moves the title under the cursor — this row's recurring
+  defect (§12: the transport buttons, the focus hint).
+- **The glyph was measured, not chosen.** Every other mark here is spoken for — `✎` on-site,
+  `✓`/`✗` outcome, `○` never opened, `🎯` guessed, `#` take order — and of the unspoken
+  candidates `※` is the only one that fits: **7.01 pt** at the 12 pt it renders at
+  (`Typo.font(10)` clamps to `thaiFloor`), against a 9 pt slot. `☰` and `▤` are 10.4–10.6 and
+  read as a menu or a filled block; `≡` fits but is the hamburger idiom; `🗒` is an emoji, i.e.
+  17 pt and a colour this palette does not control. `※` also carries real ink at 1× rather than
+  an all-antialiased stroke, and its radial shape cannot be read as the pencil's diagonal.
+  > Measured in passing and worth knowing: **`✎` is 10.93 pt in its own 9 pt slot** and has
+  > always overflowed it by ~1 pt a side. Nothing is broken by it — the neighbouring gap is 8 pt
+  > — but size a new slot from a measurement, not from the one next to it.
+- **Grey, never a hue** (§6d), and **note-only, never tags.** The filter above the list answers
+  "which songs carry tag X" better than a glyph can, and a mark meaning "note or tags" would
+  answer neither question. Absence meaning exactly "no note" is the property worth having.
+
+**The read-only box in the web fallback.** `index.html` now draws the same note beside the same
+title. It is the *mid-taping* fallback (§6c), so an operator who falls back to it was losing
+sight of the one field written for them to read.
+
+- **Reading only. Writing stays in the native app**, where the caps, the NFC normalisation and
+  the commit-on-Return contract live. A second half-implementation of those is how the two
+  would drift.
+- Nothing there can lose either field, which was verified rather than assumed: `cfgFor` builds
+  an entry wholesale only when one is absent, and `saveConfig` POSTs back the object it loaded.
+  Measured end to end — a note, a 2-line note, a tags-only song and a note full of `<script>`
+  all survived a round trip through the web app byte-intact, and `_settings` with them.
+- **`⤵ ดึงค่าจากรอบ` carries them too**, matching `copyConfig(from:)`: additive, union on tags,
+  deduped case-insensitively, and capped at the native's own numbers so this path cannot write
+  a value the native app would silently trim on its next load.
+- **Two lines there, as in the native app — but for a different reason, and the difference is
+  the point.** The native box is free because the title row is already 52 pt tall (`coverFrame`).
+  The web has no cover art, so its title block is only 36–40 pt and a second line grows the row
+  by ~9 pt. That is still free, because `.se{margin-top:auto}` pins ✓ Correct / ✗ Wrong to the
+  bottom and the 9 pt comes out of the slack above them: measured at a **620 px** viewport —
+  below the native app's own declared minimum — a 2-line note still leaves **156.5 pt** of
+  slack. The native's hard `minHeight: 160` floor, where overflow clips both ends, has no
+  equivalent here.
+- **`.notebox[hidden]{display:none}` is load-bearing.** An author `display` beats the UA sheet's
+  `[hidden]`, and the box sets `display:-webkit-box` for the line clamp — the identical pair the
+  log overlay needed (§12). Without that line the empty box can never be hidden.
+- Every node in it is filled with `textContent`. The note is free text a person typed, and the
+  row's glyph is a literal so the note never goes near `innerHTML` either.
+
+### If an audience or second-screen view is ever built, notes must not reach it
+
+§13 lists one as an idea. `note` is the first free text in this app that one person writes for
+another to read on the day, and its content is precisely what the contestants must not see:
+`"ฝั่งซ้ายน่าจะได้เปรียบ"`. Written down here because by then nothing in the code will say why.
+
+### Verify
+
+```bash
+INTROPLAYER_DIAG=1 $BIN --notetest   # 66 assertions
+INTROPLAYER_DIAG=1 $BIN --tagtest    # 62 assertions
+```
+
+Both are **read-only**, and by construction rather than by care: every `Store` they build comes
+from `Store.init(rawForTest:)`, which sets a `readOnly` flag that makes `scheduleSave` and
+`saveNow` no-ops. That is what lets them exercise `set`'s read-it-before-you-delete-it guards and
+`Handoff.apply` (which ends in `saveNow()`) against controlled values instead of the operator's
+real file — something `--handoff` cannot do, which is why `--handoff` is in the write-y list.
+They also **measure** the layout claims through `Typo.nsFont` rather than asserting them.
+
+---
+
 ## 9. `config.json` schema
 
 Keyed by **path relative to `songs/`** (a bare filename for loose files). Example:
@@ -1286,6 +1539,11 @@ Keyed by **path relative to `songs/`** (a bare filename for loose files). Exampl
     "hook": 60,           // seconds; Reveal jumps here
     "trimDb": 0,          // per-song manual gain trim, dB (−12..+12)
     "ignoreEnd": false,   // if true, don't auto-stop at introEnd
+    "note": "ฝั่งซ้ายน่าจะได้เปรียบ · คนรุ่น 40+ รู้แน่",  // what the setter tells the
+                          // OPERATOR, read beside the song title the moment they open the
+                          // question — §8g. ≤120 clusters, one line, NFC. Absent when empty.
+    "tags": ["ยุค 90", "ผู้หญิงร้อง"],      // ≤6, ≤24 clusters each. The STRINGS, not
+                          // ids — the registry is derived (`Store.tagsInUse`), §8g.
     "played": false,      // "used this taping" flag (ephemeral-ish)
     "configured": true,   // GM actually placed markers — drives the green "set" badge
     "auto": false,        // introStart was guessed, not set by the GM (§7a1)
@@ -1298,6 +1556,11 @@ Keyed by **path relative to `songs/`** (a bare filename for loose files). Exampl
 }
 ```
 
+- **`note`/`tags` are not in `base` and not in `MarkerField`.** They change nothing that goes to
+  air, so they have no `revert` and no on-site badge — and a text- or list-valued `MarkerField`
+  case would force `onsiteEdits`, `revert`, the setup panel's field cards and `--handoff` to
+  answer "what does reverting a sentence mean". The handover carries them through
+  `DiffField.note` / `.tags` instead — §8g.
 - `cfgFor(name)` lazily fills defaults from `DEFAULT_CFG`
   `{introStart:0, introEnd:15, hook:60, ignoreEnd:false}`, and returns a **throwaway** copy when
   `name` is falsy so browsing with no song selected can't write a `"null"` key.
@@ -1539,6 +1802,17 @@ Two notes that outlive the key itself:
 The two-press rule is keyed on `isPlaying` rather than on a mode toggle for the same reason §1
 rejects a show mode: a mode has to be remembered, and the day somebody forgets to switch it is
 the day it does not help.
+
+> **The note and tag fields do not change which keys are carved out, and that has a cost worth
+> knowing.** §12 keeps `Space`/`1`/`2` live while a text field holds focus AND playback is
+> running — deliberately: a buzz that cannot be paused or scored is worse than a character that
+> does not arrive. For the numeric marker fields that was free ("nobody types a time while a
+> question is on air", and a digit is never valid mid-time anyway). A note is the first field
+> here where a digit is ORDINARY CONTENT: typing `ยุค 2000` while a song plays fires ✗ Wrong
+> and writes a log event. Paused is not playing, so during a real take the field types normally
+> — the window is the setter auditioning while writing. The SETUP card says so on screen rather
+> than leaving it to be found, and `↩ ยกเลิกรายการล่าสุด` undoes a stray event. If that window is
+> ever worth closing, the fix belongs in the field, not in the monitor.
 
 > **Switch on `e.code`, never `e.key`.** This machine's input source is often **Thai**, where the S
 > key reports `e.key === 'ห'` — every letter shortcut in the app silently stopped working. `e.code`
@@ -1937,7 +2211,37 @@ the day it does not help.
   same line** rather than added: a second `trap … EXIT` **replaces** the first, which is how
   the new cleanup would have been silently disarmed by the existing one.
 
+- `tagsInUse` picked the surviving spelling of a tag by **Dictionary iteration order**, which
+  Swift seeds per process — so "Rock" and "rock" in one library relabelled the suggestion chip
+  at random between launches, and `--tagtest` was flaky rather than wrong. Most-used spelling
+  wins, ties lexicographical. A check that passes by luck is worse than no check (§8g).
+- The note's height safety was first documented as coming from `Store.noteMax`. Measured, that
+  is false: 120 Thai clusters is 818 pt but 120 Latin capitals is 1501 pt, i.e. 4 lines in a box
+  budgeted for 2. `.lineLimit(2)` is the guarantee and the cap is only a readability bound —
+  stated that way round now, because the wrong version is an invitation to delete the line that
+  actually holds (§8g).
+- The tag add field is hidden at the per-song cap, which also hid the `n/6` counter next to it —
+  so hitting the limit looked like the row had broken. It says so in words instead.
+- **A "does this glyph exist?" check that could not fail**, written to protect the song list's
+  `※` and caught by its own negative control on the first run. Two wrong ways to ask it, both
+  of which look right: `CTFontGetGlyphsForCharacters` queries the **base** font only and knows
+  nothing about fallback, so it reports `※` as absent — true of SF and irrelevant, because
+  §6d's whole mechanism is the cascade (`※` lands in HelveticaNeue exactly as `ก` lands in
+  SukhumvitSet). And testing the laid-out line for glyph 0 **never** fails: CoreText's
+  `LastResort` font supplies a glyph for every codepoint in Unicode, assigned or not — U+E000
+  comes back as glyph 4 at 13.20 pt. The discriminator is the run's **font name**: landing in
+  LastResort *is* the placeholder box. `Palette.audit` in a new costume, and the negative
+  control is the only reason it was not shipped green.
+
 **Web version:**
+- `selectSong` cleared `env` but **not `sqPrefix`**, which every guard downstream tests
+  (`rmsRange`, `measuredRms`, `rebuildCols`). So after switching songs those guards passed on
+  the *previous* song's prefix sums while `env` was null, and `rmsRange` threw on `env.length`.
+  Any marker edit inside the decode window — `⤵ ดึงค่าจากรอบ`, `I`/`O`/`H` — therefore died
+  inside `afterCfgChange` **after** writing the value and **before** `saveConfig`: an edit that
+  looked applied and was never saved. The "not analysed yet" path those guards lead to was
+  already written and simply unreachable (`measuredRms` returns `scope:null`, the panel says
+  "กำลังวิเคราะห์…"). Clear the two together. Found while testing the note box.
 - `loadWaveform` opened with `if(decoding) return;`, which dropped the **newer** request: clicking
   song B while A was still decoding left B with no waveform, no auto-gain and no auto Intro Start,
   stuck on "กำลังวิเคราะห์คลื่นเสียง…" until re-selected. It uses a token — latest selection wins.
@@ -1984,6 +2288,7 @@ Product / UX
 - Auto-sort or hide **played** songs. (Per-episode song sets via subfolders: done, §8c.
   Setter → operator handover: done, §8e. Typed marker fields, `Shift+←/→` nudge, bounded hook
   whole-song overview strip, log-as-pane, level bar, destructive buttons behind `⋯`,
+  the setter's note + tags: §8g,
   light/dark themes, Intro End + Hook auto-guess, cover art: all done, native only.
   The bounded hook audition (`G`) was done and then **removed** — see §11. Versioning, release packaging, the update check and the
   data-preserving installer: done, §15.)
@@ -1995,6 +2300,22 @@ Product / UX
   of 9). It only matters for files with no embedded art, which is currently none of them — but
   if that changes, Spotify's catalogue is the obvious better source and the blocker is the
   credential, not the code (§8f).
+- **The web fallback cannot EDIT the note or tags**, only show them — deliberately (§8g: one
+  implementation of the caps and the commit contract, not two). Worth revisiting only if a
+  setter ever has to work on a machine that is not a Mac, which is the same condition as
+  porting the handover UI below.
+- **The tag filter has no keyboard shortcut and is not in §11's table.** It is a menu plus an
+  explicit `✕ เลิกกรอง` in the strip. `Esc` would be the natural key and was left alone: that
+  cascade already has five steps (pending → diff → About → handover → log), and a sixth that
+  silently widens the list is not obviously what `Esc` should mean there.
+- **The filter offers one tag at a time, not a combination.** Two tags (AND/OR) needs a UI for
+  the operator to say which, and nothing has asked for it. The accessor takes a single tag, so
+  adding it later means changing `Library.visible` and the strip, not the wiring.
+- **The SETUP tag chips are remove-only** — clicking a chip does not filter by it. Two different
+  meanings a few pt apart on a ~60 pt chip is §12's recurring defect, and the filter already has
+  an unambiguous entry point above the list.
+- **A global tag rename/delete** (fixing a typo across a round) is bulk work: no cross-song undo,
+  and `afterBulkChange` drops the stack. Out of scope on purpose.
 - **Port the handover UI to the web version.** The web app plays, marks and logs as before and
   round-trips `base` untouched, but export / import / diff / pre-flight exist only in the native
   app. Only matters if the setter's machine is not a Mac.
@@ -2069,6 +2390,9 @@ INTROPLAYER_DIAG=1 $BIN --remodetest  # marker edits mid-playback: 3 cases, none
 INTROPLAYER_DIAG=1 $BIN --takes       # running order: synthetic self-check + the real log
 INTROPLAYER_DIAG=1 $BIN --timefmt     # typed-field parser
 INTROPLAYER_DIAG=1 $BIN --overview    # strip data matches columnPeaks; caches stay independent
+INTROPLAYER_DIAG=1 $BIN --notetest    # note: 66 assertions. Writes NOTHING — Store(rawForTest:)
+INTROPLAYER_DIAG=1 $BIN --tagtest     # tags: 63 assertions, incl. the registry's determinism
+INTROPLAYER_DIAG=1 $BIN --filtertest  # the filter cannot reach the handover or the pre-flight
 INTROPLAYER_DIAG=1 $BIN --preflight   # the handover checklist
 INTROPLAYER_DIAG=1 $BIN --updatecheck # semver compare + the configured feed (§15)
 INTROPLAYER_DIAG=1 $BIN --updatestage # the in-app chain minus the swap (needs a feed) (§15)

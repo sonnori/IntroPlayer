@@ -223,26 +223,54 @@ struct DiffPanel: View {
         return Button {
             if on { model.acceptedRows.remove(r.id) } else { model.acceptedRows.insert(r.id) }
         } label: {
-            HStack(spacing: 10) {
-                Text(on ? "☑" : "☐").font(Typo.font(14))
-                    .foregroundStyle(on ? Palette.green : Palette.muted)
-                Text(Library.title(r.path)).font(Typo.font(12))
-                    .frame(width: 260, alignment: .leading).lineLimit(1)
-                Text(r.field.label).font(Typo.font(11, .semibold))
-                    .foregroundStyle(Palette.cyan).frame(width: 110, alignment: .leading)
-                Text(r.mine).font(Typo.font(12, mono: true))
-                    .foregroundStyle(Palette.muted)
-                Text("→").font(Typo.font(11)).foregroundStyle(Palette.muted)
-                Text(r.theirs).font(Typo.font(12, .semibold, mono: true))
-                    .foregroundStyle(on ? Palette.text : Palette.muted)
-                Spacer()
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 10) {
+                    Text(on ? "☑" : "☐").font(Typo.font(14))
+                        .foregroundStyle(on ? Palette.green : Palette.muted)
+                    Text(Library.title(r.path)).font(Typo.font(12))
+                        .frame(width: 260, alignment: .leading).lineLimit(1)
+                    Text(r.field.label).font(Typo.font(11, .semibold))
+                        .foregroundStyle(Palette.cyan).frame(width: 110, alignment: .leading)
+                    if !r.field.isProse {
+                        Text(r.mine).font(Typo.font(12, mono: true))
+                            .foregroundStyle(Palette.muted)
+                        Text("→").font(Typo.font(11)).foregroundStyle(Palette.muted)
+                        Text(r.theirs).font(Typo.font(12, .semibold, mono: true))
+                            .foregroundStyle(on ? Palette.text : Palette.muted)
+                    }
+                    Spacer()
+                }
+                // A note is a sentence and a tag list is a list, not a number. Side by side in
+                // a ~160 pt column the setter can read neither value, and reading BOTH is the
+                // entire decision this row exists for — so they wrap onto their own lines.
+                if r.field.isProse {
+                    noteValue("ของเครื่องนี้", r.mine.isEmpty ? "— ไม่มี —" : r.mine,
+                              r.mine.isEmpty ? Palette.dim : Palette.muted)
+                    // For tags `theirs` is the RESULT of accepting — the union — not the
+                    // sender's list, so the label must not claim it is what they sent.
+                    noteValue(r.field == .tags ? "รับแล้วจะเป็น" : "ที่รับมา",
+                              r.theirs, on ? Palette.text : Palette.muted)
+                }
             }
             .padding(.vertical, 7).padding(.horizontal, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(on ? Palette.panel2 : .clear)
             .clipShape(RoundedRectangle(cornerRadius: 6))
             .contentShape(Rectangle())
         }
         .buttonStyle(PressStyle(corner: 6))
+    }
+
+    private func noteValue(_ label: String, _ text: String, _ fg: Color) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(label).font(Typo.font(11)).foregroundStyle(Palette.dim)
+                .frame(width: 92, alignment: .trailing)
+            Text(text).font(Typo.font(12)).foregroundStyle(fg)
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.leading)
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, 32)
     }
 }
 

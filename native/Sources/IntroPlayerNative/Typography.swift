@@ -46,19 +46,27 @@ enum Typo {
 
     static func font(_ size: CGFloat, _ weight: NSFont.Weight = .regular,
                      mono: Bool = false, latinOnly: Bool = false) -> Font {
+        let key = "\(size)|\(weight.rawValue)|\(mono)|\(latinOnly)"
+        if let hit = cache[key] { return hit }
+        let f = Font(nsFont(size, weight, mono: mono, latinOnly: latinOnly))
+        cache[key] = f
+        return f
+    }
+
+    /// The same resolved face `font` returns, as an `NSFont`, so a layout claim can be MEASURED
+    /// rather than asserted. `--notetest` uses it to check `Store.noteMax` against the width the
+    /// note box actually has; §6d's whole argument is that this kind of claim gets measured.
+    static func nsFont(_ size: CGFloat, _ weight: NSFont.Weight = .regular,
+                       mono: Bool = false, latinOnly: Bool = false) -> NSFont {
         // Latin-only micro labels ("Space", "R", "1xx") may go below the Thai floor.
         let s = latinOnly ? size : max(size, thaiFloor)
-        let key = "\(s)|\(weight.rawValue)|\(mono)"
-        if let hit = cache[key] { return hit }
         let base = mono
             ? NSFont.monospacedDigitSystemFont(ofSize: s, weight: weight)
             : NSFont.systemFont(ofSize: s, weight: weight)
         let name = thaiFace[weight] ?? "SukhumvitSet-Text"
         let desc = base.fontDescriptor.addingAttributes(
             [.cascadeList: [NSFontDescriptor(fontAttributes: [.name: name])]])
-        let f = Font(NSFont(descriptor: desc, size: s) ?? base)
-        cache[key] = f
-        return f
+        return NSFont(descriptor: desc, size: s) ?? base
     }
 
     // The scale. Thai needs ~1.85x the vertical ink of Latin per marked line, so the step from

@@ -74,6 +74,9 @@
   .song.played{opacity:.45}
   .song.played .title{text-decoration:line-through}
   .song .badge{margin-left:auto; font-size:10px; color:var(--muted); flex:0 0 auto}
+  /* "this song carries a note". Reserved width whether or not it is filled, or the title would
+     shift. Grey, never a hue — amber in this app means the auto-stop is not armed. */
+  .song .nmk{flex:0 0 9px; font-size:11px; line-height:1; color:var(--muted); text-align:center}
   /* keep rows a uniform height so the columns stay scannable under pressure —
      the full name is in the tooltip */
   .song .title{display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
@@ -83,8 +86,21 @@
 
   /* center */
   .center{flex:1 1 auto; display:flex; flex-direction:column; padding:20px 24px; min-width:0; gap:16px}
+  .nowhead{display:flex; align-items:flex-start; gap:16px; min-width:0}
+  .nowhead .who{flex:1 1 auto; min-width:0}
   .nowtitle{font-size:22px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
   .nowsub{color:var(--muted); font-size:13px; margin-top:-8px}
+  /* The setter's note, READ-ONLY here — see renderNote(). It sits BESIDE the title rather than
+     under it so it costs no height: this column's flexible child is the waveform, and the width
+     to its right was unused. Two lines is the budget, for any content. */
+  .notebox{flex:0 1 520px; min-width:0; background:var(--panel2);
+    border-left:3px solid var(--line); border-radius:8px; padding:7px 10px;
+    font-size:13px; line-height:1.35;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden}
+  /* An author `display` beats the UA sheet's [hidden]{display:none} — the identical pair the
+     log overlay needed. Without this line the empty box can never be hidden. */
+  .notebox[hidden]{display:none}
+  .notebox .tg{color:var(--muted); font-size:12px}
 
   .times{display:flex; justify-content:space-between; font-variant-numeric:tabular-nums; font-size:13px; color:var(--muted); margin-bottom:6px}
   .wfwrap{position:relative; background:var(--panel2); border:1px solid var(--line); border-radius:8px; overflow:hidden}
@@ -262,9 +278,12 @@
   </div>
 
   <div class="center">
-    <div>
-      <div class="nowtitle" id="nowTitle">No song selected</div>
-      <div class="nowsub" id="nowSub">เลือกเพลงจากรายการด้านซ้าย</div>
+    <div class="nowhead">
+      <div class="who">
+        <div class="nowtitle" id="nowTitle">No song selected</div>
+        <div class="nowsub" id="nowSub">เลือกเพลงจากรายการด้านซ้าย</div>
+      </div>
+      <div class="notebox" id="noteBox" hidden></div>
     </div>
 
     <div>
@@ -471,8 +490,14 @@ function renderList(){
                   : st==='wrong'   ? '✗ ไม่มีคนตอบ'
                   : isPlayed       ? '✓ เล่นแล้ว'
                   : isCfg          ? 'ตั้งค่าแล้ว' : '';
-      div.innerHTML='<span class="title">'+titleOf(name)+'</span><span class="badge">'+badge+'</span>';
-      div.title=titleOf(name);          // titles are clamped to 2 lines; hover for the full name
+      // Which songs carry a note. Without it a setter cannot see WHERE the annotations are
+      // without opening every song. The span is always emitted so the width stays reserved, and
+      // the glyph is a literal — the note itself never goes near innerHTML.
+      const hasNote = !!(c && typeof c.note==='string' && c.note.trim());
+      div.innerHTML='<span class="nmk">'+(hasNote?'※':'')+'</span>'
+        +'<span class="title">'+titleOf(name)+'</span><span class="badge">'+badge+'</span>';
+      // titles are clamped to 2 lines; hover for the full name, and for what the setter wrote
+      div.title=titleOf(name)+(hasNote?'\n'+c.note:'');
       div.onclick=()=>selectSong(name);
       body.appendChild(div);
     });
@@ -527,7 +552,15 @@ function selectSong(name){
   $('btnPlay').disabled=false; $('btnReveal').disabled=false; $('btnRestart').disabled=false; $('btnPlayedMain').disabled=false;
   reflectPlaying(false);
   updatePlayedBtn(); updateChip(false);
-  env=null; colKey=''; zoomFit();
+  // `sqPrefix` has to go with `env`, and used not to. Found while testing the note box, and
+  // pre-existing: every guard downstream tests `sqPrefix` (rmsRange, measuredRms, buildCols),
+  // so leaving it pointing at the PREVIOUS song's audio let those guards pass on a song whose
+  // `env` is null — `rmsRange` then threw on `env.length`. Any marker edit inside the decode
+  // window (⤵ ดึงค่าจากรอบ, I/O/H) therefore died in `afterCfgChange` AFTER writing the value
+  // and BEFORE `saveConfig`, i.e. a marker edit that looked applied and was never saved. The
+  // "not analysed yet" path those guards lead to was already written and simply unreachable:
+  // `measuredRms` returns `scope:null` and the panel says "กำลังวิเคราะห์…".
+  env=null; sqPrefix=null; envStep=0; pcmLen=0; colKey=''; zoomFit();
   $('wfMsg').style.display='flex'; $('wfMsg').textContent='กำลังวิเคราะห์คลื่นเสียง…';
   renderSetup(); loadWaveform(name);
 }
@@ -822,7 +855,41 @@ wf.addEventListener('wheel',e=>{
 },{passive:false});
 
 // ---------- setup panel ----------
+// The setter's note and tags (see CLAUDE.md §8g), READ-ONLY.
+//
+// This is the one field in the app written on one machine to be read on another, and the web
+// app is what the operator falls back TO mid-taping — so not showing it was the one real cost
+// of the fallback. Writing it stays in the native app: that is where the caps, the NFC
+// normalisation and the commit-on-Return contract live, and a second half-implementation of
+// them here is how the two would drift.
+//
+// Nothing here can lose either field. `cfgFor` only builds an entry wholesale when one is
+// absent, and `saveConfig` POSTs back the object it loaded, so both keys survive a round trip
+// through this app untouched — verified, not assumed.
+function renderNote(){
+  const box=$('noteBox'); if(!box) return;
+  const c=current?config[current]:null;
+  // Defensive about types: config.json is hand-editable and the web app has no schema check.
+  const note=(c&&typeof c.note==='string')?c.note.trim():'';
+  const tags=(c&&Array.isArray(c.tags))?c.tags.filter(t=>typeof t==='string'&&t.trim()):[];
+  box.textContent='';
+  if(!note && !tags.length){ box.hidden=true; box.removeAttribute('title'); return; }
+  // textContent on every node, never innerHTML — this is free text a person typed.
+  // Note first, tags trailing and muted, sharing the two lines: the native pane's order, for
+  // the same reason — with a 2-line clamp something truncates, and the sentence matters more.
+  if(note){ const a=document.createElement('span'); a.textContent=note; box.appendChild(a); }
+  if(tags.length){
+    const b=document.createElement('span'); b.className='tg';
+    b.textContent=(note?'   ':'')+tags.join(' · ');
+    box.appendChild(b);
+  }
+  box.title=[note,tags.join(' · ')].filter(Boolean).join(' — ');
+  box.hidden=false;
+}
 function renderSetup(){
+  // Before the early return, so deselecting hides the box instead of leaving the last song's
+  // note beside "ยังไม่ได้เลือกเพลง".
+  renderNote();
   if(!current){ $('setupBody').innerHTML='<div class="empty">ยังไม่ได้เลือกเพลง</div>'; return; }
   const c0=cfgFor(current);
   let html=`<button class="playedbtn ${c0.played?'on':''}" id="btnPlayed">${c0.played?'✓ เล่นแล้ว — กดเพื่อยกเลิก':'ทำเครื่องหมายว่าเล่นแล้ว'}<span class="k">P</span></button>`;
@@ -912,6 +979,19 @@ function copyCfgFrom(src){
   d.introStart=s.introStart; d.introEnd=s.introEnd; d.hook=s.hook;
   d.ignoreEnd=!!s.ignoreEnd;
   if(s.trimDb) d.trimDb=s.trimDb;      // deliberately NOT `played` — that is per taping
+  // The donor exists because a REUSED song should not start blank, and a note is a fact about
+  // the song rather than about the round — so it comes along, exactly as the native app's copy
+  // does. Additive: a donor with nothing written never clears what is already here.
+  // The caps mirror Store.noteMax / tagsPerSong / tagMax, which stay the authority — the point
+  // of repeating them is that this path must not be able to write a value the native app would
+  // silently trim on its next load.
+  if(typeof s.note==='string' && s.note.trim()) d.note=s.note.trim().slice(0,120);
+  if(Array.isArray(s.tags) && s.tags.length){
+    const have=new Set((d.tags||[]).map(t=>String(t).toLowerCase()));
+    const add=s.tags.filter(t=>typeof t==='string' && t.trim() && !have.has(t.toLowerCase()));
+    const merged=(d.tags||[]).concat(add).map(t=>String(t).trim().slice(0,24));
+    if(merged.length) d.tags=merged.slice(0,6);
+  }
   syncFields(); zoomFit(); draw(); afterCfgChange(); renderSetup();
 }
 

@@ -401,9 +401,12 @@ struct SongListView: View {
                     .labelsHidden().font(Typo.font(12))
                 }
                 HStack {
+                    // The counts describe the ROUND and stay unfiltered on purpose — the strip
+                    // below is what reconciles them with the rows (§8g).
                     Text("Songs (\(model.songsIn(model.currentPlaylist).count)) · เล่นแล้ว \(playedCount)")
                         .font(Typo.font(12)).foregroundStyle(Palette.muted)
                     Spacer()
+                    tagFilterMenu
                 }
                 // Rescan stays a button: it is the safe one and the one pressed most (a round
                 // dropped in while the app is open is the commonest real complaint). The two that
@@ -489,6 +492,8 @@ struct SongListView: View {
             .background(Palette.panel)
             Divider().overlay(Palette.line)
 
+            tagFilterStrip
+
             if model.isWide {
                 HStack(spacing: 0) {
                     ForEach(0..<3, id: \.self) { i in
@@ -503,9 +508,11 @@ struct SongListView: View {
                         LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
                             ForEach(0..<3, id: \.self) { i in
                                 Section {
-                                    ForEach(model.songsIn(column: i), id: \.self) { SongRow(path: $0) }
+                                    ForEach(model.visibleSongs(column: i), id: \.self) {
+                                        SongRow(path: $0)
+                                    }
                                 } header: {
-                                    ColumnHeader(index: i, count: model.songsIn(column: i).count)
+                                    ColumnHeader(index: i, count: model.visibleSongs(column: i).count)
                                 }
                             }
                         }
@@ -524,6 +531,83 @@ struct SongListView: View {
         .frame(width: model.isWide ? 780 : 300)
         .background(Palette.panel)
         .overlay(alignment: .trailing) { Rectangle().fill(Palette.line).frame(width: 1) }
+    }
+
+    /// Picking the tag to narrow to. A `Menu`, so it costs no height in a pane whose scroller is
+    /// the flexible child — and it sits in the counts row, the width of the pane away from the
+    /// `⋯` that holds the two actions which throw work away (§12).
+    ///
+    /// Only tags present in THIS round are offered, so a pick can never produce an empty list.
+    @ViewBuilder
+    private var tagFilterMenu: some View {
+        let counts = model.tagCounts(inRound: model.currentPlaylist)
+        if !counts.isEmpty {
+            Menu {
+                Button("ทุกเพลงในรอบนี้") { model.clearTagFilter() }
+                Divider()
+                ForEach(counts, id: \.tag) { c in
+                    Button("\(Store.tagKey(c.tag) == Store.tagKey(model.tagFilter) ? "✓ " : "")"
+                           + "\(c.tag)  (\(c.count))") {
+                        model.setTagFilter(c.tag)
+                    }
+                }
+            } label: {
+                Text(model.tagFilter.isEmpty ? "⌕ แท็ก" : "⌕ \(model.tagFilter)")
+                    .font(Typo.font(11))
+                    .foregroundStyle(model.tagFilter.isEmpty ? Palette.muted : Palette.text)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .background(model.tagFilter.isEmpty ? Palette.panel2 : Palette.tintSelect)
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.line)
+                .allowsHitTesting(false))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .help("กรองรายการตามแท็ก — ไม่กรองตัวเลขหัวข้อ การส่งต่อ หรือรอบตรวจ")
+        }
+    }
+
+    /// **A filter that does not say what it is hiding is indistinguishable from missing files.**
+    /// That is not hypothetical: §8c records "the app can't find my songs", reported from real
+    /// use, for a round that was merely not the remembered one. So this strip states the tag, the
+    /// count it hides, and carries its own way out.
+    ///
+    /// It takes real height — unlike the note box, that is safe here: this pane's flexible child
+    /// is the song scroller, which simply gets shorter. `CenterView`'s is the waveform, with a
+    /// floor (§15).
+    ///
+    /// `tintSelect`, which is the selection emphasis already used by the active column header,
+    /// not a hue. §6d gives every hue one meaning and "the list is narrowed" is not one of them
+    /// — amber in particular means the intro-end stop is not armed, and nothing else.
+    @ViewBuilder
+    private var tagFilterStrip: some View {
+        if !model.tagFilter.isEmpty {
+            HStack(spacing: 8) {
+                Text("⌕ กรอง: \(model.tagFilter)")
+                    .font(Typo.font(12, .semibold)).foregroundStyle(Palette.tintSelectText)
+                Text("เห็น \(model.visibleSongs(model.currentPlaylist).count) "
+                     + "จาก \(model.songsIn(model.currentPlaylist).count) · ซ่อนอยู่ \(model.tagFilterHidden)")
+                    .font(Typo.font(11)).foregroundStyle(Palette.muted)
+                Spacer(minLength: 0)
+                Button { model.clearTagFilter() } label: {
+                    Text("✕ เลิกกรอง").font(Typo.font(11))
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PressStyle(corner: 6))
+                .foregroundStyle(Palette.text)
+                .background(Palette.panel2)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.line)
+                    .allowsHitTesting(false))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .frame(maxWidth: .infinity)
+            .background(Palette.tintSelect)
+            .overlay(alignment: .bottom) { Rectangle().fill(Palette.line).frame(height: 1) }
+        }
     }
 
     private func resetPlayedFlow() {
@@ -593,7 +677,7 @@ struct ColumnView: View {
     let index: Int
 
     var body: some View {
-        let list = model.songsIn(column: index)
+        let list = model.visibleSongs(column: index)
         VStack(spacing: 0) {
             ColumnHeader(index: index, count: list.count)
 
@@ -638,6 +722,32 @@ struct SongRow: View {
             Text(c.hasOnsiteEdits ? "✎" : " ")
                 .font(Typo.font(10)).foregroundStyle(Palette.amber)
                 .frame(width: 9)
+            // The setter's note (§8g). Until this, nothing in the list said WHERE the
+            // annotations were, so a setter scanning a round had to open every song to find out.
+            //
+            // A SECOND reserved slot, not a share of the one above: a song edited on set can
+            // also carry a note, and one slot would have to hide one of the two. Reserved,
+            // because a slot that appears only when filled moves the title under the cursor —
+            // this row's recurring defect (§12: the transport buttons, the focus hint).
+            //
+            // `※` was measured, not picked by eye. Every other mark here is spoken for (`✎`
+            // on-site, `✓`/`✗` outcome, `○` never opened, `🎯` guessed, `#` take order), and of
+            // the unspoken candidates it is the only one that fits: 7.01 pt at the 12 pt this
+            // renders at (`Typo.font(10)` clamps to `thaiFloor`), against a 9 pt slot — the `✎`
+            // beside it is 10.93 and has always overflowed its own by ~1 pt a side. It also
+            // carries real ink at 1× rather than an all-antialiased stroke, and its radial shape
+            // cannot be read as the pencil's diagonal at this size. `--notetest` pins both.
+            //
+            // Grey, never a hue: §6d gives every hue one meaning and "there is a note" is not
+            // one of them — least of all amber, which means the intro-end stop is not armed.
+            //
+            // NOTE ONLY, never tags. The filter above the list answers "which songs carry tag
+            // X" better than a glyph can, and a mark meaning "note or tags" would answer
+            // neither question. Absence here means "no note", which is worth being able to rely
+            // on.
+            Text(c.note.isEmpty ? " " : "※")
+                .font(Typo.font(10)).foregroundStyle(Palette.muted)
+                .frame(width: 9)
             Text(Library.trackNumber(path))
                 .font(Typo.numS).foregroundStyle(Palette.dim)
                 .frame(width: 26, alignment: .leading)
@@ -670,8 +780,18 @@ struct SongRow: View {
         .background(active ? Palette.tintSelect : .clear)
         .contentShape(Rectangle())
         .onTapGesture { model.select(path) }
-        .help(Library.title(path))
+        .help(rowHelp(c))
         Divider().overlay(Palette.hair)
+    }
+
+    /// The full filename first — that is this tooltip's documented job, because the title is
+    /// clamped to two lines (§8c) — and then whatever the setter wrote.
+    ///
+    /// Tags come along here even though the `※` glyph is note-only: a hover is asked for, so it
+    /// can afford to be complete where a 9 pt slot cannot.
+    private func rowHelp(_ c: SongConfig) -> String {
+        let written = CenterView.plainNoteText(c)
+        return written.isEmpty ? Library.title(path) : Library.title(path) + "\n" + written
     }
 
     /// Three setup states, not two. "Never opened" and "the app guessed it" used to render the

@@ -19,7 +19,8 @@ struct IntroPlayerApp: App {
         let flags = ["--analyse", "--rescantest", "--resetflow", "--resettest", "--playtest",
                      "--columns", "--handoff", "--preflight", "--titles",
                      "--revealtest", "--grabtest", "--palettetest", "--autodetect", "--artwork", "--timefmt", "--overview", "--remodetest", "--takes",
-                     "--updatecheck", "--updatestage", "--loudtest", "--guesstest", "--snapshot", "--guessflow"]
+                     "--updatecheck", "--updatestage", "--loudtest", "--guesstest", "--snapshot", "--guessflow",
+                     "--notetest", "--tagtest", "--filtertest"]
         if !diag, let f = CommandLine.arguments.first(where: flags.contains) {
             FileHandle.standardError.write("\(f) needs INTROPLAYER_DIAG=1\n".data(using: .utf8)!)
             exit(2)
@@ -108,6 +109,20 @@ struct IntroPlayerApp: App {
         }
         if CommandLine.arguments.contains("--updatestage") {
             Diagnostics.updateStage()
+            exit(0)
+        }
+        // Read-only: every Store it builds is `init(rawForTest:)`, which cannot write.
+        if CommandLine.arguments.contains("--notetest") {
+            Diagnostics.noteTest()
+            exit(0)
+        }
+        // Read-only, same as --notetest.
+        if CommandLine.arguments.contains("--filtertest") {
+            Diagnostics.filterTest()
+            exit(0)
+        }
+        if CommandLine.arguments.contains("--tagtest") {
+            Diagnostics.tagTest()
             exit(0)
         }
         if CommandLine.arguments.contains("--timefmt") {

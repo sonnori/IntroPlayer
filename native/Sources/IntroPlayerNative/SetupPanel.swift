@@ -47,6 +47,8 @@ struct SetupPanel: View {
             model.player.testIntro(config: model.config())
         }
 
+        noteBlock(c)
+
         Button {
             model.updateConfig { $0.ignoreEnd.toggle() }
         } label: {
@@ -79,6 +81,121 @@ struct SetupPanel: View {
         Text("เล่นเพลงฟัง พอถึงจุด กดปุ่ม Mark หรือคีย์ I / O / H ได้เลยขณะเล่น · พิมพ์เวลาลงช่องได้ตรงๆ (1:23.45 หรือ 83.45) · Shift+←/→ ขยับ marker ที่เลือกทีละ 0.01s, M สลับ marker · บนคลื่นเสียง: คลิก = เลื่อนหัวเล่น, กดเส้นสีให้ขึ้นก่อน แล้วลากถึงจะขยับ, ลากที่ว่าง = เลื่อนดู · หมุนล้อ = ซูม · แถบล่างสุด = ทั้งเพลง ลากเพื่อเลื่อนช่วงที่ดู · Space เล่นต่อจากตรงที่ค้างอยู่ ถ้าจะกลับต้น Intro กด S")
             .font(Typo.font(11)).foregroundStyle(Palette.muted)
             .padding(.top, 4)
+    }
+
+    /// Where the note is WRITTEN. It is read in `CenterView`, beside the title.
+    ///
+    /// The split is not tidiness. A text field is the one thing that makes the key monitor's
+    /// `typing` branch true, which hands `I`/`O`/`H` and every letter shortcut to the text view
+    /// — and a note is a field somebody holds focus in for far longer than a numeric time field.
+    /// Putting it in the centre pane would park that state next to the transport. Here it is
+    /// behind the same scroll view as the markers, where the setter already works.
+    ///
+    /// Neutral grey swatch, not a hue: a note carries no state and §6d gives every hue exactly
+    /// one meaning.
+    private func noteBlock(_ c: SongConfig) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 3).fill(Palette.lineStrong)
+                    .frame(width: 12, height: 12)
+                Text("โน้ตคนรัน").font(Typo.font(13, .semibold))
+                Spacer()
+                if !c.note.isEmpty {
+                    Text("\(c.note.count)/\(Store.noteMax)")
+                        .font(Typo.font(11, mono: true))
+                        .foregroundStyle(c.note.count >= Store.noteMax ? Palette.amber
+                                                                       : Palette.muted)
+                }
+            }
+            if let p = model.current {
+                // `.id(p)` so the field's @State and focus reset with the song, rather than
+                // carrying one song's half-typed sentence into the next — same as
+                // `MarkerTimeField`.
+                NoteField(value: c.note, path: p).id(p)
+            }
+            tagRow(c)
+
+            Text("คนรันเห็นโน้ตกับแท็กข้างชื่อเพลง · Enter = บันทึก · คลิกออก/Esc = ยกเลิก · ติดไปกับ ส่งต่อ")
+                .font(Typo.font(10)).foregroundStyle(Palette.muted)
+                .fixedSize(horizontal: false, vertical: true)
+            // Reachable with ordinary content — "ยุค 2000", "รุ่น 1 ของรายการ" — so it is said
+            // here rather than left to be discovered. §12 keeps Space/1/2 working while a text
+            // field holds focus AND playback is running, deliberately: a buzz that cannot be
+            // paused or scored is worse than a character that does not arrive. Paused is not
+            // playing, so during an actual take this field types normally; the window is the
+            // setter auditioning while writing.
+            Text("ขณะเพลงเล่น Space / 1 / 2 ยังเป็นปุ่มคุมเพลง — กด S หยุดก่อนแล้วค่อยพิมพ์")
+                .font(Typo.font(10, .medium)).foregroundStyle(Palette.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .background(Palette.panel2)
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Palette.line)
+            .allowsHitTesting(false))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// Tags: the song's own, then the registry's unused ones as one-click suggestions.
+    ///
+    /// The registry (`Store.tagsInUse`) is DERIVED from what is in use, so there is nothing to
+    /// curate and nothing that can go stale — a tag stops being offered the moment the last
+    /// song carrying it drops it. That is also why the suggestions matter more than they look:
+    /// typing a tag by hand is how "ยุค 90" and "ยุค 90 " become two tags, and a registry whose
+    /// suggestions nobody clicks is a registry of one-offs.
+    ///
+    /// No hue on any chip. A tag reports no state (§6d).
+    @ViewBuilder
+    private func tagRow(_ c: SongConfig) -> some View {
+        if !c.tags.isEmpty {
+            FlowRow(spacing: 6, lineSpacing: 6) {
+                ForEach(c.tags, id: \.self) { t in
+                    Button { model.removeTag(t) } label: {
+                        HStack(spacing: 5) {
+                            Text(t).font(Typo.font(12))
+                            Text("✕").font(Typo.font(10, latinOnly: true))
+                                .foregroundStyle(Palette.dim)
+                        }
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(PressStyle(corner: 6))
+                    .foregroundStyle(Palette.text)
+                    .background(Palette.panel3)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.line)
+                        .allowsHitTesting(false))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .help("คลิกเพื่อเอาแท็กนี้ออก")
+                }
+            }
+        }
+        if c.tags.count >= Store.tagsPerSong {
+            // The add field is gone at the cap, so the count has to be said here or the row
+            // just looks broken.
+            Text("ครบ \(Store.tagsPerSong) แท็กแล้ว — คลิกอันที่ไม่ใช้เพื่อเอาออก")
+                .font(Typo.font(10)).foregroundStyle(Palette.muted)
+        }
+        if model.current != nil, c.tags.count < Store.tagsPerSong {
+            TagField(path: model.current ?? "").id(model.current ?? "")
+            let suggestions = model.store.tagsInUse.filter { t in
+                !c.tags.contains { Store.tagKey($0) == Store.tagKey(t) }
+            }
+            if !suggestions.isEmpty {
+                FlowRow(spacing: 6, lineSpacing: 6) {
+                    ForEach(suggestions.prefix(10), id: \.self) { t in
+                        Button { model.addTag(t) } label: {
+                            Text("+ \(t)").font(Typo.font(11))
+                                .padding(.horizontal, 7).padding(.vertical, 3)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(PressStyle(corner: 6))
+                        .foregroundStyle(Palette.muted)
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.line)
+                            .allowsHitTesting(false))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                }
+            }
+        }
     }
 
     private func markerBlock(_ m: Markers, _ c: SongConfig) -> some View {
@@ -450,5 +567,114 @@ struct MarkerTimeField: View {
         guard !SongConfig.same(t, value) else { sync(value); return }
         model.setMarkerTime(field, t)
         if let k = field.timeKey { sync(model.config()[keyPath: k]) }
+    }
+}
+
+/// Typed note for the operator (§9 `note`).
+///
+/// Same contract as `MarkerTimeField`, for the same reasons: the text is LOCAL state,
+/// **Return commits and losing focus CANCELS**. `Esc` belongs to the focused text view, so it
+/// ends editing — if blur committed, `Esc` would write the sentence it was meant to discard, and
+/// clicking the field merely to READ the note would write it straight back. `dirty` is derived
+/// (`text != synced`), never stored.
+///
+/// What is NOT shared with `MarkerTimeField`: this never touches `focusMarker`. A note is not a
+/// marker, and taking marker focus here would silently redirect the next `Shift+←/→`.
+struct NoteField: View {
+    @EnvironmentObject var model: AppModel
+    let value: String
+    /// The song this field was built for. Checked again at commit time — selecting a row in the
+    /// song list is a SwiftUI tap and does NOT move first responder, so without this a field
+    /// focused on song A would write A's sentence onto song B.
+    let path: String
+
+    @State private var text = ""
+    @State private var synced = ""
+    @FocusState private var focused: Bool
+
+    private var dirty: Bool { text != synced }
+    private func sync(_ v: String) { text = v; synced = v }
+
+    var body: some View {
+        TextField("เช่น ฝั่งซ้ายน่าจะได้เปรียบ · คนรุ่น 40+ รู้แน่", text: $text)
+            .textFieldStyle(.plain)
+            .font(Typo.font(13))
+            .lineLimit(1)
+            .padding(.horizontal, 8).padding(.vertical, 7)
+            .background(focused ? Palette.panel : Palette.panel3)
+            // Amber while there are uncommitted keystrokes — the field is showing something the
+            // song does not have, and only Return commits it, so that state has to be visible.
+            .overlay(RoundedRectangle(cornerRadius: 6)
+                .stroke(dirty ? Palette.amber : (focused ? Palette.cyan : Palette.line),
+                        lineWidth: dirty ? 2 : 1)
+                .allowsHitTesting(false))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .focused($focused)
+            .onSubmit { commit(); focused = false }
+            .onAppear { sync(value) }
+            // An UNTYPED field must keep tracking an undo, an import or a donor copy whether or
+            // not it holds focus. Gating this on `!focused` is what made the marker field freeze
+            // its display and then write the frozen value back on blur.
+            .onChange(of: value) { v in if !dirty { sync(v) } }
+            .onChange(of: focused) { f in if !f { sync(value) } }
+            .help("พิมพ์แล้ว **กด Enter** · คลิกออกหรือกด Esc = ยกเลิก · ล้างข้อความทั้งหมดแล้ว Enter = ลบโน้ต")
+    }
+
+    private func commit() {
+        // Nothing typed, nothing to write. Clicking in and out of the field must not push an
+        // undo entry — the stack is 40 deep and a wasted entry costs the operator a real one.
+        guard dirty else { sync(value); return }
+        guard model.current == path else { sync(value); return }
+        // Deliberately accepts an EMPTY string: clearing the field and pressing Return is how a
+        // note is deleted. The handover's additive merge means that deletion does not travel
+        // (see `Handoff.plan`), which is the safe direction and is stated in the hint.
+        model.setNote(text)
+        sync(model.config().note)
+    }
+}
+
+/// Adding a tag. Return commits; blur cancels — the same contract as `MarkerTimeField` and
+/// `NoteField`, for the same reason.
+///
+/// It clears itself on a successful add so the next tag can be typed straight in, and KEEPS the
+/// text when the add was refused (a duplicate, or the per-song cap) — clearing it then would
+/// look exactly like a successful add.
+struct TagField: View {
+    @EnvironmentObject var model: AppModel
+    let path: String
+
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            TextField("+ เพิ่มแท็ก เช่น ยุค 90", text: $text)
+                .textFieldStyle(.plain)
+                .font(Typo.font(12))
+                .lineLimit(1)
+                .padding(.horizontal, 8).padding(.vertical, 5)
+                .background(focused ? Palette.panel : Palette.panel3)
+                .overlay(RoundedRectangle(cornerRadius: 6)
+                    .stroke(text.isEmpty ? (focused ? Palette.cyan : Palette.line)
+                                         : Palette.amber,
+                            lineWidth: text.isEmpty ? 1 : 2)
+                    .allowsHitTesting(false))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .focused($focused)
+                .onSubmit(commit)
+                // Blur cancels, like every other field here. Without it a half-typed tag plus a
+                // stray click would write it, and a click into the field merely to read it
+                // would write it straight back.
+                .onChange(of: focused) { f in if !f { text = "" } }
+            Text("\(model.store.config(for: path).tags.count)/\(Store.tagsPerSong)")
+                .font(Typo.font(11, mono: true)).foregroundStyle(Palette.dim)
+        }
+    }
+
+    private func commit() {
+        guard !text.isEmpty else { return }
+        guard model.current == path else { text = ""; return }
+        if model.addTag(text) { text = "" }
+        else { model.flash("แท็กนี้มีอยู่แล้ว หรือพิมพ์ไม่ครบ") }
     }
 }
