@@ -7,11 +7,23 @@
 #   ./native/release.sh --download <url>     put a download URL in the generated manifest.json
 #   ./native/release.sh --github             publish to GitHub Releases with `gh` (no manifest
 #                                            needed — the app reads the release itself)
+#   ./native/release.sh --crew               INCLUDE se/*.mp3 and brand/logo.png
 #
 # Output in dist/:
 #   IntroPlayer-<ver>.zip   what you hand over / upload
 #   manifest.json           what the app's update check reads (upload it NEXT TO the zip)
 #   SHA256SUMS
+#
+# About --crew. The default strips SEED_PAYLOAD (the stings and the show's logo) because this
+# repo is public and those are the production's, not this program's — §15, and the day `brand`
+# joined SEED[] they went into a public GitHub release before anyone noticed. --crew is for a
+# package the owner hands to their own crew, so it keeps them, and three things keep the two
+# apart rather than one:
+#   * refused together with --github, in the pre-flight, before anything is built;
+#   * a DIFFERENT zip name and a different checksum file, so a crew zip can never be mistaken
+#     for the asset on the release page or clobber its SHA256SUMS;
+#   * the payload assertions INVERT rather than switch off — a crew zip missing a sting fails
+#     just as hard as a public zip carrying one.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -22,8 +34,10 @@ SKIP_BUILD=0
 ALLOW_DIRTY=0
 DL=""
 GH=0
+CREW=0
 while [ $# -gt 0 ]; do
   case "$1" in
+    --crew) CREW=1 ;;
     --skip-build) SKIP_BUILD=1 ;;
     --allow-dirty) ALLOW_DIRTY=1 ;;
     --download)
@@ -56,6 +70,27 @@ if [ "$ALLOW_DIRTY" = "0" ] && [ -n "$DIRT" ]; then
   echo "✗ มีไฟล์ที่แก้/เพิ่มแล้วยังไม่ commit — commit ก่อน หรือใช้ --allow-dirty"
   printf '%s\n' "$DIRT" | sed 's/^/    /'
   exit 1
+fi
+
+# ---- --crew pre-flight, BEFORE the build, for the same reason the GitHub one is ----
+if [ "$CREW" = "1" ]; then
+  if [ "$GH" = "1" ]; then
+    echo "✗ --crew กับ --github ใช้ด้วยกันไม่ได้"
+    echo "  --crew ใส่ไฟล์เสียงกับโลโก้ของรายการลงไป และ repo นี้เป็น public"
+    echo "  จะปล่อยขึ้น GitHub ให้รันแยกโดยไม่ใส่ --crew"
+    exit 1
+  fi
+  # A crew zip with no stings is exactly the thing --crew exists to prevent, so say so here
+  # rather than let it ship and be discovered on a shoot.
+  missing=""
+  for f in se/correct.mp3 se/wrong.mp3 brand/logo.png; do
+    [ -f "$ROOT/$f" ] || missing="$missing  $f"
+  done
+  if [ -n "$missing" ]; then
+    echo "✗ --crew แต่หาไฟล์พวกนี้ในโฟลเดอร์นี้ไม่เจอ:"
+    printf '%s\n' "$missing" | tr ' ' '\n' | grep -v '^$' | sed 's/^/    /'
+    exit 1
+  fi
 fi
 
 # ---- GitHub pre-flight, BEFORE the build ----
@@ -113,7 +148,10 @@ if [ "$STAMPED" != "$VERSION" ]; then
 fi
 
 DIST="$ROOT/dist"
-NAME="IntroPlayer-$VERSION"
+# The suffix is the safety, not decoration: it keeps a crew zip out of the public asset's
+# name and out of its SHA256SUMS. See the --crew note at the top.
+if [ "$CREW" = "1" ]; then NAME="IntroPlayer-$VERSION-ครบชุด"; else NAME="IntroPlayer-$VERSION"; fi
+if [ "$CREW" = "1" ]; then SUMFILE="SHA256SUMS-ครบชุด"; else SUMFILE="SHA256SUMS"; fi
 STAGE="$DIST/$NAME"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
@@ -189,7 +227,15 @@ se/correct.mp3
 se/wrong.mp3
 brand/logo.png
 )
-for f in "${SEED_PAYLOAD[@]}"; do rm -f "$STAGE/$f"; done
+if [ "$CREW" = "1" ]; then
+  echo "  ● --crew: ใส่เสียงตอบถูก/ผิด และโลโก้รายการไปด้วย — ห้ามอัปโหลดขึ้นที่สาธารณะ"
+  for f in "${SEED_PAYLOAD[@]}"; do
+    [ -f "$STAGE/$f" ] || { echo "✗ --crew แต่ $f ไม่ได้ถูกคัดลอกเข้า stage"; exit 1; }
+    echo "      $f  ($(du -h "$STAGE/$f" | cut -f1 | tr -d ' '))"
+  done
+else
+  for f in "${SEED_PAYLOAD[@]}"; do rm -f "$STAGE/$f"; done
+fi
 if [ ! -f "$STAGE/se/correct.mp3" ] || [ ! -f "$STAGE/se/wrong.mp3" ]; then
   echo "  ⚠ se/ ไม่มีไฟล์เสียง — ชุดนี้จะไม่มีเสียงตอบถูก/ผิด"
   echo "    (ปกติ — บรรทัดข้างบนลบออกเองทุกครั้ง เพราะ licence ยังไม่ชัด)"
@@ -212,6 +258,18 @@ xattr -cr "$STAGE" 2>/dev/null || true
 # machine-readable artifact that outlives the conversation.
 COMMIT="$(/usr/libexec/PlistBuddy -c 'Print :RGFGitCommit' "$APP/Contents/Info.plist" 2>/dev/null || echo "")"
 [ -n "$COMMIT" ] || COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo "-")"
+# The readme shipped for 1.2.0–1.3.1 described an UPDATE only ("ถ้าเคยใช้แล้วมันจะหาให้เอง"),
+# which is the wrong half for the one thing that had never happened yet: a first install. The
+# fresh path is a different set of dialogs and ends with an EMPTY songs/ folder, so it needs
+# saying.
+if [ "$CREW" = "1" ]; then
+  ASSETS_NOTE="ชุดนี้มีเสียงตอบถูก/ผิด และโลโก้รายการมาให้แล้ว ไม่ต้องหาเพิ่ม"
+else
+  ASSETS_NOTE="ชุดนี้ไม่มีเสียงตอบถูก/ผิด และไม่มีโลโก้รายการ (ติดเรื่องลิขสิทธิ์)
+   ขอไฟล์จากคนที่ส่งชุดนี้มา แล้ววาง correct.mp3 / wrong.mp3 ไว้ใน se/
+   และ logo.png ไว้ใน brand/  — วิธีอยู่ใน README.txt ของแต่ละโฟลเดอร์
+   ถ้าไม่วาง แอปยังใช้ได้ปกติ แค่กด ✓/✗ แล้วไม่มีเสียง และหัวแถบไม่มีโลโก้"
+fi
 cat > "$STAGE/อ่านก่อน.txt" <<EOF
 RGF Intro Player $VERSION   ($COMMIT, $(date +%Y-%m-%d))
 =========================================================
@@ -224,7 +282,33 @@ RGF Intro Player $VERSION   ($COMMIT, $(date +%Y-%m-%d))
 
 ด้านล่างคือวิธีทำมือ ใช้เมื่อกดปุ่มในแอปไม่ได้ หรือได้ไฟล์มาทางอื่น
 
-ติดตั้ง / อัปเดต (ทำมือ)
+
+ลงครั้งแรกในเครื่องใหม่ (ยังไม่เคยมีแอปนี้)
+-------------------------------------------
+1. ก๊อปทั้งโฟลเดอร์นี้ออกมาจากไฟล์ zip ก่อน  ** ห้ามรันจากในไฟล์ zip **
+2. คลิกขวาที่  ติดตั้ง-อัปเดต.command  >  Open  >  กด Open อีกครั้ง
+   (ดับเบิลคลิกเฉยๆ macOS จะไม่ยอมเปิด เพราะยังไม่ได้เซ็นชื่อผู้พัฒนา
+    ถ้ายังไม่ขึ้น: System Settings > Privacy & Security > กด "Open Anyway")
+3. มันจะบอกว่า "หาโฟลเดอร์ที่ติดตั้งไว้ไม่เจอ" — ถูกแล้ว กด  "ติดตั้งใหม่"
+4. เลือกว่าจะวางโฟลเดอร์แอปไว้ที่ไหน เช่น Desktop หรือ Documents
+   มันจะสร้างโฟลเดอร์ชื่อ  IntroPlayer  ให้ข้างในที่ที่เลือก
+   -> เลือกที่ที่ไม่ใช่ Desktop/Documents/Downloads ที่ sync iCloud อยู่ จะง่ายกว่า
+5. กด "ติดตั้ง" แล้วรอจนขึ้นว่าเรียบร้อย
+6. เอาไฟล์เพลงใส่ใน  IntroPlayer/songs/
+   -> อยากแยกเป็นรอบถ่าย ให้สร้างโฟลเดอร์ย่อย เช่น  songs/EP01/  แล้ววางเพลงในนั้น
+   -> ตั้งชื่อไฟล์ขึ้นต้นด้วย 1xx / 2xx / 3xx จะถูกแยกเป็น 3 คอลัมน์ให้เอง
+7. เปิด  RGF Intro Player.app  (ครั้งแรกคลิกขวา > Open เหมือนกัน)
+8. ถ้าเพิ่งใส่เพลงตอนแอปเปิดอยู่ กด  ⟳ อ่านโฟลเดอร์ใหม่  หรือ Cmd+R
+
+   $ASSETS_NOTE
+
+9. อยากให้เครื่องนี้เช็กเวอร์ชั่นใหม่เองได้ เปิดแอป > กดเลขเวอร์ชั่นข้างปุ่ม ⟳
+   > ช่องสำหรับที่อยู่อัปเดต แล้วใส่ที่อยู่ที่คนส่งชุดนี้ให้มา (ทำครั้งเดียว)
+
+ลบทิ้ง: ลากโฟลเดอร์ IntroPlayer ลงถังขยะ ไม่มีอะไรกระจายไว้ที่อื่น
+
+
+ติดตั้ง / อัปเดต ทับของเดิม (ทำมือ)
 ------------------------
 1. ปิดแอปก่อน ถ้ากำลังเปิดอยู่ (Cmd+Q)   ** ห้ามอัปเดตตอนกำลังถ่าย **
 2. ดับเบิลคลิก   ติดตั้ง-อัปเดต.command
@@ -283,9 +367,19 @@ check "se/ มีโฟลเดอร์ + คำอธิบาย"           
 check "brand/ มีโฟลเดอร์ + คำอธิบาย"             '[ -f "$U/brand/README.txt" ]'
 # One check per SEED_PAYLOAD entry, driven by the list rather than spelled out, so the day a
 # third seed is added the assertion arrives with it instead of a year later.
+# Inverted rather than skipped under --crew: a crew zip that LOST a sting fails as hard as a
+# public zip that gained one. A check that switches off is a check that stops covering the
+# case it was added for.
 payload_clean=1
-for f in "${SEED_PAYLOAD[@]}"; do [ -e "$U/$f" ] && payload_clean=0; done
-check "ไม่มีไฟล์ของรายการที่ไม่รู้ licence ติดไปด้วย" '[ "$payload_clean" = "1" ]'
+for f in "${SEED_PAYLOAD[@]}"; do
+  if [ "$CREW" = "1" ]; then [ -e "$U/$f" ] || payload_clean=0
+  else                       [ -e "$U/$f" ] && payload_clean=0; fi
+done
+if [ "$CREW" = "1" ]; then
+  check "มีเสียง + โลโก้ครบตามที่สั่งด้วย --crew"       '[ "$payload_clean" = "1" ]'
+else
+  check "ไม่มีไฟล์ของรายการที่ไม่รู้ licence ติดไปด้วย" '[ "$payload_clean" = "1" ]'
+fi
 ARCHS="$(lipo -archs "$U/$APPBUNDLE/Contents/MacOS/IntroPlayerNative" 2>/dev/null || echo "")"
 check "universal (arm64 + x86_64) — arch: $ARCHS" '[[ "$ARCHS" == *arm64* && "$ARCHS" == *x86_64* ]]'
 # The strongest check available: ask the unzipped binary what it is.
@@ -294,7 +388,7 @@ check "แอปที่แตกออกมารายงานเวอร�
 # A stale SHA256SUMS beside a zip is worse than none: it names the file sitting next to it,
 # so whoever hands the zip over by hand checks it, gets a mismatch, and concludes a perfectly
 # good release is corrupt. Remove it rather than leave it describing a zip it does not.
-[ "$fail" = "0" ] || { rm -f "$DIST/SHA256SUMS"; echo "✗ zip ไม่ผ่านการตรวจ"; exit 1; }
+[ "$fail" = "0" ] || { rm -f "$DIST/$SUMFILE"; echo "✗ zip ไม่ผ่านการตรวจ"; exit 1; }
 
 # ---- checksum, written HERE: it is a property of the ZIP, not of the manifest ----
 # It used to be written further down, after the `--github` early exit and after the refusal for
@@ -302,7 +396,7 @@ check "แอปที่แตกออกมารายงานเวอร�
 # naming this run's zip. Measured on 1.3.0: the file claimed a97f96cd… for a zip that hashes
 # to 1f2ca771…. The in-app installer verifies against the MANIFEST's sha256 and so was never
 # affected; the person checking a hand-delivered zip is the one this misled.
-( cd "$DIST" && shasum -a 256 "$NAME.zip" > SHA256SUMS )
+( cd "$DIST" && shasum -a 256 "$NAME.zip" > "$SUMFILE" )
 ZIPSHA="$(shasum -a 256 "$DIST/$NAME.zip" | awk '{print $1}')"
 
 # ---- publish to GitHub Releases ----
