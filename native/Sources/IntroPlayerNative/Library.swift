@@ -567,12 +567,55 @@ enum Library {
     /// building an `AppModel` — which would run the launch snapshot and could let `guessRest`
     /// write to the operator's real config. Matching is on `Store.tagKey`, so a difference in
     /// Latin case never hides a song.
-    static func visible(_ paths: [String], tag: String, store: Store) -> [String] {
-        guard !tag.isEmpty else { return paths }
-        let k = Store.tagKey(tag)
-        return paths.filter { p in
-            store.config(for: p).tags.contains { Store.tagKey($0) == k }
+    static func visible(_ paths: [String], tag: String, search: String = "",
+                        store: Store) -> [String] {
+        var out = paths
+        if !tag.isEmpty {
+            let k = Store.tagKey(tag)
+            out = out.filter { p in
+                store.config(for: p).tags.contains { Store.tagKey($0) == k }
+            }
         }
+        if !search.isEmpty {
+            let needle = searchTokens(search)
+            if !needle.isEmpty { out = out.filter { matches($0, tokens: needle) } }
+        }
+        return out
+    }
+
+    /// Normalised form both sides of a search comparison are reduced to: NFC (Thai combining
+    /// marks compare unequal otherwise — §8g's lesson for the note), lower-cased, and runs of
+    /// whitespace collapsed to one.
+    static func searchKey(_ s: String) -> String {
+        s.precomposedStringWithCanonicalMapping
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+            .localizedLowercase
+    }
+
+    static func searchTokens(_ s: String) -> [String] {
+        searchKey(s).split(separator: " ").map(String.init)
+    }
+
+    /// Does this song's **raw filename** contain every token, in any order?
+    ///
+    /// The raw basename rather than `displayTitle`, and that is deliberate: `displayTitle` only
+    /// ever REMOVES from the raw name (the leading track number, the trailing "[Official MV]"
+    /// boilerplate), so the raw name is a superset of what is on screen — which makes typing the
+    /// `101` you can see at the left of the column a search that works, and still finds anything
+    /// you read off the row. The one thing `displayTitle` rewrites rather than removes is runs
+    /// of whitespace, and `searchKey` collapses those on both sides.
+    ///
+    /// Tokens are ANDed and order-free, so "palmy ooh" finds `202_Ooh! - Palmy`. Thai carries no
+    /// spaces, so the single-token substring case is the common one and costs one `contains`.
+    static func matches(_ path: String, _ needle: String) -> Bool {
+        let t = searchTokens(needle)
+        return t.isEmpty || matches(path, tokens: t)
+    }
+
+    static func matches(_ path: String, tokens: [String]) -> Bool {
+        let hay = searchKey(baseName(path))
+        return tokens.allSatisfy { hay.contains($0) }
     }
 
     /// Display-only — nothing is stored per column.
@@ -2382,6 +2425,181 @@ enum Diagnostics {
         print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
     }
 
+    /// The receive sweep: it has to look at EVERY round, not the one on screen.
+    ///
+    /// Read-only by construction — every `Store` here is `init(rawForTest:)`, which makes
+    /// `scheduleSave`/`saveNow` no-ops, so `Handoff.apply` can be exercised for real against
+    /// controlled values instead of the operator's file.
+    static func incomingTest() {
+        var pass = 0, fail = 0
+        func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+            if ok { pass += 1 } else { fail += 1 }
+            print("   \(ok ? "ok  " : "✗   ")\(label)\(detail.isEmpty ? "" : "  — " + detail)")
+        }
+
+        func song(_ start: Double) -> [String: Any] {
+            ["introStart": start, "introEnd": start + 15, "hook": 61.0, "configured": true]
+        }
+        // Three setters, one round each — the scenario the sweep exists for.
+        let rounds = ["EP01", "EP02", "EP03"]
+        var paths: [String: [String]] = [:]
+        var senderRaw: [String: Any] = [:]
+        for (i, r) in rounds.enumerated() {
+            let ps = ["\(r)/10\(i + 1)_a.mp3", "\(r)/20\(i + 1)_b.mp3"]
+            paths[r] = ps
+            for (j, path) in ps.enumerated() { senderRaw[path] = song(Double(i * 2 + j) + 1) }
+        }
+        let sender = Store(rawForTest: senderRaw)
+        var pkgs: [String: RoundPackage] = [:]
+        for r in rounds {
+            pkgs[r] = Handoff.package(round: r, paths: paths[r]!, store: sender, by: "คนเซ็ต \(r)")
+        }
+        // The receiving machine has the audio but has never seen any of the questions.
+        let receiver = Store(rawForTest: [:])
+
+        print("1) กวาดทุกรอบ ไม่ใช่รอบที่เลือกอยู่")
+        // The REAL sweep, with the two things that touch the disk injected — not a copy of its
+        // loop, because the defect was the loop and not the per-round decision.
+        func waiting(_ st: Store, _ rs: [String] = rounds,
+                     _ have: Set<String> = Set(rounds)) -> [String] {
+            Handoff.waitingRounds(rs, store: st,
+                                  songsIn: { paths[$0] ?? [] },
+                                  read: { have.contains($0) ? pkgs[$0] : nil }).map(\.round)
+        }
+        let all = waiting(receiver)
+        check("เจอทั้ง \(rounds.count) รอบ", all == rounds, all.joined(separator: ", "))
+        // The counterfactual, as a number rather than a claim: this IS the old behaviour.
+        let onlySelected = waiting(receiver, ["EP01"])
+        check("ถ้าดูแค่รอบที่เลือก (ของเดิม) → เห็น \(onlySelected.count) จาก \(rounds.count) " +
+              "= หาย \(rounds.count - onlySelected.count) ชุด",
+              onlySelected == ["EP01"], onlySelected.joined(separator: ", "))
+        // Nothing may stop the walk early: a round with no round.json in the MIDDLE must be
+        // skipped, not treated as the end of the list.
+        let gap = waiting(receiver, rounds, ["EP01", "EP03"])
+        check("รอบที่ไม่มี round.json ถูกข้าม ไม่ใช่หยุดกวาด", gap == ["EP01", "EP03"],
+              gap.joined(separator: ", "))
+        check("เรียงตามลำดับรอบที่ส่งเข้าไป",
+              waiting(receiver, rounds.reversed()) == rounds.reversed())
+
+        print("\n2) รับแล้วต้องหายจากรายการ — และต้องหายแค่รอบนั้น")
+        let plan = Handoff.plan(pkgs["EP02"]!, round: "EP02", paths: paths["EP02"]!, store: receiver)
+        check("รอบที่ยังไม่เคยเห็น เข้า fresh ทั้งหมด ไม่ต้องถาม",
+              plan.fresh.count == 2 && !plan.hasChoices, "fresh \(plan.fresh.count)")
+        // `plan.round` is what `applyImport` clears by, so it must be the folder it was built for.
+        check("plan จำโฟลเดอร์ของตัวเองไว้", plan.round == "EP02", plan.round)
+        Handoff.apply(plan, accepted: [], store: receiver)
+        let after = waiting(receiver)
+        check("EP02 หายไป EP01/EP03 ยังอยู่", after == ["EP01", "EP03"], after.joined(separator: ", "))
+        check("เอาเข้าแล้ว package เดิมไม่ขึ้นซ้ำ",
+              !Handoff.isWaiting(pkgs["EP02"]!, round: "EP02", paths: paths["EP02"]!, store: receiver))
+
+        print("\n3) ของที่เราส่งเองแล้วแก้ต่อ ต้องไม่ขึ้นมาให้ \"รับ\"")
+        // EP01 was taken in above? No — take it in now, then edit it the way an operator does
+        // on set. The file on disk now DIFFERS from local, so `plan` has rows; but local `base`
+        // is that file, so those rows are our own work and accepting them would revert it.
+        let p1 = Handoff.plan(pkgs["EP01"]!, round: "EP01", paths: paths["EP01"]!, store: receiver)
+        Handoff.apply(p1, accepted: [], store: receiver)
+        check("รับแล้วก็ไม่ขึ้นอีก", !waiting(receiver).contains("EP01"))
+        var edited = receiver.config(for: paths["EP01"]![0])
+        edited.introEnd += 3                    // แก้ที่กอง
+        receiver.set(edited, for: paths["EP01"]![0])
+        let after1 = Handoff.plan(pkgs["EP01"]!, round: "EP01", paths: paths["EP01"]!, store: receiver)
+        check("แก้แล้ว plan เห็นค่าต่าง (ซึ่งถูก — มันเทียบ incoming-vs-local)",
+              after1.rows.count == 1, "\(after1.rows.count) แถว")
+        check("แต่ถือว่า \"รับไปแล้ว\" เพราะ base ตรงกับไฟล์",
+              Handoff.alreadyTakenIn(pkgs["EP01"]!, round: "EP01",
+                                     paths: paths["EP01"]!, store: receiver))
+        check("→ ไม่ขึ้นแถบให้กดรับงานของตัวเอง", !waiting(receiver).contains("EP01"),
+              waiting(receiver).joined(separator: ", "))
+        // And the thing it must NOT swallow: a real new value from the sender.
+        var resent = pkgs["EP01"]!
+        let n0 = Library.baseName(paths["EP01"]![1])
+        resent.songs[n0]!.b.hook += 7
+        check("ผู้ส่งแก้มาจริง → ยังขึ้นปกติ",
+              Handoff.isWaiting(resent, round: "EP01", paths: paths["EP01"]!, store: receiver))
+
+        print("\n4) ปุ่ม “ไว้ก่อน” ต้องแยกเป็นรายชุด")
+        let a = IncomingRound(round: "EP01", pkg: pkgs["EP01"]!)
+        let b = IncomingRound(round: "EP03", pkg: pkgs["EP03"]!)
+        check("สองรอบ = สอง id (ไว้ก่อนชุดหนึ่ง ต้องไม่ปิดอีกชุด)", a.id != b.id)
+        check("ไฟล์เดิมอ่านซ้ำ = id เดิม",
+              a.id == IncomingRound(round: "EP01", pkg: pkgs["EP01"]!).id)
+        // A re-export must be able to raise the strip again even after a wave-off of the old file.
+        var again = pkgs["EP01"]!
+        again.at = "2026-11-24T09:00:00+07:00"
+        check("ส่งมาใหม่ = id ใหม่ (ของเดิมเคยถูกปิดไว้ก็ยังขึ้น)",
+              IncomingRound(round: "EP01", pkg: again).id != a.id)
+
+        print("\n5) ชื่อที่โชว์คือโฟลเดอร์ที่จะลง ไม่ใช่ชื่อที่ผู้ส่งตั้ง")
+        // Legal by design: round.json is keyed by FILE NAME so the receiver may file a round
+        // under another folder name (§8e). The strip must name where it lands.
+        let filedElsewhere = IncomingRound(round: "EP09", pkg: pkgs["EP01"]!)
+        check("รู้ว่าชื่อไม่ตรงกัน", filedElsewhere.renamed, "pkg=\(pkgs["EP01"]!.round) folder=EP09")
+        check("ชื่อเดียวกัน = ไม่ต้องเตือน", !a.renamed)
+        // And the import really does target the folder's own songs, not the sender's round.
+        let ep09 = ["EP09/101_a.mp3", "EP09/201_b.mp3"]
+        let r9 = Store(rawForTest: [:])
+        let p9 = Handoff.plan(pkgs["EP01"]!, round: "EP09", paths: ep09, store: r9)
+        check("นำเข้าลงเพลงของโฟลเดอร์นั้น ไม่ใช่ของรอบที่ผู้ส่งตั้งชื่อ",
+              Set(p9.fresh) == Set(ep09), p9.fresh.sorted().joined(separator: ", "))
+
+        print("\n6) ชื่อคนเซ็ตต้องอยู่ข้ามการเปิดแอป")
+        // `by` is the ONLY field saying whose round this is, and it used to be typed into a
+        // sheet that forgets — so every handover arrived reading "ไม่ระบุชื่อ".
+        let typed = "ภู  ทีมเซ็ตโจทย์"
+        let st2 = Store(rawForTest: [:])
+        st2.setterName = Store.clampName(typed)
+        st2.settingsChanged()
+        let written = (st2.raw["_settings"] as? [String: Any])?["setterName"] as? String
+        check("เขียนลง _settings", written == typed, written ?? "—")
+        let reopened = Store(rawForTest: st2.raw)
+        check("เปิดใหม่แล้วยังอยู่", reopened.setterName == typed, reopened.setterName)
+        // Read-it-before-you-delete-it, the same rule as updateFeed/resetAt.
+        reopened.setterName = ""
+        reopened.settingsChanged()
+        check("ลบชื่อ = คีย์หายไป ไม่ใช่ค้างสตริงว่าง",
+              (reopened.raw["_settings"] as? [String: Any])?["setterName"] == nil)
+
+        print("\n7) ชื่อถูกตัดความยาว — มันข้ามเครื่องไปโผล่ในแถบบรรทัดเดียว")
+        let huge = String(repeating: "ก่", count: 500)
+        let cut = Store.clampName(huge)
+        check("ตัดที่ \(Store.nameMax) ตัวอักษรไทย (นับเป็น cluster ไม่ใช่ scalar)",
+              cut.count == Store.nameMax && cut.unicodeScalars.count > Store.nameMax,
+              "\(cut.count) cluster / \(cut.unicodeScalars.count) scalar")
+        check("ขึ้นบรรทัดใหม่/แท็บถูกยุบเป็นบรรทัดเดียว",
+              !Store.clampName("ก\nข\tค").contains(where: \.isNewline) &&
+              Store.clampName("  ก  ") == "ก")
+        // The file crosses machines and is hand-editable, so the bound must hold on READ too —
+        // the write side cannot be trusted to have been this app. Written into the SYSTEM temp
+        // dir and removed; nothing here goes near the operator's folder.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rgf-incoming-\(UUID().uuidString).json")
+        let hostile: [String: Any] = ["round": "EP01", "by": huge, "at": "x",
+                                      "songs": [String: Any]()]
+        try? JSONSerialization.data(withJSONObject: hostile).write(to: tmp)
+        let parsed = RoundPackage.read(tmp)
+        try? FileManager.default.removeItem(at: tmp)
+        check("อ่าน round.json ที่ชื่อยาวผิดปกติ → ตัดตั้งแต่ขาเข้า",
+              parsed?.by.count == Store.nameMax, "\(parsed?.by.count ?? -1)")
+        let viaPackage = Handoff.package(round: "EP01", paths: paths["EP01"]!, store: receiver,
+                                         by: huge)
+        check("ตอนเขียนก็ตัด", viaPackage.by.count == Store.nameMax, "\(viaPackage.by.count)")
+
+        print("\n8) ไม่เก็บลงไฟล์ — รายการที่ปิดไว้ต้องตายพร้อม process")
+        receiver.settingsChanged()
+        let keys = Set(((receiver.raw["_settings"] as? [String: Any]) ?? [:]).keys)
+        let suspect = keys.filter {
+            let k = $0.lowercased()
+            return k.contains("incoming") || k.contains("dismissedround") || k.contains("pending")
+        }
+        check("_settings ไม่มีคีย์เกี่ยวกับรายการที่รออยู่", suspect.isEmpty,
+              suspect.isEmpty ? "\(keys.count) คีย์ ไม่มีอันไหนเกี่ยว"
+                              : suspect.sorted().joined(separator: ", "))
+
+        print("\nผ่าน \(pass)  ตก \(fail)")
+        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+    }
+
     static func filterTest() {
         var pass = 0, fail = 0
         func check(_ label: String, _ ok: Bool, _ detail: String = "") {
@@ -2438,14 +2656,56 @@ enum Diagnostics {
         check("ถ้าเผลอเอา visibleSongs ไปให้ → ส่งต่อหาย \(paths.count - p90.count) เพลง (คือสิ่งที่ต้องกัน)",
               leaked.songs.count == p90.count, "\(leaked.songs.count)")
 
-        print("\n3) ไม่เก็บลงไฟล์ — กรองต้องตายพร้อม process")
+        print("\n3) ค้นหาจากชื่อไฟล์")
+        // Real YouTube filenames — the shape the matcher actually meets.
+        let sp = ["EP09/101_THE TOYS - ลาลาลอย (100%)  [Official Music Video].mp3",
+                  "EP09/202_Ooh! - Palmy【OFFICIAL MV】.mp3",
+                  "EP09/107_PROXIE - ขี้แง (Boys Don’t Cry)   Official MV.mp3"]
+        func find(_ q: String) -> [String] {
+            Library.visible(sp, tag: "", search: q, store: st).map(Library.baseName)
+        }
+        check("คำค้นว่าง = ไม่กรอง (เหมือนแท็กว่าง)", find("") .count == sp.count)
+        check("ไม่สนตัวพิมพ์เล็ก/ใหญ่", find("palmy").count == 1 && find("PALMY").count == 1)
+        // The raw basename, not displayTitle: displayTitle strips the leading number, so
+        // searching the digits you can SEE in the column only works if the haystack is raw.
+        check("ค้นเลขหัวเพลงที่เห็นในคอลัมน์ได้", find("107") == [Library.baseName(sp[2])],
+              find("107").joined(separator: ", "))
+        // ...and the boilerplate displayTitle removes is still searchable, same reason.
+        check("ค้นคำที่ displayTitle ตัดทิ้งก็ยังเจอ", find("official mv").count == 2,
+              "\(find("official mv").count)")
+        check("ภาษาไทย", find("ลาลาลอย").count == 1 && find("ขี้แง").count == 1)
+        // NFC on both sides. Two visually identical Thai strings compare unequal otherwise —
+        // §8g's lesson for the note, in the one place a human types the comparison by hand.
+        let decomposed = "ขี้แง".decomposedStringWithCanonicalMapping
+        check("สะกดแบบ decomposed ก็ต้องเจอ (NFC ทั้งสองฝั่ง)", find(decomposed).count == 1)
+        check("หลายคำ = AND ไม่สนลำดับ",
+              find("palmy ooh").count == 1 && find("ooh palmy").count == 1)
+        check("เว้นวรรคซ้ำ ๆ ถูกยุบ", find("  palmy   ooh  ").count == 1)
+        check("ไม่เจอ = ว่าง ไม่ใช่ทั้งหมด", find("ไม่มีเพลงนี้").isEmpty)
+        check("ทุกคำต้องเจอ — คำเดียวตรงไม่พอ", find("palmy ลาลาลอย").isEmpty)
+
+        print("\n4) ค้นหาก็ห้ามรั่วเข้าไปในการส่งต่อ เหมือนตัวกรองแท็ก")
+        // The same separation, and the same counterfactual with a number: `songsIn` is the
+        // round, `visibleSongs` is what the list shows. 23 of the 26 call sites are the former.
+        let found = Library.visible(paths, tag: "", search: "101", store: st)
+        check("ค้นแล้วเหลือ \(found.count) จาก \(paths.count) ในลิสต์", found.count == 1,
+              names(found))
+        let pkgS = Handoff.package(round: round, paths: paths, store: st, by: "diag")
+        check("round.json ยังมีครบทุกเพลง (\(paths.count))", pkgS.songs.count == paths.count)
+        let leakedS = Handoff.package(round: round, paths: found, store: st, by: "diag")
+        check("ถ้าเผลอส่ง visibleSongs ไป → หาย \(paths.count - found.count) เพลง",
+              leakedS.songs.count == found.count, "\(leakedS.songs.count)")
+        check("pre-flight ยังตรวจทั้งรอบ",
+              Set(Preflight.fast(round: round, paths: paths, store: st).map(\.path)) == Set(paths))
+
+        print("\n5) ไม่เก็บลงไฟล์ — กรองต้องตายพร้อม process")
         st.settingsChanged()
         let keys = Set(((st.raw["_settings"] as? [String: Any]) ?? [:]).keys)
         let suspect = keys.filter {
             let k = $0.lowercased()
-            return k.contains("filter") || k.contains("tagfilter")
+            return k.contains("filter") || k.contains("tagfilter") || k.contains("search")
         }
-        check("_settings ไม่มีคีย์เกี่ยวกับตัวกรอง", suspect.isEmpty,
+        check("_settings ไม่มีคีย์เกี่ยวกับตัวกรองหรือคำค้น", suspect.isEmpty,
               suspect.isEmpty ? "\(keys.count) คีย์ ไม่มีอันไหนเกี่ยว"
                               : suspect.sorted().joined(separator: ", "))
 

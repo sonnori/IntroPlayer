@@ -66,9 +66,14 @@ struct HandoverPanel: View {
             Divider().overlay(Palette.line)
             HStack(spacing: 10) {
                 Text("ชื่อคนเซ็ต").font(Typo.font(11)).foregroundStyle(Palette.muted)
-                TextField("", text: $model.setterName)
+                // Persisted, so it is typed once per machine rather than once per handover —
+                // and `by` is the only field saying whose round this is, which is the whole
+                // point once three people are each preparing one. Committed on Return and again
+                // inside `doExport`, so pressing ส่งต่อ without pressing Return still saves it.
+                TextField("ใส่ไว้ครั้งเดียว", text: $model.setterName)
                     .textFieldStyle(.roundedBorder).frame(width: 150)
                     .font(Typo.font(12))
+                    .onSubmit { model.commitSetterName() }
                 Spacer()
                 Text("จะเขียน \(RoundPackage.fileName) ลงในโฟลเดอร์ของรอบนี้")
                     .font(Typo.font(11)).foregroundStyle(Palette.muted)
@@ -278,47 +283,105 @@ struct DiffPanel: View {
 
 /// A persistent strip, not a toast: the operator may not be looking when a 2.4 s message fires,
 /// and this is the one thing they must check before rolling camera.
+///
+/// **ONE slot, with everything else folded in as a count** — the rule `NewsBanner` follows, for
+/// the same measured reason: §15 puts two banners plus the save-failure bar over the height the
+/// window's declared `minHeight: 640` actually has, and past `CenterView`'s waveform floor the
+/// overflow clips the song title off the top and ✓/✗ off the bottom with no scroller. So three
+/// rounds arriving do not get three strips; they get this one, saying how many.
 struct ReceiveBanner: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        if let pkg = model.incoming, !model.incomingDismissed {
-            HStack(spacing: 12) {
-                Text("📥").font(Typo.font(14))
-                Text("รอบ \(Library.label(pkg.round))")
-                    .font(Typo.font(13, .bold))
-                Text("ตั้งโดย \(pkg.by.isEmpty ? "ไม่ระบุชื่อ" : pkg.by)")
-                    .font(Typo.font(12)).foregroundStyle(Palette.text.opacity(0.85))
-                Text("· \(pkg.songs.count) เพลง").font(Typo.font(12))
-                    .foregroundStyle(Palette.text.opacity(0.85))
-                if !pkg.at.isEmpty {
-                    Text("· \(LogStore.clockText(pkg.at))").font(Typo.font(11))
-                        .foregroundStyle(Palette.text.opacity(0.6))
-                }
-                Spacer()
-                Button { model.openImport() } label: {
-                    Text("ดูและรับโจทย์").font(Typo.font(12, .semibold))
-                        .padding(.horizontal, 12).padding(.vertical, 6)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(PressStyle(corner: 7))
-                .background(Color.black.opacity(0.25))
-                .clipShape(RoundedRectangle(cornerRadius: 7))
-                Button { model.incomingDismissed = true } label: {
-                    Text("ไว้ก่อน").font(Typo.font(11))
-                        .padding(.horizontal, 8).padding(.vertical, 6)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(PressStyle(corner: 7))
-                .foregroundStyle(Palette.text.opacity(0.7))
-            }
-            .padding(.horizontal, 18).padding(.vertical, 9)
-            .frame(maxWidth: .infinity)
-            .background(Palette.cyan.opacity(0.18))
-            .overlay(alignment: .leading) {
-                Rectangle().fill(Palette.cyan).frame(width: 3).allowsHitTesting(false)
-            }
-            .foregroundStyle(Palette.text)
+        if let it = model.incomingVisible {
+            strip { thisRound(it) }
+        } else if let next = model.incomingElsewhere.first {
+            // The round on screen has nothing waiting but another one does. This is the case the
+            // old single-round check could not see at all.
+            strip { elsewhere(next) }
         }
+    }
+
+    // MARK: the round on screen is waiting
+
+    @ViewBuilder private func thisRound(_ it: IncomingRound) -> some View {
+        Text("รอบ \(it.label)").font(Typo.font(13, .bold))
+        Text("ตั้งโดย \(it.pkg.by.isEmpty ? "ไม่ระบุชื่อ" : it.pkg.by)")
+            .font(Typo.font(12)).foregroundStyle(Palette.text.opacity(0.85))
+        Text("· \(it.pkg.songs.count) เพลง").font(Typo.font(12))
+            .foregroundStyle(Palette.text.opacity(0.85))
+        if !it.pkg.at.isEmpty {
+            Text("· \(LogStore.clockText(it.pkg.at))").font(Typo.font(11))
+                .foregroundStyle(Palette.text.opacity(0.6))
+        }
+        // Filing a round under a different folder name is legal by design (§8e keys the package
+        // by file name for exactly that), so say it rather than let the two names disagree
+        // silently.
+        if it.renamed {
+            Text("· ส่งมาในชื่อ \(it.pkg.round)").font(Typo.font(11))
+                .foregroundStyle(Palette.text.opacity(0.6))
+        }
+        let rest = model.incomingElsewhere
+        if !rest.isEmpty {
+            Text("· อีก \(rest.count) ชุดรออยู่: \(rest.map(\.label).joined(separator: ", "))")
+                .font(Typo.font(11, .semibold)).foregroundStyle(Palette.text.opacity(0.85))
+                .lineLimit(1)
+        }
+        Spacer()
+        action("ดูและรับโจทย์") { model.openImport() }
+        later { model.dismissIncoming(it) }
+    }
+
+    // MARK: another round is waiting
+
+    @ViewBuilder private func elsewhere(_ next: IncomingRound) -> some View {
+        let all = model.incomingElsewhere
+        Text(all.count == 1
+             ? "มีโจทย์รอรับอยู่อีก 1 ชุด"
+             : "มีโจทย์รอรับอยู่ \(all.count) ชุด")
+            .font(Typo.font(13, .bold))
+        Text(all.map(\.label).joined(separator: ", "))
+            .font(Typo.font(12)).foregroundStyle(Palette.text.opacity(0.85))
+            .lineLimit(1)
+        Spacer()
+        action("ไปรอบ \(next.label)") { model.goToIncoming(next) }
+        later { model.dismissIncomingElsewhere() }
+    }
+
+    // MARK: chrome
+
+    @ViewBuilder private func strip<C: View>(@ViewBuilder _ content: () -> C) -> some View {
+        HStack(spacing: 12) {
+            Text("📥").font(Typo.font(14))
+            content()
+        }
+        .padding(.horizontal, 18).padding(.vertical, 9)
+        .frame(maxWidth: .infinity)
+        .background(Palette.cyan.opacity(0.18))
+        .overlay(alignment: .leading) {
+            Rectangle().fill(Palette.cyan).frame(width: 3).allowsHitTesting(false)
+        }
+        .foregroundStyle(Palette.text)
+    }
+
+    private func action(_ t: String, _ run: @escaping () -> Void) -> some View {
+        Button(action: run) {
+            Text(t).font(Typo.font(12, .semibold))
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle(corner: 7))
+        .background(Color.black.opacity(0.25))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+    }
+
+    private func later(_ run: @escaping () -> Void) -> some View {
+        Button(action: run) {
+            Text("ไว้ก่อน").font(Typo.font(11))
+                .padding(.horizontal, 8).padding(.vertical, 6)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle(corner: 7))
+        .foregroundStyle(Palette.text.opacity(0.7))
     }
 }

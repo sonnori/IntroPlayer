@@ -54,7 +54,9 @@ struct RoundPackage {
         else { return nil }
         var p = RoundPackage()
         p.round = (o["round"] as? String) ?? ""
-        p.by = (o["by"] as? String) ?? ""
+        // Bounded on read: this file is hand-editable and written by another machine, and `by`
+        // lands in a one-line strip here. §15's rule for everything crossing a boundary.
+        p.by = Store.clampName((o["by"] as? String) ?? "")
         p.at = (o["at"] as? String) ?? ""
         for (name, v) in (o["songs"] as? [String: Any]) ?? [:] {
             guard let d = v as? [String: Any] else { continue }
@@ -246,6 +248,33 @@ enum Preflight {
     }
 }
 
+// MARK: - One round waiting to be taken in
+
+/// A `round.json` sitting in a round's folder that this library has not taken in yet.
+///
+/// The FOLDER is part of it rather than read back out of the package, and that is the point:
+/// `round.json` is keyed by file name so the receiving side may file a round under a different
+/// folder name (§8e), so `pkg.round` is the name the sender used while `round` is where
+/// accepting it will actually land. With one round on screen that distinction is a curiosity;
+/// with three folders arriving from three setters it is the difference between a strip you can
+/// act on and one you have to go and verify.
+struct IncomingRound: Identifiable, Equatable {
+    /// The folder under `songs/` — where the import lands. `""` is the loose-files round.
+    let round: String
+    let pkg: RoundPackage
+
+    /// Also the dismissal key. `at` is stamped by `Handoff.export`, so a round the sender
+    /// re-exports is a DIFFERENT item and raises the strip again instead of staying hidden
+    /// behind a wave-off of the older file.
+    var id: String { round + "\u{1}" + pkg.at }
+    var label: String { Library.label(round) }
+    /// The sender's own name for the round is not the folder it is sitting in. Legal, and worth
+    /// saying on screen so "รอบไหน" is never ambiguous.
+    var renamed: Bool { !pkg.round.isEmpty && pkg.round != round }
+
+    static func == (a: IncomingRound, b: IncomingRound) -> Bool { a.id == b.id }
+}
+
 // MARK: - Import
 
 /// Which field a diff row is about.
@@ -299,6 +328,12 @@ struct DiffRow: Identifiable {
 /// What importing a package would do, computed before anything is written.
 struct ImportPlan {
     var package: RoundPackage
+    /// The FOLDER under `songs/` this plan lands in. Not derivable from `package.round`: a
+    /// `round.json` is keyed by file name precisely so the receiving side may file a round under
+    /// a different folder name (§8e), so `package.round` is where it came FROM. Stored rather
+    /// than passed around a second time, so `applyImport` cannot read it off whatever round
+    /// happens to be selected when the sheet is dismissed.
+    var round = ""
     /// Songs the local config has never seen — applied without asking, there is nothing to lose.
     var fresh: [String] = []
     /// Songs whose values differ; the user accepts or rejects per row.
@@ -328,7 +363,7 @@ enum Handoff {
     static func package(round: String, paths: [String], store: Store, by: String) -> RoundPackage {
         var p = RoundPackage()
         p.round = round
-        p.by = by
+        p.by = Store.clampName(by)
         p.at = LogStore.isoNow()
         for path in paths {
             let c = store.config(for: path)
@@ -364,10 +399,75 @@ enum Handoff {
         return url
     }
 
+    /// True when every song in the package already carries this exact snapshot as its signed-off
+    /// `base` — i.e. the package IS a handover this library has already been through, and
+    /// anything that differs now is a local edit made SINCE.
+    ///
+    /// **This is what stops the strip from offering work back to the person who did it.** Export
+    /// and import both stamp `base` from the result, so a round the setter sent and then kept
+    /// editing, and a round the operator imported and then changed on set, both end up differing
+    /// from the file on disk — and `plan` compares incoming-vs-local, so both produced rows. The
+    /// diff sheet pre-accepts every row, so pressing the obvious button would have reverted the
+    /// on-site edits to the snapshot they were derived from, which is the one thing §8e's
+    /// "แก้ที่กอง" badges exist to protect.
+    ///
+    /// It mattered little while only the selected round was checked. Sweeping every round turns
+    /// it into a strip that reappears from anywhere, and §12 is explicit that a warning which
+    /// fires when nothing is wrong is one that gets ignored on the day it matters.
+    ///
+    /// A song with no local entry, or no `base` at all (never handed over), answers false — so a
+    /// package carrying anything genuinely new still counts as waiting.
+    static func alreadyTakenIn(_ pkg: RoundPackage, round: String, paths: [String],
+                               store: Store) -> Bool {
+        let byName = Dictionary(paths.map { (Library.baseName($0), $0) },
+                                uniquingKeysWith: { a, _ in a })
+        var matched = 0
+        for (name, e) in pkg.songs {
+            // No audio for it in this round: an orphan, with nothing local to have been
+            // signed off against. `plan` reports it separately and it raises no row.
+            guard let path = byName[name] else { continue }
+            guard let local = store.songs[path], let base = local.base, base == e.b else {
+                return false
+            }
+            matched += 1
+        }
+        return matched > 0
+    }
+
+    /// Is this package something the round still has to take in? The sweep's per-round decision.
+    static func isWaiting(_ pkg: RoundPackage, round: String, paths: [String], store: Store) -> Bool {
+        let p = plan(pkg, round: round, paths: paths, store: store)
+        guard !(p.fresh.isEmpty && p.rows.isEmpty) else { return false }
+        return !alreadyTakenIn(pkg, round: round, paths: paths, store: store)
+    }
+
+    /// Every round holding a `round.json` that has not been taken in yet.
+    ///
+    /// A pure function, with `read` and `songsIn` injected, for one reason: the defect this
+    /// replaced was not in the per-round decision, it was in **how many rounds the caller asked
+    /// about** — so a test of the decision alone would have passed before and after. This way
+    /// `--incomingtest` drives the real loop rather than a copy of it. `AppModel.detectIncoming`
+    /// is now a single call to this.
+    ///
+    /// `compactMap`, so there is no shape in which it can stop at the first hit.
+    static func waitingRounds(
+        _ rounds: [String],
+        store: Store,
+        songsIn: (String) -> [String],
+        read: (String) -> RoundPackage? = { RoundPackage.read(RoundPackage.url(forRound: $0)) }
+    ) -> [IncomingRound] {
+        rounds.compactMap { round in
+            guard let pkg = read(round),
+                  isWaiting(pkg, round: round, paths: songsIn(round), store: store)
+            else { return nil }
+            return IncomingRound(round: round, pkg: pkg)
+        }
+    }
+
     static func plan(_ pkg: RoundPackage, round: String, paths: [String], store: Store)
         -> ImportPlan
     {
-        var plan = ImportPlan(package: pkg)
+        var plan = ImportPlan(package: pkg, round: round)
         let byName = Dictionary(paths.map { (Library.baseName($0), $0) }, uniquingKeysWith: { a, _ in a })
         for (name, e) in pkg.songs.sorted(by: { $0.key < $1.key }) {
             guard let path = byName[name] else { plan.orphans.append(name); continue }

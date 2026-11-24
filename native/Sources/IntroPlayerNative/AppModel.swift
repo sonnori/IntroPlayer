@@ -39,10 +39,37 @@ final class AppModel: ObservableObject {
     @Published var preflightScanning = false
     @Published var importPlan: ImportPlan?
     @Published var acceptedRows: Set<String> = []
-    /// A `round.json` sitting in the round's folder that has not been taken in yet. Drives the
-    /// receive banner, which must persist — the operator may not be looking when a toast fires.
-    @Published var incoming: RoundPackage?
-    @Published var incomingDismissed = false
+    /// EVERY round whose folder holds a `round.json` this library has not taken in yet.
+    ///
+    /// A list, and that is the whole fix: `detectIncoming` used to read `currentPlaylist` only,
+    /// so three setters each handing a folder over raised the receive banner for whichever round
+    /// happened to be selected and the other two sat unimported with nothing on screen saying
+    /// so. Invisible with one setter; two thirds of the work with three.
+    @Published private(set) var incomingRounds: [IncomingRound] = []
+    /// Items the operator has waved off this session, keyed by `IncomingRound.id` — the folder
+    /// PLUS the export time. Per item rather than one flag, because a single flag is the same
+    /// defect as a single `incoming`: “ไว้ก่อน” on one round must never hide another round's
+    /// arrival. Session-only on purpose; the cue that survives a relaunch AND a dismissal is the
+    /// 📥 the playlist picker puts on each pending round.
+    @Published private(set) var dismissedIncoming: Set<String> = []
+
+    /// The waiting package for the round on screen. **Derived** — `pending` is the single piece
+    /// of state, where the old `incoming` was assigned from four different places and cleared
+    /// from three.
+    var incoming: IncomingRound? { incomingRounds.first { $0.round == currentPlaylist } }
+    /// What the strip shows for this round: nil once waved off.
+    var incomingVisible: IncomingRound? {
+        guard let i = incoming, !dismissedIncoming.contains(i.id) else { return nil }
+        return i
+    }
+    /// Rounds waiting that are NOT the one on screen — exactly what the single-round check could
+    /// not see.
+    var incomingElsewhere: [IncomingRound] {
+        incomingRounds.filter { $0.round != currentPlaylist && !dismissedIncoming.contains($0.id) }
+    }
+    /// Drives the picker's mark. Not filtered by `dismissedIncoming`: a wave-off hides the strip,
+    /// not the fact that a folder is still unimported.
+    func hasIncoming(_ round: String) -> Bool { incomingRounds.contains { $0.round == round } }
 
     // MARK: - update state (§15)
     @Published var showAbout = false
@@ -73,6 +100,14 @@ final class AppModel: ObservableObject {
     @Published var updateStep = ""
     /// Set on the launch right after a successful update, so the operator gets told it worked.
     @Published var justUpdatedFrom: String?
+    /// Live edit buffer for the name stamped into `round.json` as `by`. The durable value is
+    /// `Store.setterName`; `commitSetterName()` is the only thing that moves one to the other.
+    ///
+    /// **Deliberately not written on every keystroke.** `Store.clampName` trims, so a
+    /// write-through binding would eat the space the moment you typed it and you could not type
+    /// a name with one in it. (The marker fields' commit-on-Return rule in §11 is about undo
+    /// snapshots and clamps dragging the other marker — neither applies here; this is simply
+    /// what a trimming clamp requires.)
     @Published var setterName = ""
 
     // MARK: two-press confirmation
@@ -188,6 +223,7 @@ final class AppModel: ObservableObject {
         songs = Library.scan()
         let pls = playlists
         currentPlaylist = pls.contains(store.lastPlaylist) ? store.lastPlaylist : (pls.first ?? "")
+        setterName = store.setterName
         player.configProvider = { [weak self] in
             guard let self, let c = self.current else { return SongConfig() }
             return self.store.config(for: c)
@@ -266,6 +302,87 @@ final class AppModel: ObservableObject {
     /// filter is the same trap with a weaker hint, so it dies with the process.
     @Published private(set) var tagFilter = ""
 
+    /// Free-text narrowing of the song LIST by filename — "หาเพลงที่อยากเล่น". Empty = off.
+    ///
+    /// **Dies with the process, exactly like `tagFilter` and for the identical measured
+    /// reason** (§8c): a narrowing that survives a relaunch is how an operator opens the app on
+    /// a show day to a round missing most of its questions, which was reported from real use as
+    /// "the app can't find my songs".
+    @Published private(set) var search = ""
+    /// Whether the search row is on screen. Separate from `search` being empty, because the row
+    /// has to exist before anything has been typed into it.
+    @Published private(set) var searching = false
+    /// Whether the SEARCH field specifically holds first responder. Not `@Published` — only the
+    /// key monitor reads it, and no view needs to re-render on it. It exists so Esc can close
+    /// the search in one press from inside its own field while still meaning plain "blur" in
+    /// every other field (the note field and the search row can be open at the same time).
+    var searchFieldFocused = false
+
+    func openSearch() {
+        guard !searching else { return }
+        searching = true
+        objectWillChange.send()
+    }
+
+    /// Closing CLEARS the term. The row and the narrowing are one thing: a hidden control still
+    /// filtering the list is the §8c trap with the explanation taken away.
+    func closeSearch() {
+        guard searching || !search.isEmpty else { return }
+        searching = false
+        search = ""
+        objectWillChange.send()
+    }
+
+    /// Unlike `setTagFilter`, this does **not** refuse a term that matches nothing. Every
+    /// keystroke on the way to a word passes through states that match nothing, so refusing
+    /// would make the field unusable; the strip says "ไม่เจอ" instead, and names the other
+    /// rounds that do match.
+    func setSearch(_ t: String) {
+        let next = String(t.prefix(80))
+        guard next != search else { return }
+        search = next
+        objectWillChange.send()
+    }
+
+    func matchesSearch(_ path: String) -> Bool {
+        search.isEmpty || Library.matches(path, search)
+    }
+
+    /// Return in the search field: take the first match, then hand the keyboard back so ↑/↓ walk
+    /// the rest. `select` sets `activeCol` from the song it opens, so the column navigation lands
+    /// on the matches rather than wherever you were — and `[`/`]` already skip columns with none.
+    func commitSearch() {
+        guard !search.isEmpty else { closeSearch(); return }
+        guard let first = visibleSongs(currentPlaylist).first else {
+            let other = searchElsewhere()
+            flash(other.isEmpty
+                  ? "ไม่เจอ \"\(search)\" ในรอบนี้"
+                  : "ไม่เจอในรอบนี้ — แต่มีใน " + other.map { "\(Library.label($0.round)) (\($0.count))" }
+                        .joined(separator: ", "))
+            return
+        }
+        // Same refusal as a log row (§8d): `select` loads a different file, which cuts the audio
+        // on air. Narrowing the list is free; opening a song is not.
+        guard !player.isPlaying else {
+            flash("กำลังเล่นอยู่ — กด Space หยุดก่อนถ้าจะเปิดเพลงนี้")
+            return
+        }
+        select(first)
+    }
+
+    /// Rounds OTHER than this one holding a match. An empty result that does not say "it is in
+    /// EP02" is §8c's "the app can't find my songs" wearing a search box.
+    func searchElsewhere() -> [(round: String, count: Int)] {
+        guard !search.isEmpty else { return [] }
+        let t = Library.searchTokens(search)
+        guard !t.isEmpty else { return [] }
+        return playlists.compactMap { r in
+            guard r != currentPlaylist else { return nil }
+            let n = songsIn(r).filter { Library.matches($0, tokens: t) }.count
+            return n > 0 ? (r, n) : nil
+        }
+    }
+
     func setTagFilter(_ t: String) {
         let next = Store.clampTag(t) ?? ""
         guard next != tagFilter else { return }
@@ -308,15 +425,16 @@ final class AppModel: ObservableObject {
     /// two thirds of its questions missing. Now the only way to do that is to type
     /// `visibleSongs` somewhere it does not belong, which is a visible mistake.
     func visibleSongs(_ pl: String) -> [String] {
-        Library.visible(songsIn(pl), tag: tagFilter, store: store)
+        Library.visible(songsIn(pl), tag: tagFilter, search: search, store: store)
     }
     func visibleSongs(column i: Int) -> [String] {
         visibleSongs(currentPlaylist).filter { Library.column(of: $0) == i }
     }
-    /// How many of the round the filter is hiding — the number the strip has to show, because a
-    /// filter that does not say what it hides is indistinguishable from missing files (§8c).
-    var tagFilterHidden: Int {
-        tagFilter.isEmpty ? 0 : songsIn(currentPlaylist).count - visibleSongs(currentPlaylist).count
+    /// How many of the round is hidden right now, by the tag filter and the search together —
+    /// the number both strips show, because a narrowing that does not say what it hides is
+    /// indistinguishable from missing files (§8c). One number, so the two strips cannot disagree.
+    var hiddenCount: Int {
+        songsIn(currentPlaylist).count - visibleSongs(currentPlaylist).count
     }
     /// Tags actually present in this round, with their counts. Only these are offered, so
     /// picking one can never produce an empty list.
@@ -414,10 +532,14 @@ final class AppModel: ObservableObject {
         analysisCache.removeAll()
         coverCache.removeAll()
         tagFilter = ""
+        closeSearch()
         store.load()
         logStore.load()
         invalidateStatus()
         currentPlaylist = store.lastPlaylist
+        // The buffer belongs to the library we just loaded, not the one we left — otherwise the
+        // previous folder's name would be stamped into this one's next handover.
+        setterName = store.setterName
         rescan(force: true)
         let pls = playlists
         if !pls.contains(currentPlaylist) { currentPlaylist = pls.first ?? "" }
@@ -437,6 +559,9 @@ final class AppModel: ObservableObject {
 
     func setPlaylist(_ p: String) {
         cancelGuesses()        // nothing in the round you just left is worth finishing
+        // The term was typed about the round you are leaving. Carrying it over is how the new
+        // round opens showing two of its songs.
+        closeSearch()
         currentPlaylist = p
         store.lastPlaylist = p
         store.settingsChanged()
@@ -482,6 +607,13 @@ final class AppModel: ObservableObject {
             let t = tagFilter
             tagFilter = ""
             flash("เลิกกรอง \"\(t)\" — เพลงที่เลือกไม่มีแท็กนี้")
+        }
+        // Same rule, same choke point, for the search term — `Tab`, `Return`'s advance, a log
+        // row and `nextNeedingReview` all target the whole round on purpose.
+        if !search.isEmpty, !matchesSearch(path) {
+            let q = search
+            closeSearch()
+            flash("เลิกค้นหา \"\(q)\" — เพลงที่เลือกไม่ตรงกับคำค้น")
         }
         current = path
         activeCol = Library.column(of: path)
@@ -1888,13 +2020,27 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Persist the name. Called from the field's Return and from `doExport`, so pressing
+    /// ส่งต่อ without pressing Return still saves what is on screen — the field is the only
+    /// place this value is ever typed, and it only pays off on the NEXT handover.
+    func commitSetterName() {
+        let clean = Store.clampName(setterName)
+        if clean != setterName { setterName = clean }
+        guard clean != store.setterName else { return }
+        store.setterName = clean
+        store.settingsChanged()
+    }
+
     func doExport() -> String {
         let paths = songsIn(currentPlaylist)
         guard !paths.isEmpty else { return "รอบนี้ไม่มีเพลง" }
+        commitSetterName()
         do {
             let url = try Handoff.export(round: currentPlaylist, paths: paths,
-                                         store: store, by: setterName)
-            incoming = nil
+                                         store: store, by: store.setterName)
+            // The file we just wrote matches this round exactly (export stamps `base` from
+            // `current`), so it is not something to take in.
+            clearIncoming(currentPlaylist)
             objectWillChange.send()
             return "เขียน \(RoundPackage.fileName) แล้ว — ส่งโฟลเดอร์ \(url.deletingLastPathComponent().lastPathComponent)/ ได้เลย"
         } catch {
@@ -1902,19 +2048,56 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Looks for a `round.json` the current round has not taken in yet. Called on launch, on
-    /// rescan and on window activation, because the usual way a round arrives is somebody copying
-    /// a folder in while the app is open.
+    /// Looks for a `round.json` that has not been taken in yet — in **every** round, not just
+    /// the one on screen. Called on launch and on window activation, because the usual way a
+    /// round arrives is somebody copying a folder in while the app is open.
+    ///
+    /// Sweeping all of them is the point. It used to read `currentPlaylist` alone, which is
+    /// correct for one setter and loses two thirds of the work for three: drop in `EP01/`,
+    /// `EP02/` and `EP03/` and only the selected round raised a strip, while the other two sat
+    /// unimported with nothing anywhere saying they were waiting.
+    ///
+    /// Cost of the sweep: one small file read plus one in-memory `Handoff.plan` per round. This
+    /// is **not** called from `body` — only from `didBecomeActiveNotification` and `onAppear` —
+    /// so the file I/O is not on a per-frame path (§15's `manifestLocation` lesson).
     func detectIncoming() {
-        let url = RoundPackage.url(forRound: currentPlaylist)
-        guard let pkg = RoundPackage.read(url) else { incoming = nil; return }
-        let paths = songsIn(currentPlaylist)
-        let plan = Handoff.plan(pkg, round: currentPlaylist, paths: paths, store: store)
-        // Nothing to take in: every song already matches what the package says.
-        if plan.fresh.isEmpty && plan.rows.isEmpty { incoming = nil; return }
-        if incoming == nil { incomingDismissed = false }
-        incoming = pkg
-        objectWillChange.send()
+        let found = Handoff.waitingRounds(playlists, store: store, songsIn: songsIn)
+        // Forget wave-offs for items that are no longer waiting, so copying a folder back in
+        // later raises the strip again instead of being silently swallowed by a stale dismissal.
+        let live = Set(found.map(\.id))
+        if !dismissedIncoming.isSubset(of: live) { dismissedIncoming.formIntersection(live) }
+        // Guarded: this runs on every window activation and assigning a `@Published` publishes
+        // even when the value is identical, which would re-render the whole window for nothing.
+        guard found != incomingRounds else { return }
+        incomingRounds = found
+    }
+
+    private func clearIncoming(_ round: String) {
+        guard incomingRounds.contains(where: { $0.round == round }) else { return }
+        incomingRounds.removeAll { $0.round == round }
+    }
+
+    func dismissIncoming(_ item: IncomingRound) {
+        dismissedIncoming.insert(item.id)
+    }
+
+    /// Wave off every round waiting elsewhere. The strip is ONE slot on purpose — §15 measures
+    /// two banners plus the save-failure bar as more height than the window's declared minimum
+    /// has — so when it is standing in for several rounds, its dismiss has to cover them. What
+    /// survives is the 📥 on each round in the picker.
+    func dismissIncomingElsewhere() {
+        dismissedIncoming.formUnion(incomingElsewhere.map(\.id))
+    }
+
+    /// Jump to a round that is waiting. Refuses while playing for the same reason a log row does
+    /// (§8d): it changes the round, which loads a different song and cuts the audio — and this
+    /// button sits in a strip at the top of the window, well inside slamming range.
+    func goToIncoming(_ item: IncomingRound) {
+        guard !player.isPlaying else {
+            flash("กำลังเล่นอยู่ — กด Space หยุดก่อนถ้าจะเปลี่ยนรอบ")
+            return
+        }
+        setPlaylist(item.round)
     }
 
     func openImport() {
@@ -1923,7 +2106,7 @@ final class AppModel: ObservableObject {
         let plan = Handoff.plan(pkg, round: currentPlaylist, paths: songsIn(currentPlaylist), store: store)
         if !plan.hasChoices {
             Handoff.apply(plan, accepted: [], store: store)
-            incoming = nil
+            clearIncoming(currentPlaylist)
             afterBulkChange()
             flash("รับโจทย์แล้ว \(plan.fresh.count) เพลง")
             return
@@ -1939,7 +2122,9 @@ final class AppModel: ObservableObject {
         let n = acceptedRows.count
         importPlan = nil
         acceptedRows = []
-        incoming = nil
+        // `plan.round`, not `currentPlaylist`: the plan knows which folder it was built for, so
+        // this cannot clear the wrong round's entry if the selection moved under the sheet.
+        clearIncoming(plan.round)
         afterBulkChange()
         flash("รับมา \(n) รายการ — ที่ไม่รับยังเป็นค่าเดิมของเครื่องนี้")
     }

@@ -316,6 +316,16 @@ final class Store {
     /// by `setTagColor`, which is a settings write — see the note there for why it must never
     /// go through `updateConfig`.
     private(set) var tagColorChoice: [String: Int] = [:]
+    /// Who this machine's setter is, stamped into `round.json` as `by`.
+    ///
+    /// It lives here rather than dying with the process because it is the ONLY field saying
+    /// whose round this is, and it was typed into a sheet that forgets — so in practice every
+    /// handover arrived reading "ไม่ระบุชื่อ" on both screens that show it. Invisible with one
+    /// setter; with three machines preparing three rounds it is the first thing the person
+    /// merging them needs.
+    ///
+    /// `_settings` and not per round: it describes the person at this keyboard, not the work.
+    var setterName = ""
     /// Where to look for a newer build. Empty = the check is off, which is the default and the
     /// only state that needs no network at all. See §15.
     var updateFeed = ""
@@ -400,6 +410,10 @@ final class Store {
                   let key = Store.clampTag(k).map(Store.tagKey) else { continue }
             tagColorChoice[key] = i
         }
+        // Clamped on the way IN as well as out: this file can be hand-edited, and `by` then
+        // crosses to another machine's one-line strip. Everything that crosses a machine
+        // boundary gets a bound (§15's cap on `notes` and `download`).
+        setterName = Store.clampName((s["setterName"] as? String) ?? "")
         updateFeed = (s["updateFeed"] as? String) ?? ""
         backupDir = String(((s["backupDir"] as? String) ?? "").prefix(500))
         // A non-numeric or missing value reads as the current schema rather than 0, so a garbled
@@ -452,9 +466,21 @@ final class Store {
     /// is going out, hover is not available then, and a note too long to take in at a glance has
     /// already failed at its job.
     static let noteMax = 120
+    /// A person's name in a one-line strip beside three other facts. Generous for a nickname or
+    /// a full name, nowhere near enough to be a paragraph.
+    static let nameMax = 40
 
     /// Everything a note has to survive on the way in: a hand-edit, another build, a paste.
-    static func clampNote(_ s: String) -> String {
+    static func clampNote(_ s: String) -> String { oneLine(s, max: noteMax) }
+
+    /// Who a round came from. Stamped into `round.json` as `by` and read on ANOTHER machine's
+    /// one-line strip, so it is bounded for the same reason §15 bounds `notes` and `download`:
+    /// an unbounded string from outside this app would push the strip's buttons off screen.
+    static func clampName(_ s: String) -> String { oneLine(s, max: nameMax) }
+
+    /// Flatten, NFC, trim, cap — in **grapheme clusters**, which is what makes the cap mean the
+    /// same thing in Thai as in English.
+    private static func oneLine(_ s: String, max limit: Int) -> String {
         // Flattened to one line. A pasted newline is the one input that can defeat the height
         // argument above, and the field that writes this is single-line so it cannot produce one.
         var n = s
@@ -466,7 +492,7 @@ final class Store {
         // §8f's grapheme-cluster floor.
         n = n.precomposedStringWithCanonicalMapping
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if n.count > noteMax { n = String(n.prefix(noteMax)) }
+        if n.count > limit { n = String(n.prefix(limit)) }
         return n.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -807,6 +833,12 @@ final class Store {
             s["tagColors"] = tagColorChoice
         } else if s["tagColors"] is [String: Any] {
             s.removeValue(forKey: "tagColors")
+        }
+        // Same read-it-before-you-delete-it rule as `updateFeed` and `resetAt` above.
+        if !setterName.isEmpty {
+            s["setterName"] = setterName
+        } else if s["setterName"] is String {
+            s.removeValue(forKey: "setterName")
         }
         s["writtenBy"] = AppVersion.short
         if !dismissedUpdate.isEmpty { s["dismissedUpdate"] = dismissedUpdate }

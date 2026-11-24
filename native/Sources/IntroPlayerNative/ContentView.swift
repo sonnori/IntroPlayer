@@ -324,6 +324,12 @@ struct ContentView: View {
                 // cancels uncommitted text (§11) — so Esc keeps exactly the meaning it has
                 // everywhere else here: discard, do not write.
                 if e.keyCode == 53 {
+                    // From inside the SEARCH box specifically, Esc closes the search outright
+                    // rather than merely blurring: closing clears the term, which IS "discard,
+                    // do not write", and leaving a narrowed list behind an unfocused box is the
+                    // §8c trap with the explanation taken away. Gated on which field has focus
+                    // because the note field and the search row can be open at the same time.
+                    if model.searchFieldFocused { model.closeSearch() }
                     NSApp.keyWindow?.makeFirstResponder(nil)
                     return nil
                 }
@@ -331,6 +337,7 @@ struct ContentView: View {
             }
             if e.keyCode == 53 {                                                 // Esc
                 if model.pending != nil { model.cancelPending(); return nil }
+                if model.searching { model.closeSearch(); return nil }
                 if model.importPlan != nil { model.importPlan = nil; return nil }
                 if model.showAbout { model.showAbout = false; return nil }
                 if model.showHandover { model.showHandover = false; return nil }
@@ -387,6 +394,9 @@ struct ContentView: View {
             case 36: model.confirmCurrent()                                      // Return
             case 48: model.nextNeedingReview()                                   // Tab
             case 46: model.cycleFocusMarker()                                              // M
+            // `/` (keyCode 44, layout-independent — §11). Free: nothing else in the table uses
+            // it, and it is the search key everywhere else on this machine.
+            case 44: model.openSearch()
             case 6:  model.zoomIntro(); model.pulse(PulseID.zoomIntro)                     // Z
             case 27, 78: model.zoomBy(1.6); model.pulse(PulseID.zoomOut)                   // -
             case 24, 69: model.zoomBy(1 / 1.6); model.pulse(PulseID.zoomIn)                // =
@@ -414,6 +424,9 @@ struct ContentView: View {
 
 struct SongListView: View {
     @EnvironmentObject var model: AppModel
+    /// Owns the search field's first responder. The model mirrors it in `searchFieldFocused`
+    /// so the key monitor can tell "Esc in the SEARCH box" from "Esc in any other box".
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -424,7 +437,14 @@ struct SongListView: View {
                         set: { model.setPlaylist($0) })) {
                         ForEach(model.playlists, id: \.self) { p in
                             let n = model.songsIn(p).count
-                            Text("\(p.isEmpty ? Library.rootLabel : p)  (\(n))").tag(p)
+                            // The inbox tray marks a round holding a round.json nobody has taken
+                            // in yet. This is the DURABLE half of the receive strip: the strip is
+                            // one slot and can be waved off, this cannot, so "which folders are
+                            // still waiting" stays answerable after a dismissal and after a
+                            // relaunch — which is the whole point once three setters are each
+                            // handing a folder over.
+                            Text("\(model.hasIncoming(p) ? "📥 " : "")\(p.isEmpty ? Library.rootLabel : p)  (\(n))")
+                                .tag(p)
                         }
                     }
                     .labelsHidden().font(Typo.font(12))
@@ -435,6 +455,11 @@ struct SongListView: View {
                     Text("Songs (\(model.songsIn(model.currentPlaylist).count)) · เล่นแล้ว \(playedCount)")
                         .font(Typo.font(12)).foregroundStyle(Palette.muted)
                     Spacer()
+                    // A visible entry point, not just the `/` key. §11 records the same defect
+                    // for Played: `P` had worked since the native app shipped and was reported
+                    // as "no shortcut", because nothing on screen named it. The label carries
+                    // the key for that reason.
+                    searchButton
                     tagFilterMenu
                 }
                 // Rescan stays a button: it is the safe one and the one pressed most (a round
@@ -521,6 +546,7 @@ struct SongListView: View {
             .background(Palette.panel)
             Divider().overlay(Palette.line)
 
+            searchRow
             tagFilterStrip
 
             if model.isWide {
@@ -613,6 +639,90 @@ struct SongListView: View {
     /// `tintSelect`, which is the selection emphasis already used by the active column header,
     /// not a hue. §6d gives every hue one meaning and "the list is narrowed" is not one of them
     /// — amber in particular means the intro-end stop is not armed, and nothing else.
+    private var searchButton: some View {
+        Button { model.openSearch() } label: {
+            Text(model.search.isEmpty ? "⌕ ค้นหาเพลง  /" : "⌕ \(model.search)")
+                .font(Typo.font(11))
+                .foregroundStyle(model.search.isEmpty ? Palette.muted : Palette.text)
+                .lineLimit(1)
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle(corner: 6))
+        .fixedSize()
+        .background(model.search.isEmpty ? Palette.panel2 : Palette.tintSelect)
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.line).allowsHitTesting(false))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .help("ค้นหาเพลงในรอบนี้จากชื่อไฟล์ — ไม่กระทบการส่งต่อหรือรอบตรวจ")
+    }
+
+    /// Free-text narrowing by filename — opened with `/`, closed with Esc or ✕.
+    ///
+    /// A row that appears rather than a box that always sits there, for the reason §12 keeps
+    /// coming back to: a field with first responder turns the key monitor's `typing` branch on,
+    /// and in it `S`, `R`, `P`, `I`/`O`/`H`, `L` all stop working. Only `Space`, `1` and `2` are
+    /// carved out, and only while playback runs — so a buzz can still be stopped and scored, but
+    /// nothing else can. A permanently-focusable search box over the song list would mean the
+    /// transport is one stray click from being dead with nothing on screen saying so (§8g
+    /// records the note field hitting exactly this). It opens on a deliberate key, Return hands
+    /// the keyboard straight back, and Esc closes it.
+    @ViewBuilder private var searchRow: some View {
+        if model.searching {
+            let shown = model.visibleSongs(model.currentPlaylist).count
+            let total = model.songsIn(model.currentPlaylist).count
+            let other = shown == 0 && !model.search.isEmpty ? model.searchElsewhere() : []
+            HStack(spacing: 8) {
+                Text("⌕").font(Typo.font(13, latinOnly: true)).foregroundStyle(Palette.muted)
+                TextField("ชื่อไฟล์เพลง — Enter เลือกเพลงแรก, Esc ปิด", text: Binding(
+                    get: { model.search }, set: { model.setSearch($0) }))
+                    .textFieldStyle(.plain)
+                    .font(Typo.font(12))
+                    .focused($searchFocused)
+                    .onSubmit { model.commitSearch(); searchFocused = false }
+                if model.search.isEmpty {
+                    Text("พิมพ์ส่วนไหนของชื่อก็ได้").font(Typo.font(11))
+                        .foregroundStyle(Palette.dim).lineLimit(1)
+                } else if shown == 0 {
+                    // Never a bare "ไม่เจอ": an empty list that does not say where the song IS
+                    // is §8c's "the app can't find my songs" with a search box on top.
+                    Text(other.isEmpty
+                         ? "ไม่เจอในรอบนี้"
+                         : "ไม่เจอในรอบนี้ · มีใน " + other.map {
+                               "\(Library.label($0.round)) (\($0.count))" }.joined(separator: ", "))
+                        .font(Typo.font(11)).foregroundStyle(Palette.amber).lineLimit(1)
+                } else {
+                    Text("เห็น \(shown) จาก \(total)").font(Typo.font(11))
+                        .foregroundStyle(Palette.muted)
+                }
+                Button { model.closeSearch() } label: {
+                    Text("✕ เลิกค้นหา").font(Typo.font(11))
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PressStyle(corner: 6))
+                .foregroundStyle(Palette.text)
+                .background(Palette.panel2)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.line)
+                    .allowsHitTesting(false))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .frame(maxWidth: .infinity)
+            // `tintSelect` — the emphasis the active column header uses, never a hue. §6d gives
+            // each hue exactly one meaning and amber in particular means the intro-end stop is
+            // not armed.
+            .background(Palette.tintSelect)
+            .overlay(alignment: .bottom) { Rectangle().fill(Palette.line).frame(height: 1) }
+            // One runloop hop. Setting `@FocusState` directly inside `onAppear` lands before
+            // the field is in the responder chain and is unreliable on macOS — and a search box
+            // that opens without focus means the first thing you type goes to the key monitor
+            // instead, where letters are shortcuts: `S` resets, `R` reveals on camera.
+            .onAppear { DispatchQueue.main.async { searchFocused = true } }
+            .onDisappear { model.searchFieldFocused = false }
+            .onChange(of: searchFocused) { f in model.searchFieldFocused = f }
+        }
+    }
+
     @ViewBuilder
     private var tagFilterStrip: some View {
         if !model.tagFilter.isEmpty {
@@ -620,7 +730,7 @@ struct SongListView: View {
                 Text("⌕ กรอง: \(model.tagFilter)")
                     .font(Typo.font(12, .semibold)).foregroundStyle(Palette.tintSelectText)
                 Text("เห็น \(model.visibleSongs(model.currentPlaylist).count) "
-                     + "จาก \(model.songsIn(model.currentPlaylist).count) · ซ่อนอยู่ \(model.tagFilterHidden)")
+                     + "จาก \(model.songsIn(model.currentPlaylist).count) · ซ่อนอยู่ \(model.hiddenCount)")
                     .font(Typo.font(11)).foregroundStyle(Palette.muted)
                 Spacer(minLength: 0)
                 Button { model.clearTagFilter() } label: {

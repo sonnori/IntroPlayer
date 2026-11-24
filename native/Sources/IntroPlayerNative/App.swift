@@ -34,7 +34,7 @@ struct IntroPlayerApp: App {
                      "--columns", "--handoff", "--preflight", "--titles",
                      "--revealtest", "--grabtest", "--palettetest", "--autodetect", "--artwork", "--timefmt", "--overview", "--remodetest", "--takes",
                      "--updatecheck", "--updatestage", "--loudtest", "--guesstest", "--snapshot", "--guessflow",
-                     "--notetest", "--tagtest", "--filtertest", "--roottest"]
+                     "--notetest", "--tagtest", "--filtertest", "--roottest", "--incomingtest"]
         if !diag, let f = CommandLine.arguments.first(where: flags.contains) {
             FileHandle.standardError.write("\(f) needs INTROPLAYER_DIAG=1\n".data(using: .utf8)!)
             exit(2)
@@ -136,6 +136,10 @@ struct IntroPlayerApp: App {
             exit(0)
         }
         // Read-only, same as --notetest.
+        if CommandLine.arguments.contains("--incomingtest") {
+            Diagnostics.incomingTest()
+            exit(0)
+        }
         if CommandLine.arguments.contains("--filtertest") {
             Diagnostics.filterTest()
             exit(0)

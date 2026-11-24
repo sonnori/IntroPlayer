@@ -533,7 +533,8 @@ INTROPLAYER_DIAG=1 $BIN --timefmt      # typed-field parser: round-trip, accepts
 INTROPLAYER_DIAG=1 $BIN --overview     # overview strip: same data as columnPeaks, caches independent
 INTROPLAYER_DIAG=1 $BIN --notetest     # the note: clamps, merge rule, measured layout, the ※ (§8g)
 INTROPLAYER_DIAG=1 $BIN --tagtest      # tags: registry, UNION merge, the chosen colour, the box (§8g)
-INTROPLAYER_DIAG=1 $BIN --filtertest   # the tag filter narrows the LIST and nothing else (§8g)
+INTROPLAYER_DIAG=1 $BIN --filtertest   # tag filter + filename search narrow the LIST only (§8g)
+INTROPLAYER_DIAG=1 $BIN --incomingtest # receive sweep + who sent it: 27 assertions (§8e)
 INTROPLAYER_DIAG=1 $BIN --roottest     # where the questions live: order, exclusions, .none (§5d)
 INTROPLAYER_DIAG=1 $BIN --updatecheck  # semver compare, feed resolution, blocked URL schemes (§15)
 INTROPLAYER_DIAG=1 $BIN --updatestage  # download + unpack + verify a real release, then delete (§15)
@@ -1419,6 +1420,77 @@ local one, and either way `base` is re-stamped from the result so both sides agr
 
 A bulk import drops the undo stack (`afterBulkChange`) — `Cmd+Z` must not restore half a round.
 
+### Spotting a round that has arrived (`detectIncoming` / `Handoff.waitingRounds`)
+
+A folder copied in while the app is open has to announce itself, so the app looks for a
+`round.json` nobody has taken in yet — on launch and on window activation.
+
+**It sweeps every round, and that is the whole point.** It used to read `currentPlaylist` alone,
+which is right for one setter and loses two thirds of the work for three: drop `EP01/`, `EP02/`
+and `EP03/` in and only the selected round raised a strip, while the other two sat unimported
+with nothing anywhere saying they were waiting. Measured as a number by `--incomingtest`, because
+the counterfactual is the thing worth writing down: **เห็น 1 จาก 3 — หาย 2 ชุด.**
+
+`Handoff.waitingRounds` is a pure function with `read` and `songsIn` injected, for one reason:
+the defect was never in the per-round decision, it was in **how many rounds the caller asked
+about** — so a test of the decision alone would have passed before and after. The diagnostic
+drives the real loop. `compactMap`, so there is no shape in which it stops at the first hit.
+
+**A package already signed off here is NOT waiting, however much it now differs**
+(`Handoff.alreadyTakenIn`). Export and import both stamp `base` from the result, and `plan`
+compares incoming-vs-local — so a round the setter sent and then kept editing, and a round the
+operator imported and then changed on set, both produce rows. The diff sheet pre-accepts every
+row, so pressing the obvious button would have **reverted the on-site edits to the snapshot they
+were derived from**, which is the one thing the "แก้ที่กอง" badges exist to protect. The test is
+therefore `base == the package's values for every song in it`, not "do the values differ". It
+mattered little while only the selected round was checked; sweeping every round turns it into a
+strip that reappears from anywhere, and §12 is explicit that a warning which fires when nothing
+is wrong is one that gets ignored on the day it matters.
+
+Three more things in it are load-bearing:
+
+- **One strip, not one per round.** `ReceiveBanner` shows the round on screen if it is waiting,
+  with `· อีก n ชุดรออยู่` folded in; otherwise it shows the others and a way to reach them.
+  The rule `NewsBanner` follows, for the measured reason in §15: two banners plus
+  `saveFailureBar` is already more height than `App.swift`'s declared `minHeight: 640` has, and
+  past `CenterView`'s waveform floor the overflow clips the song title off the top and ✓/✗ off
+  the bottom.
+- **The durable half is the 📥 in the playlist picker.** The strip can be waved off; the mark
+  cannot, so "which folders are still waiting" survives a dismissal and a relaunch. Same shape as
+  §15 keeping the version number cyan after the update strip is dismissed.
+- **"ไว้ก่อน" is per package**, keyed on folder **plus** the export time. One flag would be the
+  same defect as one `incoming` — waving off EP01 must not hide EP02 — and including `at` means a
+  round the sender **re-exports** raises the strip again instead of staying hidden behind a
+  wave-off of the older file. Nothing about it is persisted; it dies with the process.
+
+The strip also names the **folder**, not `package.round`, and says so when they differ. Filing a
+round under another folder name is legal by design — `round.json` is keyed by file name for
+exactly that — so `package.round` is where it came FROM while the folder is where accepting it
+lands. `ImportPlan.round` carries the same value, so `applyImport` cannot clear the wrong round.
+
+### Who sent it (`_settings.setterName` → `round.json`'s `by`)
+
+`by` is the only field saying whose round this is, and it used to be typed into a sheet that
+forgets — a `@Published` on `AppModel` with nothing behind it — so in practice every handover
+arrived reading **"ไม่ระบุชื่อ"** on both screens that show it. Invisible with one setter; with
+three machines preparing three rounds it is the first thing the person merging them needs.
+
+- **In `_settings`, never per round.** It describes the person at this keyboard, not the work.
+- **Committed on Return and again inside `doExport`**, not on every keystroke: `clampName`
+  trims, so a write-through binding would eat the space the moment you typed it and a name with
+  one in it would be untypeable. (§11's commit-on-Return rule for the marker fields is about
+  undo snapshots and clamps dragging the other marker — neither applies here. Same shape,
+  different reason; don't merge the two arguments.)
+- **Clamped on read AND on write**, ≤40 grapheme clusters, one line, NFC —
+  `RoundPackage.read`'s `by` was unbounded, and it lands in a one-line strip on a machine that
+  did not write it. §15's rule for `notes` and `download`, in the file that actually crosses
+  machines.
+- **`switchDataRoot` reseeds the buffer**, or the folder you just left would stamp its name into
+  the next handover of the one you moved into. Same family as every per-path cache it drops.
+
+`Store.clampName` and `Store.clampNote` are the same `oneLine(_:max:)` — the refactor is pinned
+by `--notetest` staying at 66.
+
 ### Pre-flight
 
 `Preflight.fast` is the no-decode checklist (missing file, never opened, still auto-guessed, intro
@@ -1800,6 +1872,51 @@ Four properties, each for a reason:
   uses — not a colour with a meaning. §6d gives each hue exactly one, and amber in particular
   means the intro-end stop is not armed and nothing else.
 
+### Searching the round by filename (`/`)
+
+Asked for as *"ค้นจากชื่อไฟล์เฉย ๆ เวลาอยากหาเพลงที่อยากเล่น"*. Same machinery as the tag filter
+— `Library.visible` gained a `search:` parameter, so there is still exactly **one** place the
+list narrows, and `songsIn(_:)` is still the round.
+
+- **The haystack is the RAW basename, not `displayTitle`.** `displayTitle` only ever *removes*
+  from the raw name (the leading track number, the trailing `[Official MV]` boilerplate), so the
+  raw name is a superset of what is on screen: typing the `107` you can see at the left of the
+  column works, and so does anything you read off the row. The one thing `displayTitle` rewrites
+  rather than removes is runs of whitespace, and `searchKey` collapses those on both sides.
+- **NFC on both sides**, because a human types this comparison by hand and two visually identical
+  Thai strings compare unequal otherwise — §8g's lesson for the note, in the place it bites most.
+- Tokens are **ANDed and order-free** (`palmy ooh` finds `202_Ooh! - Palmy`). Thai carries no
+  spaces, so one-token substring is the common case.
+- **It does not refuse an empty result**, unlike `setTagFilter`: every keystroke on the way to a
+  word passes through states matching nothing. The row says `ไม่เจอในรอบนี้ · มีใน EP02 (2)`
+  instead — an empty list that does not say where the song *is* is §8c's "the app can't find my
+  songs" with a search box on top.
+- **Dies with the process, and `setPlaylist` clears it.** Same measured reason as `tagFilter`.
+- `select` clears it at the same choke point it clears the tag filter, and says so.
+
+**The row appears and disappears; it is not a box that sits over the list.** A field holding
+first responder turns the key monitor's `typing` branch on, and in it `S`, `R`, `P`, `I`/`O`/`H`
+and `L` all stop working — only `Space`, `1` and `2` are carved out, and only while playback
+runs. A permanently focusable search box above the song list would put the transport one stray
+click from dead with nothing on screen saying so (§8g records the note field hitting exactly
+this). So: opened on a deliberate key, `Return` hands the keyboard straight back after selecting
+the first match, and `Esc` closes it in ONE press from inside its own field — gated on
+`searchFieldFocused`, because the note field and the search row can both be open and Esc must
+still mean plain blur in the other one.
+
+`Return` refuses while playing, like a log row (§8d): narrowing the list is free, but `select`
+loads a different file and cuts the audio on air.
+
+**It has a visible button as well as the key** (`⌕ ค้นหาเพลง /`, which names the key). §11
+records the same defect for Played: `P` had worked since the native app shipped and was still
+reported as "no shortcut", because nothing on screen said so.
+
+Column navigation needs no special case: `select` sets `activeCol` from the song it opens, so
+after `Return` the `↑`/`↓` walk the matches, and `[`/`]` already skip columns with none.
+
+`--filtertest` covers it — 25 assertions now, including the counterfactual with a number
+(`Handoff.package` handed the searched list loses 3 of 4 songs).
+
 ### Where the note is visible: three surfaces, one rule each
 
 | surface | shows | why that much |
@@ -1901,6 +2018,11 @@ Keyed by **path relative to `songs/`** (a bare filename for loose files). Exampl
     "dismissedUpdate": "",    // version the operator waved off; survives a relaunch — §15
     "dismissedSchema": 0,     // schema number they have already been told about — §15
     "backupDir": "",          // ALSO copy each launch snapshot here; empty = local only — §5c
+    "setterName": "ภู",       // who this machine's setter is, stamped into round.json as `by`
+                              // — §8e. ≤40 clusters, one line, NFC, clamped on BOTH read and
+                              // write because it crosses machines into a one-line strip.
+                              // Absent when empty; never per round — it describes the person
+                              // at this keyboard, not the work.
     "tagColors": { "ยุค 90": 2 }  // which colour the operator CHOSE for a tag — §8g. Keyed by
                               // Store.tagKey, value = INDEX into Palette.tagFill, so the ORDER
                               // of that array is a wire format. A tag absent here is coloured
@@ -2041,6 +2163,7 @@ explicitly. Pause-on-buzz → Space resumes exactly where it stopped, still in `
 | `I` / `O` / `H` | Mark introStart / introEnd / hook at playhead — **confirm-on-second-press while playing** |
 | `Shift` + `←` / `→` | Nudge the **focused** marker by 0.01 s (`AppModel.nudgeStep`) |
 | `M` | Cycle which marker `Shift+←/→` nudges |
+| `/` | Open the song search (filename) — `Esc` closes, `Return` takes the first match |
 | `E` | Toggle Ignore Intro End — same two-press rule |
 | `Return` | ยืนยันค่านี้ — clears `auto`, advances to the next song needing review |
 | `Tab` | Jump to the next song needing review |
@@ -2619,6 +2742,29 @@ the day it does not help.
   same line** rather than added: a second `trap … EXIT` **replaces** the first, which is how
   the new cleanup would have been silently disarmed by the existing one.
 
+- **The receive banner looked at the selected round only.** `detectIncoming` read
+  `RoundPackage.url(forRound: currentPlaylist)`, so three setters each handing a folder over
+  raised a strip for whichever round happened to be open and the other two sat unimported with
+  nothing on screen saying so — **1 of 3**, measured by `--incomingtest`. Invisible with one
+  setter, which is why it survived. The fix is a sweep, and the test had to move with it: the
+  defect was not in the per-round decision but in how many rounds the caller asked about, so an
+  assertion about the decision would have passed before and after. `Handoff.waitingRounds` is a
+  pure function with its two disk touches injected, so the diagnostic drives the real loop.
+- **The setter's name was never saved.** `AppModel.setterName` was a bare `@Published` with
+  nothing behind it, so the field in the handover sheet reset on every launch and `round.json`
+  went out with `by: ""` — which both display sites render as **"ไม่ระบุชื่อ"**, the one field
+  that says whose round it is. Harmless with one setter, which is why it shipped. And
+  `RoundPackage.read` took `by` unbounded from a hand-editable file written by another machine,
+  straight into a one-line strip.
+- **A round you had already signed off came back asking to be "received" — and accepting would
+  have reverted your own work.** Export and import both stamp `base` from the result and `plan`
+  compares incoming-vs-local, so a round the setter sent and kept editing, or one the operator
+  imported and then changed on set, both produced rows; the diff sheet pre-accepts every row, so
+  the obvious button restored the snapshot those edits were made on top of. Latent while only the
+  selected round was checked, and a strip that reappears from anywhere once it is swept.
+  `Handoff.alreadyTakenIn` is the test — `base` equals the package for every song in it — not
+  "do the values differ". Negative control: removing the call fails exactly the one assertion
+  that is about it.
 - `tagsInUse` picked the surviving spelling of a tag by **Dictionary iteration order**, which
   Swift seeds per process — so "Rock" and "rock" in one library relabelled the suggestion chip
   at random between launches, and `--tagtest` was flaky rather than wrong. Most-used spelling
@@ -2834,8 +2980,8 @@ INTROPLAYER_DIAG=1 $BIN --timefmt     # typed-field parser
 INTROPLAYER_DIAG=1 $BIN --overview    # strip data matches columnPeaks; caches stay independent
 INTROPLAYER_DIAG=1 $BIN --notetest    # note: 66 assertions. Writes NOTHING — Store(rawForTest:)
 INTROPLAYER_DIAG=1 $BIN --tagtest     # tags: 89 assertions, the registry, the chosen colour, the handover
-INTROPLAYER_DIAG=1 $BIN --filtertest  # the filter cannot reach the handover or the pre-flight
-INTROPLAYER_DIAG=1 $BIN --roottest    # data root: 25 assertions, temp fixtures, touches no setting
+INTROPLAYER_DIAG=1 $BIN --filtertest  # 25: filter + search cannot reach the handover/pre-flight
+INTROPLAYER_DIAG=1 $BIN --incomingtest # receive sweep + setterName: 27 assertions, read-only
 INTROPLAYER_DIAG=1 $BIN --preflight   # the handover checklist
 INTROPLAYER_DIAG=1 $BIN --updatecheck # semver compare + the configured feed (§15)
 INTROPLAYER_DIAG=1 $BIN --updatestage # the in-app chain minus the swap (needs a feed) (§15)
