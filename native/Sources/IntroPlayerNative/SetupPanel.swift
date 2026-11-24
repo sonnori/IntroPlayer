@@ -31,7 +31,7 @@ struct SetupPanel: View {
         // The keys are named here because their absence is what prompted the request: the
         // transport button two panes away had carried `P` all along and this one said nothing,
         // so the function looked like it had no shortcut.
-        wideButton(c.played ? "✓ เล่นแล้ว — กดเพื่อยกเลิก  (P / T)" : "ทำเครื่องหมายว่าเล่นแล้ว  (P / T)",
+        wideButton(c.played ? "✓ เล่นแล้ว — กดเพื่อยกเลิก  (T)" : "ทำเครื่องหมายว่าเล่นแล้ว  (T)",
                    bg: c.played ? Palette.tintWarn : Palette.panel2,
                    fg: c.played ? Palette.amberOnTint : Palette.text,
                    border: c.played ? Palette.amber : Palette.line) {
@@ -81,7 +81,7 @@ struct SetupPanel: View {
 
         loudnessBlock(c)
 
-        Text("เล่นเพลงฟัง พอถึงจุด กดปุ่ม Mark หรือคีย์ I / O / H ได้เลยขณะเล่น · พิมพ์เวลาลงช่องได้ตรงๆ (1:23.45 หรือ 83.45) · Shift+←/→ ขยับ marker ที่เลือกทีละ 0.01s, M สลับ marker · บนคลื่นเสียง: คลิก = เลื่อนหัวเล่น, กดเส้นสีให้ขึ้นก่อน แล้วลากถึงจะขยับ, ลากที่ว่าง = เลื่อนดู · หมุนล้อ = ซูม · แถบล่างสุด = ทั้งเพลง ลากเพื่อเลื่อนช่วงที่ดู · Space เล่นต่อจากตรงที่ค้างอยู่ ถ้าจะกลับต้น Intro กด S")
+        Text("เล่นเพลงฟัง พอถึงจุด กดปุ่ม Mark หรือคีย์ I / O / H ได้เลยขณะเล่น · พิมพ์เวลาลงช่องได้ตรงๆ (1:23.45 หรือ 83.45) · ←/→ ขยับ marker ที่เลือกทีละ 0.01s (กดค้างได้), Shift+←/→ เลื่อนดู, M สลับ marker · บนคลื่นเสียง: คลิก = เลื่อนหัวเล่น, กดเส้นสีให้ขึ้นก่อน แล้วลากถึงจะขยับ, ลากที่ว่าง = เลื่อนดู · หมุนล้อ = ซูม · แถบล่างสุด = ทั้งเพลง ลากเพื่อเลื่อนช่วงที่ดู · Space เล่นต่อจากตรงที่ค้างอยู่ ถ้าจะกลับต้น Intro กด S")
             .font(Typo.font(11)).foregroundStyle(Palette.muted)
             .padding(.top, 4)
     }
@@ -165,7 +165,12 @@ struct SetupPanel: View {
                     Menu {
                         Section("สีของแท็ก \u{201C}\(t)\u{201D} (ทุกเพลงที่ใช้แท็กนี้)") {
                             ForEach(TagColor.allCases, id: \.rawValue) { tc in
-                                Button(colorMenuLabel(t, tc)) { model.setTagColor(t, tc.rawValue) }
+                                // The name alone made the one list in the app that is ABOUT
+                                // colour the only place showing none of it.
+                                Button { model.setTagColor(t, tc.rawValue) } label: {
+                                    Label { Text(colorMenuLabel(t, tc)) }
+                                    icon: { Image(nsImage: Palette.tagSwatch(tc.rawValue)) }
+                                }
                             }
                             Button(model.store.tagColorChoice[Store.tagKey(t)] == nil
                                    ? "✓ อัตโนมัติ (เลือกสีจากชื่อแท็ก)"
@@ -343,13 +348,13 @@ struct SetupPanel: View {
             // Reserved height, always present. Showing it only on the focused card moved the two
             // cards below it by ~14pt under the cursor every time focus changed — the same family
             // as the transport buttons that used to slide when playback started (§12).
-            Text(m.field == model.focusMarker ? "Shift+←/→ ขยับทีละ 0.01s · M สลับไปตัวอื่น" : " ")
+            Text(m.field == model.focusMarker ? "←/→ ขยับทีละ 0.01s (กดค้างได้) · M สลับไปตัวอื่น" : " ")
                 .font(Typo.font(10)).foregroundStyle(Palette.muted)
                 .frame(height: 14, alignment: .leading)
         }
         .padding(12)
         .background(Palette.panel2)
-        // The focused card is where Shift+←/→ lands. Carried by the border, which is otherwise
+        // The focused card is where ←/→ lands. Carried by the border, which is otherwise
         // uniform across all three cards, so the difference is unmissable without a new colour.
         .overlay(RoundedRectangle(cornerRadius: 10)
             .stroke(m.field == model.focusMarker ? Palette.lineStrong : Palette.line,
@@ -630,7 +635,7 @@ struct MarkerTimeField: View {
 /// (`text != synced`), never stored.
 ///
 /// What is NOT shared with `MarkerTimeField`: this never touches `focusMarker`. A note is not a
-/// marker, and taking marker focus here would silently redirect the next `Shift+←/→`.
+/// marker, and taking marker focus here would silently redirect the next `←`/`→`.
 /// One tag, drawn the same way everywhere it appears (§8g).
 ///
 /// **The word is always there, and that is what lets the colour exist at all.** §8g's original

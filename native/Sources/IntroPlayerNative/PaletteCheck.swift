@@ -334,6 +334,37 @@ extension Diagnostics {
             assertThat("คลื่นใน/นอกช่วง intro", wd >= 10.0, String(format: "ΔL* %.1f", wd))
         }
 
+        // 9. The colour menu's swatch. Theme-independent — it draws from `Palette.audit` by
+        // name, and what can break is the WIRING: a slot with no audit entry falls back to a
+        // grey square, which would ship silently as "that colour just looks grey in the menu".
+        print("\n9) ตัวอย่างสีในเมนู (วาดจาก Palette.audit ตามชื่อ)")
+        for i in 0..<Palette.tagSlots {
+            let img = Palette.tagSwatch(i)
+            let nm = TagColor(rawValue: i)?.label ?? "\(i)"
+            assertThat("\(nm) ขนาด 12x12", img.size == NSSize(width: 12, height: 12),
+                       "\(Int(img.size.width))x\(Int(img.size.height))")
+            // Non-template or AppKit repaints it in the menu's own text colour — i.e. every
+            // swatch identical, which is the whole feature gone with nothing to see.
+            assertThat("\(nm) ไม่ใช่ template (ไม่งั้นเมนูจะทาสีทับ)", !img.isTemplate, "")
+        }
+        // The fallback must be reachable ONLY by asking for a name that does not exist. If a
+        // real slot can reach it, a colour ships as a grey square.
+        assertThat("ชื่อที่ไม่มีจริง → คืนค่าเทาสำรอง",
+                   Palette.auditHex("tagFillไม่มีจริง", dark: true) == 0x808080, "")
+        for i in 0..<Palette.tagSlots {
+            let nm = TagColor(rawValue: i)?.label ?? "\(i)"
+            assertThat("\(nm) มีอยู่ใน audit จริง ไม่ได้ตกไปใช้ค่าสำรอง",
+                       Palette.auditHex("tagFill\(i)", dark: true) != 0x808080
+                       && Palette.auditHex("tagInk\(i)", dark: true) != 0x808080,
+                       String(format: "#%06X", Palette.auditHex("tagFill\(i)", dark: true)))
+        }
+        // Distinct swatches: if two slots drew the same square the menu would be lying about
+        // which colour you are choosing.
+        var seen = Set<UInt32>()
+        for i in 0..<Palette.tagSlots { seen.insert(Palette.auditHex("tagFill\(i)", dark: true)) }
+        assertThat("ทั้ง \(Palette.tagSlots) ช่องวาดคนละสี", seen.count == Palette.tagSlots,
+                   "\(seen.count) สีที่ต่างกัน")
+
         print("\nผ่าน \(pass)  ตก \(fail)")
         print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
     }

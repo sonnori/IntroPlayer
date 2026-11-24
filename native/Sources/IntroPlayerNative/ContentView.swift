@@ -383,7 +383,13 @@ struct ContentView: View {
                 }
                 return e
             }
-            if e.isARepeat { return nil }
+            // Autorepeat is suppressed app-wide because two taps of `1` 120 ms apart once
+            // overlapped two stings on camera (§12) — but the arrows are the one pair where a
+            // HELD key is the point: 0.01 s a press is 100 presses per second of audio. Safe
+            // for the same reason §11 gives for the typed field, which has no limit either:
+            // §10's `remode` may only ARM the intro-end guard, never disarm it, and the nudge
+            // commits through a 350 ms debounce so a held key cannot thrash the node.
+            if e.isARepeat, e.keyCode != 123, e.keyCode != 124 { return nil }
             let c = model.config()
             // every shortcut flashes the button it maps to, so a key press looks like a click
             switch e.keyCode {
@@ -402,10 +408,11 @@ struct ContentView: View {
             // `E` is the most consequential key in the app: it disarms the intro-end stop, and
             // keyCode 14 sits next to `R` (15).
             case 14: model.requestMark(.ignoreEnd); model.pulse(PulseID.ignoreEnd)
-            // `T` is a second binding for Played, asked for because `P` was not discoverable:
-            // the SETUP button showed no key and the transport button read "Mark Played" in
-            // English among Thai labels. Both keys stay — `P` is mnemonic and is what any
-            // existing muscle memory uses.
+            // Played is `T` ALONE. It used to be `P` as well, bound because `P` was not
+            // discoverable (nothing on screen named it) — but two keys for one toggle is two
+            // things to remember and one more key that does something while a take is running.
+            // Dropped by product decision; both buttons name `T` now, which is the fix the
+            // discoverability problem actually needed.
             //
             // **`T` is keyCode 17, one key from `R` (15), which puts the chorus on camera.** It
             // is bound anyway, and the two-press rule (§11) is deliberately NOT applied, because
@@ -415,7 +422,7 @@ struct ContentView: View {
             // key itself needs no guard, and the adjacency is a thing to know rather than a
             // thing to fix here. If this ever bites, move Played off the QWERTY row; do not
             // guard `R`, which §11 explains at length.
-            case 35, 17: model.updateConfigQuiet { $0.played.toggle() }; model.pulse(PulseID.played)
+            case 17: model.updateConfigQuiet { $0.played.toggle() }; model.pulse(PulseID.played)
             case 36: model.confirmCurrent()                                      // Return
             case 48: model.nextNeedingReview()                                   // Tab
             case 46: model.cycleFocusMarker()                                              // M
@@ -430,14 +437,17 @@ struct ContentView: View {
             case 126: model.cancelPending(); model.move(by: -1)                // up
             case 33: model.cancelPending(); model.moveColumn(by: -1)           // [
             case 30: model.cancelPending(); model.moveColumn(by: 1)            // ]
-            // Shift turns the pan keys into a 0.01 s nudge of the focused marker — the precision
-            // neither the ± buttons (0.1 s) nor a drag at a readable zoom can reach.
+            // PLAIN ←/→ nudge the focused marker; SHIFT pans the view. Swapped round on
+            // request — "กดปุ่มซ้ายหรือขวาเพื่อขยับ marker" — and nothing is lost, the pan just
+            // moves onto the modifier. The arrows are the precision neither the ± buttons
+            // (0.1 s) nor a drag at a readable zoom can reach, and they are also what a hand
+            // reaches for right after `I`/`O` without thinking.
             case 123:
-                if e.modifierFlags.contains(.shift) { model.nudgeFocused(by: -AppModel.nudgeStep) }
-                else { model.pan(by: -model.viewSpan * 0.25) }
+                if e.modifierFlags.contains(.shift) { model.pan(by: -model.viewSpan * 0.25) }
+                else { model.nudgeFocused(by: -AppModel.nudgeStep) }
             case 124:
-                if e.modifierFlags.contains(.shift) { model.nudgeFocused(by: AppModel.nudgeStep) }
-                else { model.pan(by: model.viewSpan * 0.25) }
+                if e.modifierFlags.contains(.shift) { model.pan(by: model.viewSpan * 0.25) }
+                else { model.nudgeFocused(by: AppModel.nudgeStep) }
             default: return e
             }
             return nil
@@ -608,7 +618,11 @@ struct SongListView: View {
                 }
             }
         }
-        .frame(width: model.isWide ? 780 : 300)
+        // 780 → 900 on request ("มัน width แคบไป"). Three columns share it, so each row gains
+        // ~40 pt — which is what decides whether a 2-line clamped title still tells two songs
+        // apart (§8c). At the `isWide` breakpoint (1900) this leaves the centre pane 660 pt,
+        // well clear of the 378 pt that made §12 raise that breakpoint in the first place.
+        .frame(width: model.isWide ? 900 : 300)
         .background(Palette.panel)
         .overlay(alignment: .trailing) { Rectangle().fill(Palette.line).frame(width: 1) }
     }

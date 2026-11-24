@@ -352,7 +352,7 @@ struct CenterView: View {
             // records that `✓` once meant both "played" and "correct" with two near-identical
             // glyphs. The SETUP card for the same flag has always been `tintWarn`; these two
             // now agree.
-            actionButton(c.played ? "✓ เล่นแล้ว" : "ทำเครื่องหมายเล่นแล้ว", "P / T",
+            actionButton(c.played ? "✓ เล่นแล้ว" : "ทำเครื่องหมายเล่นแล้ว", "T",
                          c.played ? Palette.tintWarn : Palette.panel2,
                          c.played ? Palette.amberOnTint : Palette.text,
                          width: 190) {

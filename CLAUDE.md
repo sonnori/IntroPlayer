@@ -1266,7 +1266,8 @@ column, and a file with no leading digit lands in column 3.
   and land on that column's first song. `←`/`→` were unavailable — they pan the waveform.
 - `activeCol` follows whatever song is selected, including mouse clicks. `selectSong()` doesn't
   rebuild the list, so it calls `syncColHighlight()` to move the header highlight.
-- Sized for the 2560×1080 ultrawide this runs on: list 780px still leaves ~1460px for the
+- Sized for the 2560×1080 ultrawide this runs on: list **900px** (780 until it was reported as
+  too narrow) still leaves ~1320px for the
   waveform. A `max-width:1500px` media query falls back to the original single column with the
   group headers stacked inline, so a narrower window still works.
 - Titles are clamped to 2 lines with the full name in a `title` tooltip — uniform row heights
@@ -2186,10 +2187,10 @@ explicitly. Pause-on-buzz → Space resumes exactly where it stopped, still in `
 | `R` | Reveal (jump to hook, play on) — deliberately does **not** mark Played, and never stops |
 | `1` / `2` | SE correct / wrong — **also writes the taping log** (§8d) |
 | `L` | Open/close the taping log — a **left-pane swap**, not a sheet (`Esc` closes) |
-| `P` / `T` | Toggle Played on current song — **`T` is one key from `R`**, see below |
+| `T` | Toggle Played on current song — **one key from `R`**, see below |
 | `I` / `O` / `H` | Mark introStart / introEnd / hook at playhead — **confirm-on-second-press while playing** |
-| `Shift` + `←` / `→` | Nudge the **focused** marker by 0.01 s (`AppModel.nudgeStep`) |
-| `M` | Cycle which marker `Shift+←/→` nudges |
+| `←` / `→` | Nudge the **focused** marker by 0.01 s (`AppModel.nudgeStep`). Autorepeats — hold to slew |
+| `M` | Cycle which marker `←`/`→` nudges |
 | `/` | Open the song search (filename) — `Esc` closes, `Return` takes the first match |
 | `E` | Toggle Ignore Intro End — same two-press rule |
 | `Return` | ยืนยันค่านี้ — clears `auto`, advances to the next song needing review |
@@ -2201,12 +2202,12 @@ explicitly. Pause-on-buzz → Space resumes exactly where it stopped, still in `
 | `+` / `−` | Zoom waveform in / out (around the playhead) |
 | `0` | Zoom to fit the whole song |
 | `Z` | Zoom to the intro range |
-| `←` / `→` | Pan the view by 25% of the visible span (plain; `Shift` nudges instead) |
+| `Shift` + `←` / `→` | Pan the view by 25% of the visible span |
 
 Handler ignores keystrokes when focus is in an `<input>`, and bails on Cmd/Ctrl/Alt so `Cmd+R`
 reloads instead of firing Reveal.
 
-### Fine adjustment: `focusMarker`, `Shift+←/→` and the typed fields
+### Fine adjustment: `focusMarker`, `←`/`→` and the typed fields
 
 Three ways to set a marker, each for a precision the others cannot reach:
 
@@ -2214,7 +2215,7 @@ Three ways to set a marker, each for a precision the others cannot reach:
 |---|---|---|
 | drag on the waveform | whatever a pixel is worth at the current zoom | placing it roughly |
 | `−` / `+` buttons | 0.1 s (deliberately unchanged) | stepping by ear |
-| `Shift` + `←`/`→` | **0.01 s** — what markers are actually stored at | the last 2–3 frames |
+| `←`/`→` | **0.01 s** — what markers are actually stored at | the last 2–3 frames |
 | typed `mm:ss.hh` field | exact | copying a time off a reference, or a value read out loud |
 
 > **A marker must be ACTIVE before a drag can move it.** A press on an inactive marker only
@@ -2222,9 +2223,8 @@ Three ways to set a marker, each for a precision the others cannot reach:
 > The waveform is also the surface for panning and click-to-seek, so the old one-stage grab
 > meant any press landing within 8 pt of a line moved a signed-off value: the waveform
 > equivalent of the unguarded `I`/`O`/`H` above. "Active" reuses `focusMarker` rather than
-> inventing a second notion of selection, so the thing `Shift+←/→` nudges and the thing a drag
-> moves are always the same marker, carried by the same width-and-outline cue (§6d: never a new
-> hue).
+> inventing a second notion of selection, so the thing `←`/`→` nudges and the thing a drag
+> moves are always the same marker, carried by the same emphasis cue (§6d: never a new hue).
 >
 > The decision is a pure function, `MarkerGrab.decide`, so `--grabtest` can prove it without
 > driving a gesture. Two details in it are load-bearing and invisible in a screenshot: the
@@ -2234,16 +2234,28 @@ Three ways to set a marker, each for a precision the others cannot reach:
 > stamps `configured` and pushes an undo snapshot — dropping the song out of the `Return`/`Tab`
 > sweep and out of the pre-flight warnings. Exactly the defect recorded for the typed field.
 
-`AppModel.focusMarker` is what `Shift+←/→` moves. It **follows the hand** — a waveform drag, an
+`AppModel.focusMarker` is what `←`/`→` moves. It **follows the hand** — a waveform drag, an
 `I`/`O`/`H`, a `±` press, a click on the card or focusing its text field all set it — so the key
 always means "the one I am working on" and there is no mode to remember. `M` cycles it. It is
-carried in the UI by *width and an outline*, never a new hue (§6d: one meaning per hue).
+carried in the UI by **emphasis** — the other markers dim to half strength while the active one
+keeps full colour and gains a 4 pt stem, a taller flag, an outline ring and a soft halo band —
+never a new hue (§6d: one meaning per hue).
 
-The nudge is deliberately **not** behind the two-press rule below, but be precise about why it is
-safe: it is not the step size. Key autorepeat is suppressed for the whole app (`isARepeat` is
-checked before the shortcut switch), and `remode` bails while a fade is running, so you cannot
-slew Intro End across the playhead faster than the playhead advances. The *typed field* has no such
-limit, which is why the `remode` rule in §10 is what actually protects this.
+> Asked for as *"อาจจะเปลี่ยนสีเป็นสีเหลืองก็ได้"*, and that is the one colour it cannot be:
+> §6d gives amber exactly one meaning — the intro-end stop is not armed — and a yellow marker
+> sitting 60 pt under the amber guard strip is precisely the dilution that rule exists to
+> prevent. §12 records the Played button living as a §6d violation for months because a hue in
+> a place nobody is editing does not announce itself. Dimming the other two says "this is the
+> one" at least as loudly and costs no hue.
+
+The nudge is deliberately **not** behind the two-press rule below, and the reason moved when the
+key did. It used to be that autorepeat is suppressed app-wide, so you could not slew Intro End
+across the playhead faster than the playhead advances. **The arrows are now the one pair exempt
+from that suppression** — 0.01 s a press is 100 presses per second of audio, so holding the key
+has to work or the feature does not. What actually protects this is what always actually
+protected the *typed field*, which never had a rate limit either: §10's rule that `remode` may
+only ARM the intro-end guard, never disarm it. The nudge also commits through a 350 ms debounce,
+so a held key cannot thrash the node.
 
 It uses `updateConfig(commit: false)` plus a 350 ms debounce, exactly like the waveform drag:
 committing calls `player.remode`, which re-schedules the node once the accumulated move passes
@@ -2297,10 +2309,12 @@ means to press.
 
 ### `T` for Played, and why it is NOT behind the two-press rule
 
-`P` has toggled Played since the native app shipped. It was reported as having no shortcut, which
-is a discoverability defect rather than a missing feature: the SETUP button named no key, and the
-transport button read **"Mark Played"** in English among Thai labels two panes away. Both keys
-are bound now, both are named on both buttons, and the transport button is Thai.
+`P` toggled Played from the day the native app shipped, and was still reported as having no
+shortcut — a discoverability defect rather than a missing feature: the SETUP button named no key
+and the transport button read **"Mark Played"** in English among Thai labels two panes away. The
+first fix bound `T` as well and named both on both buttons. The second, on request, **dropped
+`P`**: naming the key is what the problem needed, and two keys for one toggle is two things to
+remember plus one more key that does something while a take is running. Both buttons say `T`.
 
 **`T` is keyCode 17, one key from `R` (15), which puts the chorus on camera.** §11 above says
 that if a key is ever added near `R`, the reasoning says to guard the new key. It is deliberately
@@ -2769,6 +2783,22 @@ the day it does not help.
   same line** rather than added: a second `trap … EXIT` **replaces** the first, which is how
   the new cleanup would have been silently disarmed by the existing one.
 
+- **Two keys for Played, and the useful one unnamed.** `P` and `T` both toggled it; the reason
+  `P` was reported as "no shortcut" was that nothing on screen named it, which naming fixed.
+  Dropped to `T` alone on request — a second binding is a second thing to remember and one more
+  live key during a take.
+- **The one list in the app that is ABOUT colour showed none of it.** The tag colour menu was
+  six plain names. §8g had written off the idea ("`Menu` renders a plain `Button(String)` as a
+  system menu item") — true of a `String` label, not of a `Label` with an image: AppKit renders
+  a **non-template** `NSImage` in a menu in its own colours. `Palette.tagSwatch` draws one per
+  slot, reading the hex out of `Palette.audit` **by name** so a seventh colour cannot ship with
+  a stale grey square — `--palettetest` section 9 asserts exactly that, plus `isTemplate ==
+  false`, which is the one flag whose loss would silently repaint every swatch in the menu's
+  own text colour.
+- **The active marker was carried by a 3 pt stem against a 2 pt one.** Legible when the only
+  thing that moved it was `Shift+←/→`, not when a plain arrow does — and at 81 PPI a 1 pt
+  difference is about 0.3 mm. The unfocused markers dim to half now and the active one gains a
+  halo band, a taller flag and a ring. Emphasis, not a fourth hue.
 - **The receive banner looked at the selected round only.** `detectIncoming` read
   `RoundPackage.url(forRound: currentPlaylist)`, so three setters each handing a folder over
   raised a strip for whichever round happened to be open and the other two sat unimported with
@@ -2899,7 +2929,7 @@ Product / UX
   automatic part alone so the trim's contribution is the visible gap) is done — native only.
 - Separate **audience/second-screen view** (read-only progress, big song reveal).
 - Auto-sort or hide **played** songs. (Per-episode song sets via subfolders: done, §8c.
-  Setter → operator handover: done, §8e. Typed marker fields, `Shift+←/→` nudge, bounded hook
+  Setter → operator handover: done, §8e. Typed marker fields, `←`/`→` nudge, bounded hook
   whole-song overview strip, log-as-pane, level bar, destructive buttons behind `⋯`,
   the setter's note + tags: §8g,
   light/dark themes, Intro End + Hook auto-guess, cover art: all done, native only.

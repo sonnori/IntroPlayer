@@ -193,6 +193,52 @@ enum Palette {
     static func tagFillAt(_ i: Int) -> Color { tagFill[max(0, i) % tagSlots] }
     static func tagInkAt(_ i: Int) -> Color { tagInk[max(0, i) % tagSlots] }
 
+    // MARK: the colour menu's swatch
+
+    /// A 12 pt chip of a tag slot, for the colour menu.
+    ///
+    /// A real `NSImage` rather than an SF Symbol tinted with `.foregroundStyle`: an AppKit menu
+    /// renders a NON-template image in its own colours, while a tinted symbol is at the mercy of
+    /// the menu's own styling. `isTemplate = false` is the whole trick and is easy to lose.
+    ///
+    /// The colours come out of `Palette.audit` by name, not from a second copy of the hex. §15's
+    /// rule: a list that names its subjects literally stops covering the subject that arrives
+    /// later — and `--palettetest` already asserts `audit` names every value, so wiring the
+    /// swatch to it means a seventh colour cannot ship with a stale grey square.
+    static func tagSwatch(_ slot: Int) -> NSImage {
+        let i = max(0, slot) % tagSlots
+        let dark = NSApp?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let key = "\(i)-\(dark)"
+        if let hit = swatchCache[key] { return hit }
+        let fill = Color(hex: auditHex("tagFill\(i)", dark: dark))
+        let ink = Color(hex: auditHex("tagInk\(i)", dark: dark))
+        let img = NSImage(size: NSSize(width: 12, height: 12), flipped: false) { r in
+            let p = NSBezierPath(roundedRect: r.insetBy(dx: 1, dy: 1), xRadius: 3, yRadius: 3)
+            NSColor(fill).setFill()
+            p.fill()
+            // In dark the fill is a deep tint (tagFill0 is 0x4F1116) and would read as "dark
+            // square" at 12 pt — the saturated ink outline is what makes it read as RED.
+            NSColor(ink).setStroke()
+            p.lineWidth = 1.5
+            p.stroke()
+            return true
+        }
+        img.isTemplate = false
+        swatchCache[key] = img
+        return img
+    }
+
+    /// Dropped when the theme flips; the cache is keyed on the appearance it was drawn for, so
+    /// this is belt and braces rather than the only defence.
+    static func clearSwatchCache() { swatchCache.removeAll() }
+
+    private static var swatchCache: [String: NSImage] = [:]
+
+    static func auditHex(_ name: String, dark: Bool) -> UInt32 {
+        guard let e = audit.first(where: { $0.0 == name }) else { return 0x808080 }
+        return dark ? e.1 : e.2
+    }
+
     static let audit: [(String, UInt32, UInt32)] = [
         ("bg", 0x0A0C10, 0xC7CDD3), ("panel", 0x161A22, 0xD9DFE6),
         ("panel2", 0x222834, 0xE8EFF5), ("panel3", 0x2F3747, 0xD2D8DF),
@@ -541,7 +587,9 @@ struct WaveformView: View {
         // is exactly song 102's real state (introStart == introEnd).
         let fm = model.focusMarker
         marker(ctx, x1, Palette.cyan, h, "IN", top: true, focused: fm == .introStart)
-        marker(ctx, x2, c.ignoreEnd ? Palette.cyan.opacity(0.3) : Palette.cyan, h, "OUT",
+        // `ignoreEnd` fades OUT because the marker is inert — but `marker` now halves an
+        // unfocused one as well, and 0.3 x 0.5 is invisible. 0.55 keeps both cues legible.
+        marker(ctx, x2, c.ignoreEnd ? Palette.cyan.opacity(0.55) : Palette.cyan, h, "OUT",
                top: false, focused: fm == .introEnd)
         if c.hook > 0 {
             marker(ctx, timeToX(c.hook, w), Palette.hook, h, "HOOK", top: true, dashed: true,
@@ -594,42 +642,59 @@ struct WaveformView: View {
 
     /// `label` goes ON the flag: the legend lives in another view and only renders when the window
     /// is wide, and two 3pt coloured lines are not a distinction under studio light at 1x.
-    /// `focused` marks the one `Shift+←/→` will nudge. It is carried by WIDTH and an outline, not
-    /// by a different hue: every hue in this app already means exactly one thing, and "which of
-    /// these three am I nudging" is not worth a fourth meaning for cyan.
+    /// `focused` marks the one `←`/`→` will nudge, and it has to be unmissable now that a plain
+    /// arrow moves it: the unfocused markers are DIMMED, the focused one keeps full colour, gets
+    /// a 4 pt stem, a taller flag, an outline ring and a soft halo band.
+    ///
+    /// Emphasis, never a fourth hue. Asked for as "อาจจะเปลี่ยนสีเป็นสีเหลืองก็ได้" — amber is
+    /// spoken for (§6d: the intro-end stop is not armed, and nothing else), and a yellow marker
+    /// 60 pt from the amber guard strip is exactly the dilution that rule exists to prevent.
+    /// Dimming the other two says the same thing and costs no hue.
     private func marker(_ ctx: GraphicsContext, _ x: CGFloat, _ color: Color, _ h: CGFloat,
                         _ label: String, top: Bool, dashed: Bool = false, focused: Bool = false) {
-        let stem: CGFloat = focused ? 3 : 2
+        // The whole cue is EMPHASIS vs the other two, not a hue of its own: the unfocused
+        // markers step back to half strength and the focused one keeps all of it.
+        let c = focused ? color : color.opacity(0.5)
+        // A soft band behind the stem. At 81 PPI a 2 pt line is about 0.6 mm, so the thing the
+        // eye actually finds across a 1300 pt waveform is the band, not the line.
+        if focused {
+            ctx.fill(Path(CGRect(x: x - 7, y: 0, width: 14, height: h)),
+                     with: .color(color.opacity(0.13)))
+        }
+        let stem: CGFloat = focused ? 4 : 2
         if dashed {
             var p = Path()
             var y: CGFloat = 0
             while y < h { p.addRect(CGRect(x: x - stem / 2, y: y, width: stem, height: 5)); y += 8 }
-            ctx.fill(p, with: .color(color))
+            ctx.fill(p, with: .color(c))
         } else {
-            ctx.fill(Path(CGRect(x: x - stem / 2, y: 0, width: stem, height: h)), with: .color(color))
+            ctx.fill(Path(CGRect(x: x - stem / 2, y: 0, width: stem, height: h)), with: .color(c))
         }
         let yBase: CGFloat = top ? 0 : h
         let dir: CGFloat = top ? 1 : -1
+        let fw: CGFloat = focused ? 8 : 6      // flag half-width
+        let fh: CGFloat = focused ? 13 : 9     // flag height
         var tri = Path()
-        tri.move(to: CGPoint(x: x - 6, y: yBase))
-        tri.addLine(to: CGPoint(x: x + 6, y: yBase))
-        tri.addLine(to: CGPoint(x: x, y: yBase + 9 * dir))
+        tri.move(to: CGPoint(x: x - fw, y: yBase))
+        tri.addLine(to: CGPoint(x: x + fw, y: yBase))
+        tri.addLine(to: CGPoint(x: x, y: yBase + fh * dir))
         tri.closeSubpath()
-        ctx.fill(tri, with: .color(color))
+        ctx.fill(tri, with: .color(c))
         if focused {
             var ring = Path()
-            ring.move(to: CGPoint(x: x - 9, y: yBase + 0.5 * dir))
-            ring.addLine(to: CGPoint(x: x + 9, y: yBase + 0.5 * dir))
-            ring.addLine(to: CGPoint(x: x, y: yBase + 13 * dir))
+            ring.move(to: CGPoint(x: x - fw - 3, y: yBase + 0.5 * dir))
+            ring.addLine(to: CGPoint(x: x + fw + 3, y: yBase + 0.5 * dir))
+            ring.addLine(to: CGPoint(x: x, y: yBase + (fh + 4) * dir))
             ring.closeSubpath()
-            // `outline`, not white: this is the focus ring on the marker Shift+←/→ will move,
-            // and §11 says that state is carried by "width AND an outline". White on the light
-            // theme's bed is 1.14:1 — half the cue gone, leaving a 3pt-vs-2pt stem.
+            // `onWave`, not white: this is the focus ring on the marker ←/→ will move, and §11
+            // says that state is carried by width AND an outline. White on the light theme's
+            // bed is 1.14:1 — half the cue gone.
             ctx.stroke(ring, with: .color(Palette.onWave.opacity(0.9)), lineWidth: 1.5)
         }
         // `.foregroundStyle` on Text is macOS 14+; this app targets 13.
-        ctx.draw(Text(label).font(Typo.font(10, .bold, latinOnly: true)).foregroundColor(color),
-                 at: CGPoint(x: x + 4, y: top ? 15 : h - 15), anchor: .leading)
+        ctx.draw(Text(label).font(Typo.font(focused ? 11 : 10, .bold, latinOnly: true))
+                    .foregroundColor(c),
+                 at: CGPoint(x: x + fw - 2, y: top ? fh + 6 : h - fh - 6), anchor: .leading)
     }
 }
 

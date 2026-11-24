@@ -122,7 +122,7 @@ final class AppModel: ObservableObject {
     private var pendingTask: Task<Void, Never>?
 
     // MARK: fine adjustment
-    /// Which marker `Shift+←/→` nudges. Follows whatever the setter last touched — a drag, an
+    /// Which marker `←`/`→` nudges. Follows whatever the setter last touched — a drag, an
     /// `I`/`O`/`H`, a typed value or a ± press — so the nudge always means "the one I am working
     /// on" without a mode anybody has to remember. `M` cycles it explicitly.
     @Published var focusMarker: MarkerField = .introStart
@@ -815,7 +815,7 @@ final class AppModel: ObservableObject {
         updateConfig { $0[keyPath: key] = t }
     }
 
-    /// Note this takes focus even when the field is not a time: pressing `E` then `Shift+←` should
+    /// Note this takes focus even when the field is not a time: pressing `E` then `←` should
     /// not quietly move Intro Start because that was the last *time* field touched.
     func focus(_ f: MarkerField) {
         guard focusMarker != f else { return }
@@ -832,10 +832,10 @@ final class AppModel: ObservableObject {
         } else {
             focusMarker = all[0]
         }
-        flash("ปรับละเอียด: \(focusMarker.label)  (Shift+←/→)")
+        flash("ปรับละเอียด: \(focusMarker.label)  (←/→)")
     }
 
-    /// `Shift+←/→`. Deliberately not guarded by the two-press rule: a 0.01 s step cannot put a
+    /// `←`/`→`. Deliberately not guarded by the two-press rule: a 0.01 s step cannot put a
     /// song on camera, and a confirmation per 10 ms of movement would make the feature useless.
     func nudgeFocused(by d: Double) {
         guard current != nil else { return }
@@ -898,7 +898,7 @@ final class AppModel: ObservableObject {
     func requestMark(_ f: MarkerField) {
         guard current != nil else { return }
         // Only a POSITION can be the nudge target. `E` used to set it to `ignoreEnd`, after which
-        // `Shift+←/→` was a dead key and no card showed the hint saying why.
+        // `←`/`→` was a dead key and no card showed the hint saying why.
         if f.timeKey != nil { focus(f) }
         guard player.isPlaying else { pending = nil; applyMark(f, at: player.position); return }
         if let pm = pending, pm.field == f {
@@ -1913,6 +1913,7 @@ final class AppModel: ObservableObject {
     /// SwiftUI's own environment agrees — without both, AppKit chrome and SwiftUI content can
     /// end up on different themes.
     func applyTheme() {
+        Palette.clearSwatchCache()
         switch store.theme {
         case .system: NSApp.appearance = nil
         case .light:  NSApp.appearance = NSAppearance(named: .aqua)
