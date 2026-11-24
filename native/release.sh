@@ -1,18 +1,23 @@
 #!/bin/bash
-# Packages a release for the crew: one zip anyone can double-click into place.
+# Packages a release: a .dmg a person drags into /Applications, and a .zip the in-app
+# updater downloads. Both come out of ONE build — see the Output block below.
 #
 #   ./native/release.sh                      build + package the version in ./VERSION
 #   ./native/release.sh --skip-build         package the app bundle as it already stands
 #   ./native/release.sh --allow-dirty        package from a tree with uncommitted edits
 #   ./native/release.sh --download <url>     put a download URL in the generated manifest.json
+#   ./native/release.sh --no-download        skip manifest.json — hand the zip/dmg over by hand
 #   ./native/release.sh --github             publish to GitHub Releases with `gh` (no manifest
 #                                            needed — the app reads the release itself)
 #   ./native/release.sh --crew               INCLUDE se/*.mp3 and brand/logo.png
 #
 # Output in dist/:
-#   IntroPlayer-<ver>.zip   what you hand over / upload
+#   IntroPlayer-<ver>.dmg   for a PERSON installing: app + /Applications alias + อ่านก่อน.txt
+#   IntroPlayer-<ver>.zip   for the IN-APP UPDATER: the bundle, nothing else. A release
+#                           without it leaves every machine unable to update — §15.
 #   manifest.json           what the app's update check reads (upload it NEXT TO the zip)
-#   SHA256SUMS
+#   SHA256SUMS              written as soon as the zip verifies, before any exit path
+# Under --crew every name gains a -ครบชุด suffix, including the checksum file.
 #
 # About --crew. The default strips SEED_PAYLOAD (the stings and the show's logo) because this
 # repo is public and those are the production's, not this program's — §15, and the day `brand`
