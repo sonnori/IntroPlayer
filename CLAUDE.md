@@ -535,6 +535,7 @@ INTROPLAYER_DIAG=1 $BIN --notetest     # the note: clamps, merge rule, measured 
 INTROPLAYER_DIAG=1 $BIN --tagtest      # tags: registry, UNION merge, the chosen colour, the box (§8g)
 INTROPLAYER_DIAG=1 $BIN --filtertest   # tag filter + filename search narrow the LIST only (§8g)
 INTROPLAYER_DIAG=1 $BIN --incomingtest # receive sweep + who sent it: 27 assertions (§8e)
+INTROPLAYER_DIAG=1 $BIN --focustest    # คลิกที่อื่นแล้วต้องเลิกพิมพ์ — 8 assertions (§8g)
 INTROPLAYER_DIAG=1 $BIN --roottest     # where the questions live: order, exclusions, .none (§5d)
 INTROPLAYER_DIAG=1 $BIN --updatecheck  # semver compare, feed resolution, blocked URL schemes (§15)
 INTROPLAYER_DIAG=1 $BIN --updatestage  # download + unpack + verify a real release, then delete (§15)
@@ -1894,6 +1895,32 @@ list narrows, and `songsIn(_:)` is still the round.
 - **Dies with the process, and `setPlaylist` clears it.** Same measured reason as `tagFilter`.
 - `select` clears it at the same choke point it clears the tag filter, and says so.
 
+### Clicking away ends editing (`FocusRelease`, the mouse monitor)
+
+AppKit does **not** resign first responder when you click empty space — so until this, a field
+kept focus until Esc or Return, and while it has focus the key monitor's `typing` branch is on:
+`S`, `R`, `P`, `I`/`O`/`H` and `L` are all dead with nothing on screen saying so. Reported as
+*"ตอนนี้ต้องกด ESC เพื่อจะออก มันไม่ make sense"*, and it is a safety fix rather than a
+convenience one — §12 already records this trap having no exit at all before Esc was wired up.
+
+- **A local `.leftMouseDown` NSEvent monitor, not a background `.onTapGesture`.** The views most
+  likely to be clicked when you are done typing — the waveform, every button — consume their own
+  gestures, so a root tap would never see them. Same reasoning as the scroll monitor (§6c), and
+  it is nil'd on disappear for the reason recorded there.
+- **The click is never swallowed.** It still does whatever it was going to do; the blur just
+  happens first.
+- **Blur CANCELS, it does not commit.** Resigning fires each field's `onChange(of: focused)`,
+  which is the §11 contract — so clicking away means exactly what Esc means: discard. §11 lists
+  three separate ways a *committing* blur destroyed a signed-off marker; do not "improve" this
+  into a commit.
+- **Clicking another text field must not release.** AppKit is already moving focus there, and
+  stealing first responder mid-move fights it. The hit view may be a subview of the field (its
+  border, its clip view), so `isTextInput` walks up the superview chain.
+
+The decision is the pure function `FocusRelease.shouldRelease(firstResponder:hit:)` because a
+click cannot be driven headlessly; `--focustest` asserts it over throwaway AppKit views, and its
+negative control (making it always release) fails exactly the three "another field" cases.
+
 **The row appears and disappears; it is not a box that sits over the list.** A field holding
 first responder turns the key monitor's `typing` branch on, and in it `S`, `R`, `P`, `I`/`O`/`H`
 and `L` all stop working — only `Space`, `1` and `2` are carved out, and only while playback
@@ -2982,6 +3009,7 @@ INTROPLAYER_DIAG=1 $BIN --notetest    # note: 66 assertions. Writes NOTHING — 
 INTROPLAYER_DIAG=1 $BIN --tagtest     # tags: 89 assertions, the registry, the chosen colour, the handover
 INTROPLAYER_DIAG=1 $BIN --filtertest  # 25: filter + search cannot reach the handover/pre-flight
 INTROPLAYER_DIAG=1 $BIN --incomingtest # receive sweep + setterName: 27 assertions, read-only
+INTROPLAYER_DIAG=1 $BIN --focustest   # click-outside ends editing: 8 assertions, read-only
 INTROPLAYER_DIAG=1 $BIN --preflight   # the handover checklist
 INTROPLAYER_DIAG=1 $BIN --updatecheck # semver compare + the configured feed (§15)
 INTROPLAYER_DIAG=1 $BIN --updatestage # the in-app chain minus the swap (needs a feed) (§15)

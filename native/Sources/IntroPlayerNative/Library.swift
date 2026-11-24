@@ -2425,6 +2425,51 @@ enum Diagnostics {
         print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
     }
 
+    /// Click-outside-to-stop-typing. Read-only, builds only throwaway AppKit views.
+    ///
+    /// The click itself cannot be driven headlessly, so the DECISION is a pure function and this
+    /// is what holds it. Two of the cases are the whole feature: a click on a button must let go
+    /// (otherwise the transport stays dead), and a click on another text field must NOT
+    /// (otherwise we fight AppKit for focus it is already moving).
+    static func focusTest() {
+        var pass = 0, fail = 0
+        func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+            if ok { pass += 1 } else { fail += 1 }
+            print("   \(ok ? "ok  " : "✗   ")\(label)\(detail.isEmpty ? "" : "  — " + detail)")
+        }
+        let editor = NSTextView()
+        let field = NSTextField()
+        let button = NSButton()
+        let plain = NSView()
+        // A subview of the field — the border or clip view is what a click near the edge hits.
+        let inner = NSView()
+        field.addSubview(inner)
+
+        print("1) ไม่มีใครพิมพ์อยู่ = คลิกธรรมดา ต้องไม่ทำอะไรเลย")
+        check("firstResponder เป็น nil", !FocusRelease.shouldRelease(firstResponder: nil, hit: button))
+        check("firstResponder ไม่ใช่ช่องข้อความ",
+              !FocusRelease.shouldRelease(firstResponder: plain, hit: button))
+
+        print("\n2) กำลังพิมพ์อยู่ แล้วคลิกที่อื่น = ต้องคืนคีย์บอร์ด")
+        check("คลิกปุ่ม (คือเคสที่ทำให้ S/R/P/I/O/H ตายค้าง)",
+              FocusRelease.shouldRelease(firstResponder: editor, hit: button))
+        check("คลิกพื้นที่ว่าง / คลื่นเสียง",
+              FocusRelease.shouldRelease(firstResponder: editor, hit: plain))
+        check("คลิกนอกทุก view (แถบหัวหน้าต่าง)",
+              FocusRelease.shouldRelease(firstResponder: editor, hit: nil))
+
+        print("\n3) คลิกช่องข้อความอีกช่อง = ย้าย focus ไม่ใช่ปล่อย (ปล่อยแล้วจะแย่ง AppKit)")
+        check("คลิก NSTextField อีกอัน",
+              !FocusRelease.shouldRelease(firstResponder: editor, hit: field))
+        check("คลิกขอบ/ลูกของช่องนั้น ก็ยังนับว่าเป็นช่อง",
+              !FocusRelease.shouldRelease(firstResponder: editor, hit: inner))
+        check("คลิกในตัว editor เอง",
+              !FocusRelease.shouldRelease(firstResponder: editor, hit: editor))
+
+        print("\nผ่าน \(pass)  ตก \(fail)")
+        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+    }
+
     /// The receive sweep: it has to look at EVERY round, not the one on screen.
     ///
     /// Read-only by construction — every `Store` here is `init(rawForTest:)`, which makes

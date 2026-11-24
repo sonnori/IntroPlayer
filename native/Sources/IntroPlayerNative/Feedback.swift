@@ -108,3 +108,37 @@ func confirmDestructive(title: String, body: String, ok: String) -> Bool {
     a.buttons.last?.keyEquivalent = "\r"
     return a.runModal() == .alertFirstButtonReturn
 }
+
+// MARK: - Handing the keyboard back
+
+/// Should a mouse-down here end text editing?
+///
+/// AppKit does **not** resign first responder when you click empty space, so a field kept focus
+/// until Esc or Return — and while it has focus the key monitor's `typing` branch is on, which
+/// means `S`, `R`, `P`, `I`/`O`/`H` and `L` are all dead with nothing on screen saying so. On a
+/// shoot the keyboard IS the instrument, so "I clicked away, surely I'm out of the box" has to
+/// be true. §12 already records the same trap having no exit at all before Esc was wired up.
+///
+/// A pure function over the hit-test result so `--focustest` can assert it without a window —
+/// the alternative is a click nobody can drive headlessly.
+enum FocusRelease {
+    static func shouldRelease(firstResponder fr: NSResponder?, hit: NSView?) -> Bool {
+        // Nothing is being typed into: every ordinary click takes this branch and changes nothing.
+        guard fr is NSTextView else { return false }
+        // Outside every view (title bar, off the content view) — let go.
+        guard let hit else { return true }
+        // Clicking ANOTHER text field must MOVE focus, not drop it. AppKit does that itself, and
+        // stealing first responder here would fight it.
+        return !isTextInput(hit)
+    }
+
+    /// The hit view may be a subview of the field (its border, its clip view), so walk up.
+    static func isTextInput(_ v: NSView) -> Bool {
+        var cur: NSView? = v
+        while let c = cur {
+            if c is NSTextView || c is NSTextField { return true }
+            cur = c.superview
+        }
+        return false
+    }
+}

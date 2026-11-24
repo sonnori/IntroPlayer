@@ -56,6 +56,11 @@ func parseClock(_ s: String) -> Double? {
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
     @State private var keyMonitor: Any?
+    /// Click-outside ends editing — see `FocusRelease`. A local NSEvent monitor rather than a
+    /// background `.onTapGesture`, because the views most likely to be clicked when you are done
+    /// typing (the waveform, every button) consume their own gestures and a root tap would never
+    /// see them.
+    @State private var mouseMonitor: Any?
 
     var body: some View {
         GeometryReader { geo in
@@ -93,6 +98,7 @@ struct ContentView: View {
         // in 2 s while the player published at 50 Hz, which left `followPlayhead()` dead exactly
         // when it is needed. The playhead now follows from `Player.tick` instead (see AppModel).
         .onAppear(perform: installKeyMonitor)
+        .onAppear(perform: installMouseMonitor)
         .onReceive(NotificationCenter.default.publisher(
             for: NSApplication.didBecomeActiveNotification)) { _ in
                 model.rescan()
@@ -103,6 +109,8 @@ struct ContentView: View {
         .onDisappear {
             if let m = keyMonitor { NSEvent.removeMonitor(m) }
             keyMonitor = nil
+            if let m = mouseMonitor { NSEvent.removeMonitor(m) }
+            mouseMonitor = nil
         }
         .sheet(isPresented: $model.showHandover) { HandoverPanel() }
         .sheet(isPresented: $model.showAbout) { AboutPanel() }
@@ -252,6 +260,23 @@ struct ContentView: View {
 
     /// Physical key codes, not characters. The web version silently lost every letter shortcut
     /// whenever the Thai input source was active; `keyCode` is layout-independent.
+    private func installMouseMonitor() {
+        guard mouseMonitor == nil else { return }
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { e in
+            guard let win = e.window else { return e }
+            let hit = win.contentView?.hitTest(e.locationInWindow)
+            if FocusRelease.shouldRelease(firstResponder: win.firstResponder, hit: hit) {
+                // Resigning fires each field's `onChange(of: focused)`, which is where blur
+                // CANCELS uncommitted text (§11) — so clicking away means exactly what Esc
+                // means: discard, do not write. It must not commit; §11 lists three ways a
+                // committing blur destroyed a signed-off marker.
+                win.makeFirstResponder(nil)
+            }
+            // Never swallowed: the click still does whatever it was going to do.
+            return e
+        }
+    }
+
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
