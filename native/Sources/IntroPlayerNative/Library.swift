@@ -642,7 +642,7 @@ enum Diagnostics {
         let songs = Library.scan()
         let round = Library.playlist(of: songs.first ?? "")
         let paths = songs.filter { Library.playlist(of: $0) == round }
-        guard let probe = paths.first else { print("no songs"); return }
+        guard let probe = paths.first else { Diagnostics.cannotRun("no songs"); return }
         print("round: \(Library.label(round))  songs: \(paths.count)")
 
         // make sure there is something to compare against
@@ -754,7 +754,7 @@ enum Diagnostics {
     /// Intro End and never run into the song.
     static func playTest() {
         let songs = Library.scan()
-        guard let s = songs.first else { print("no songs"); return }
+        guard let s = songs.first else { Diagnostics.cannotRun("no songs"); return }
         let p = Player()
         p.load(url: Library.url(s))
         p.muteForTest()
@@ -773,10 +773,15 @@ enum Diagnostics {
             if p.position > maxSeen { maxSeen = p.position }
             if stopped != nil { break }
         }
+        let overshoot = max(0, maxSeen - c.introEnd)
         print(String(format: "  mode=%@ playing=%@ stoppedAt=%@ maxReached=%.3f overshoot=%.3f",
                      "\(p.mode)", p.isPlaying ? "yes" : "no",
                      stopped.map { String(format: "%.3f", $0) } ?? "—",
-                     maxSeen, max(0, maxSeen - c.introEnd)))
+                     maxSeen, overshoot))
+
+        // Captured HERE, before the second phase reuses `stopped` — evaluating it after the
+        // reset below read `nil` and failed a passing run.
+        let stoppedInTime = stopped != nil && overshoot < 0.05
 
         // ignoreEnd must still bypass the guard
         c.ignoreEnd = true
@@ -785,9 +790,26 @@ enum Diagnostics {
         p.toggleStart(config: c)
         let d2 = Date().addingTimeInterval(9)
         while Date() < d2 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        let bypassed = p.position > 8
         print(String(format: "  ignoreEnd: pos=%.2f playing=%@ wentPast8=%@",
-                     p.position, p.isPlaying ? "yes" : "no", p.position > 8 ? "yes" : "no"))
+                     p.position, p.isPlaying ? "yes" : "no", bypassed ? "yes" : "no"))
         p.pause()
+
+        // This suite printed three lines of facts and NO verdict, and CLAUDE.md §14 describes it
+        // as "asserts playback stops AT introEnd (overshoot must be 0)" — it asserted nothing.
+        // A human had to read `overshoot=0.000` and know what it should be, which is the
+        // `--loudtest` lesson (§12) on the one check that covers §1's core requirement: playback
+        // must not continue past `introEnd`.
+        //
+        // Both halves are required, and the second is the one that would otherwise rot quietly:
+        // a guard that never releases would make `overshoot` 0 forever and look perfect, so
+        // `ignoreEnd` having to go PAST the boundary is what proves the stop is a decision
+        // rather than a wall.
+        if !stoppedInTime { print("   ✗ ไม่หยุดที่ Intro End — ผิดข้อกำหนดหลัก (§1)") }
+        if !bypassed { print("   ✗ ติ๊ก \"ข้าม Intro End\" แล้วยังหยุด — ตัวข้ามพัง") }
+        Diagnostics.verdict(stoppedInTime && bypassed,
+                            "\n✓ ผ่าน — หยุดตรง Intro End และ \"ข้าม\" ยังข้ามได้",
+                            "\n✗ ไม่ผ่าน")
     }
 
     /// The waveform's two-stage marker rule. Read-only, and pure — `MarkerGrab.decide` exists as
@@ -859,7 +881,7 @@ enum Diagnostics {
               .away)
 
         print("\nผ่าน \(pass)  ตก \(fail)")
-        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+        Diagnostics.verdict(fail == 0, "✓ ผ่าน", "✗ ไม่ผ่าน")
     }
 
     /// Reveal is UNBOUNDED by design — it is the on-camera verb and must never stop itself. The
@@ -871,7 +893,7 @@ enum Diagnostics {
     /// audition's own assertions went with it; this half had no other coverage. Read-only.
     static func revealTest() {
         let songs = Library.scan()
-        guard let s = songs.first else { print("no songs"); return }
+        guard let s = songs.first else { Diagnostics.cannotRun("no songs"); return }
         let p = Player()
         p.load(url: Library.url(s))
         p.muteForTest()
@@ -911,7 +933,7 @@ enum Diagnostics {
                      stopped.map { String(format: "%.3f", $0) } ?? "— NEVER STOPPED", overshoot))
         let okIntro = stopped != nil && overshoot < 0.02
         p.pause()
-        print(keptGoing && okIntro ? "\n✓ ผ่าน" : "\n✗ ไม่ผ่าน")
+        Diagnostics.verdict(keptGoing && okIntro, "\n✓ ผ่าน", "\n✗ ไม่ผ่าน")
     }
 
     /// The running order built from the REAL log. Read-only — opens a LogStore and a Store but
@@ -1017,7 +1039,7 @@ enum Diagnostics {
         let groups = Takes.sittings(tk)
         check("จำนวนช่วงถ่าย (เว้น 6 ชม)", "\(groups.count)", "2")
         check("ช่วงที่ 2 มีกี่ข้อ", "\(groups.last?.count ?? -1)", "1")
-        print(ok ? "    ✓ ผ่าน\n" : "    ✗ ไม่ผ่าน\n")
+        Diagnostics.verdict(ok, "    ✓ ผ่าน\n", "    ✗ ไม่ผ่าน\n")
     }
 
     /// Marker edits DURING playback — `Player.remode`, which had no coverage at all.
@@ -1029,7 +1051,7 @@ enum Diagnostics {
     /// Read-only (local Player, local config).
     static func remodeTest() {
         let songs = Library.scan()
-        guard let s = songs.first else { print("no songs"); return }
+        guard let s = songs.first else { Diagnostics.cannotRun("no songs"); return }
         let p = Player()
         p.load(url: Library.url(s))
         p.muteForTest()
@@ -1081,8 +1103,7 @@ enum Diagnostics {
         // 3) tighten but stay AHEAD of the playhead. Must stop at the new, earlier boundary.
         run("tighten Intro End, still ahead", introEnd0: 20, editTo: 8, at: 4, mustStopBy: 8.0)
 
-        print(ok ? "\n✓ ผ่าน — แก้ marker ตอนเล่นอยู่ ไม่ทำให้เล่นเลย Intro End"
-                 : "\n✗ ไม่ผ่าน — มีกรณีที่เล่นเลย Intro End")
+        Diagnostics.verdict(ok, "\n✓ ผ่าน — แก้ marker ตอนเล่นอยู่ ไม่ทำให้เล่นเลย Intro End", "\n✗ ไม่ผ่าน — มีกรณีที่เล่นเลย Intro End")
     }
 
     /// The typed marker field's parser. Read-only, no audio.
@@ -1192,7 +1213,7 @@ enum Diagnostics {
             }
         }
         print("\nmacOS ของเครื่องนี้: \(UpdateInfo.runningOS)")
-        print(ok ? "\n✓ ผ่าน" : "\n✗ ไม่ผ่าน")
+        Diagnostics.verdict(ok, "\n✓ ผ่าน", "\n✗ ไม่ผ่าน")
     }
 
     /// The whole in-app update chain except the final swap: fetch the manifest, download (or
@@ -1319,7 +1340,7 @@ enum Diagnostics {
             ok = false
             print("\n✗ ค้าง ไม่เสร็จในเวลา")
         }
-        print(ok ? "\n✓ ผ่าน" : "\n✗ ไม่ผ่าน")
+        Diagnostics.verdict(ok, "\n✓ ผ่าน", "\n✗ ไม่ผ่าน")
     }
 
     static func timeFmt() {
@@ -1346,7 +1367,7 @@ enum Diagnostics {
             if r != nil { ok = false }
             print("  \(t.debugDescription) -> \(r.map { String(format: "%.2f ✗ SHOULD REJECT", $0) } ?? "nil ok")")
         }
-        print(ok ? "\n✓ ผ่าน" : "\n✗ ไม่ผ่าน")
+        Diagnostics.verdict(ok, "\n✓ ผ่าน", "\n✗ ไม่ผ่าน")
     }
 
     /// The overview strip's peaks. Two things to prove: it agrees with the zoomed-out column peaks,
@@ -1355,7 +1376,7 @@ enum Diagnostics {
     static func overviewTest() {
         let songs = Library.scan()
         guard let s = songs.first, let a = try? Analysis.analyse(url: Library.url(s)) else {
-            print("no songs / decode failed"); return
+            Diagnostics.cannotRun("no songs / decode failed"); return
         }
         let w = 1400
         print(String(format: "song: %@  dur=%.2f  width=%d", Library.baseName(s), a.duration, w))
@@ -1383,8 +1404,8 @@ enum Diagnostics {
         print(String(format: "  strip after a zoomed columnPeaks = %.3f ms  (must stay cached)", stripAfterZoom))
         print(String(format: "  zoomed columnPeaks after the strip = %.3f ms  (must stay cached)", zoomAfterStrip))
         let ok = maxDiff < 0.0001 && stripAfterZoom < cold / 4 && zoomAfterStrip < cold / 4
-        print(ok ? "\n✓ ผ่าน — ข้อมูลตรงกัน และไม่กวนแคชกันเอง"
-                 : "\n✗ ไม่ผ่าน" + (maxDiff >= 0.0001 ? " — ข้อมูลไม่ตรงกัน" : " — แคชตีกัน"))
+        Diagnostics.verdict(ok, "\n✓ ผ่าน — ข้อมูลตรงกัน และไม่กวนแคชกันเอง",
+                            "\n✗ ไม่ผ่าน" + (maxDiff >= 0.0001 ? " — ข้อมูลไม่ตรงกัน" : " — แคชตีกัน"))
     }
 
     /// Does "รีเซ็ตเล่นแล้ว" actually clear the badges? Tests the model logic without the UI.
@@ -1409,7 +1430,7 @@ enum Diagnostics {
     /// them up first.
     @MainActor static func resetFlow() {
         let m = AppModel()
-        guard let song = m.songsIn(m.currentPlaylist).first else { print("no songs"); return }
+        guard let song = m.songsIn(m.currentPlaylist).first else { Diagnostics.cannotRun("no songs"); return }
         print("playlist=\(m.currentPlaylist)  song=\(Library.baseName(song))")
 
         m.current = song
@@ -1429,7 +1450,7 @@ enum Diagnostics {
         print("log ยังอยู่: \(m.logStore.events.count) events")
         let ok = !after.played && after.status == nil && m.store.resetAt[m.currentPlaylist] != nil
                  && m.logStore.events.count > 0
-        print(ok ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+        Diagnostics.verdict(ok, "✓ ผ่าน", "✗ ไม่ผ่าน")
     }
 
     /// Does a folder added while the app is running show up after rescan()?
@@ -1449,7 +1470,7 @@ enum Diagnostics {
         print("หลัง rescan: playlists=\(m.playlists.map { $0.isEmpty ? "(root)" : $0 })")
         print("           toast=\(m.toast ?? "—")")
         let ok = m.playlists.contains("__t_rescan")
-        print(ok ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+        Diagnostics.verdict(ok, "✓ ผ่าน", "✗ ไม่ผ่าน")
         try? FileManager.default.removeItem(at: newDir)
     }
 
@@ -1514,7 +1535,7 @@ enum Diagnostics {
             if got != want { bad += 1 }
             print("   \(got == want ? "ok " : "✗  ")\(q)  →  \(t)  = \(got ? "รับ" : "ปฏิเสธ")")
         }
-        print(bad == 0 ? "\n✓ ผ่าน" : "\n✗ ไม่ผ่าน")
+        Diagnostics.verdict(bad == 0, "\n✓ ผ่าน", "\n✗ ไม่ผ่าน")
     }
 
     /// The guess feature's **admission rule**, driven through a real `AppModel` and a real
@@ -1536,7 +1557,7 @@ enum Diagnostics {
             print("   \(ok ? "ok  " : "✗   ")\(l)\(d.isEmpty ? "" : "  — " + d)")
         }
         let m = AppModel()
-        guard let song = m.songsIn(m.currentPlaylist).first else { print("no songs"); return }
+        guard let song = m.songsIn(m.currentPlaylist).first else { Diagnostics.cannotRun("no songs"); return }
         let other = m.songsIn(m.currentPlaylist).dropFirst().first
         let saved = m.store.config(for: song)
         print("song: \(Library.baseName(song))")
@@ -1597,7 +1618,7 @@ enum Diagnostics {
               && back.configured == saved.configured && back.auto == saved.auto)
 
         print("\nผ่าน \(pass)  ตก \(fail)")
-        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+        Diagnostics.verdict(fail == 0, "✓ ผ่าน", "✗ ไม่ผ่าน")
     }
 
     /// The launch snapshot: what it holds, whether it can write, and what it does NOT cover.
@@ -1650,7 +1671,7 @@ enum Diagnostics {
         print("                      ← ปิดช่องนี้ด้วยการตั้ง _settings.backupDir เป็น path ในโฟลเดอร์ sync")
 
         print("\nผ่าน \(pass)  ตก \(fail)")
-        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+        Diagnostics.verdict(fail == 0, "✓ ผ่าน", "✗ ไม่ผ่าน")
     }
 
     /// Can the auto-guess feature damage anything? Read-only — it writes no file and calls no
@@ -1743,7 +1764,7 @@ enum Diagnostics {
         print("\n   เพลงที่ยังรับการเดาได้ \(admittedFresh)/\(songs.count)  (W = จะเขียนช่องนั้น)")
 
         print("\nผ่าน \(pass)  ตก \(fail)")
-        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+        Diagnostics.verdict(fail == 0, "✓ ผ่าน", "✗ ไม่ผ่าน")
     }
 
     /// What the auto-guess proposes for every song, against whatever is configured. Read-only.
@@ -1812,7 +1833,7 @@ enum Diagnostics {
             }
         }
         print("\nผ่าน \(pass)  ตก \(fail)\(skip > 0 ? "  ข้าม \(skip) (ไม่เดาให้)" : "")")
-        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+        Diagnostics.verdict(fail == 0, "✓ ผ่าน", "✗ ไม่ผ่าน")
     }
 
     /// Is the intro auto-gain actually levelling what the audience hears?
@@ -2016,18 +2037,24 @@ enum Diagnostics {
         }
 
         print("\nผ่าน \(pass)  ตก \(fail)")
-        // The compiler emits `warning: will never be executed` on the `✗` branch here, with
-        // `note: condition always evaluates to true`. **It is wrong, and the branch must stay.**
-        // Proved by inserting one failing assertion that cannot be constant-folded: the run
-        // printed `ผ่าน 9  ตก 1` and `✗ ไม่ผ่าน`. The false positive comes from the mandatory
-        // pass not seeing `assertThat`'s `fail += 1` as an assignment to the captured var.
+        // The compiler used to emit `warning: will never be executed` on the `✗` branch here,
+        // with `note: condition always evaluates to true`. It was WRONG — proved by inserting
+        // one failing assertion that cannot be constant-folded, which printed `ผ่าน 9  ตก 1` and
+        // `✗ ไม่ผ่าน`. The false positive came from the mandatory pass not seeing `assertThat`'s
+        // `fail += 1` as an assignment to the captured var.
+        //
+        // The warning is GONE now, and not because anything about the condition changed: routing
+        // the verdict through `Diagnostics.verdict` means the strings are arguments rather than
+        // operands of a ternary inside `print`, so there is no branch left for the optimiser to
+        // fold away. Kept on record because the next person to see that warning somewhere else
+        // in this file should know it has already been investigated once and was a lie.
         //
         // What DID make this suite look like it always passed is unrelated and was real: for a
         // library containing an unreadable file, `Loudness.measure` died on an uncatchable
         // Obj-C exception (see `Loudness.measure`) and the process never reached these two
         // lines at all. A suite that cannot print its own verdict reads exactly like a suite
         // that passed.
-        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+        Diagnostics.verdict(fail == 0, "✓ ผ่าน", "✗ ไม่ผ่าน")
     }
 
     // MARK: - the setter's note
@@ -2284,7 +2311,7 @@ enum Diagnostics {
               CenterView.plainNoteText(storeM.config(for: "EP/b.mp3")) == "ยุค 90")
 
         print("\nผ่าน \(pass)  ตก \(fail)")
-        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+        Diagnostics.verdict(fail == 0, "✓ ผ่าน", "✗ ไม่ผ่าน")
     }
 
     // MARK: - the tag filter
@@ -2422,7 +2449,7 @@ enum Diagnostics {
                 && AppPaths.brand.deletingLastPathComponent().path == AppPaths.root.path)
 
         print("\nผ่าน \(pass)  ตก \(fail)")
-        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+        Diagnostics.verdict(fail == 0, "✓ ผ่าน", "✗ ไม่ผ่าน")
     }
 
     /// Click-outside-to-stop-typing. Read-only, builds only throwaway AppKit views.
@@ -2467,7 +2494,7 @@ enum Diagnostics {
               !FocusRelease.shouldRelease(firstResponder: editor, hit: editor))
 
         print("\nผ่าน \(pass)  ตก \(fail)")
-        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+        Diagnostics.verdict(fail == 0, "✓ ผ่าน", "✗ ไม่ผ่าน")
     }
 
     /// The receive sweep: it has to look at EVERY round, not the one on screen.
@@ -2630,19 +2657,141 @@ enum Diagnostics {
                                          by: huge)
         check("ตอนเขียนก็ตัด", viaPackage.by.count == Store.nameMax, "\(viaPackage.by.count)")
 
-        print("\n8) ไม่เก็บลงไฟล์ — รายการที่ปิดไว้ต้องตายพร้อม process")
+        print("\n8) การ \"ไว้ก่อน\" ต้องตายพร้อม process — แต่การ \"ตรวจแล้ว\" ต้องอยู่")
+        // Two different things, and the substring filter below used to pass by accident rather
+        // than on purpose, so both halves are now named. A wave-off is "not now" and must not
+        // outlive the session (§8e). A REVIEW is a decision and has to survive a relaunch, or
+        // the strip comes back on a show day for work that is already done.
         receiver.settingsChanged()
         let keys = Set(((receiver.raw["_settings"] as? [String: Any]) ?? [:]).keys)
         let suspect = keys.filter {
             let k = $0.lowercased()
             return k.contains("incoming") || k.contains("dismissedround") || k.contains("pending")
         }
-        check("_settings ไม่มีคีย์เกี่ยวกับรายการที่รออยู่", suspect.isEmpty,
+        check("_settings ไม่มีคีย์ของรายการที่ \"ไว้ก่อน\"", suspect.isEmpty,
               suspect.isEmpty ? "\(keys.count) คีย์ ไม่มีอันไหนเกี่ยว"
                               : suspect.sorted().joined(separator: ", "))
+        check("แต่ \"ตรวจแล้ว\" ถูกเขียนลง _settings", keys.contains("takenIn"))
+        check("เขียนเป็น list เรียงแล้ว (ไฟล์นี้คนอ่านและแก้มือ)",
+              ((receiver.raw["_settings"] as? [String: Any])?["takenIn"] as? [String])
+                  .map { $0 == $0.sorted() } ?? false)
+
+        print("\n9) ส่งมาเฉพาะ note หรือ tag — ต้องขึ้นแถบ")
+        // `SongBase` is the five marker fields. `alreadyTakenIn` compares it, so a handover whose
+        // only change is the field §8g exists for matched on every song and raised NOTHING: no
+        // strip, no 📥 in the picker. The setter watched round.json land and assumed it arrived.
+        let r9n = Store(rawForTest: [:])
+        Handoff.apply(Handoff.plan(pkgs["EP03"]!, round: "EP03", paths: paths["EP03"]!, store: r9n),
+                      accepted: [], store: r9n)
+        let n9 = Library.baseName(paths["EP03"]![0])
+        var noteOnly = pkgs["EP03"]!
+        noteOnly.at = "2026-11-25T10:00:00+07:00"      // a genuine re-export
+        noteOnly.songs[n9]!.note = "ฝั่งซ้ายน่าจะได้เปรียบ"
+        let pn = Handoff.plan(noteOnly, round: "EP03", paths: paths["EP03"]!, store: r9n)
+        check("plan ยก row ของ note", pn.rows.count == 1 &&
+              pn.rows.first?.field.key == DiffField.note.key, "\(pn.rows.count) แถว")
+        // The counterfactual, as a number: the comparison this used to rest on says "done".
+        check("ของเดิม: alreadyTakenIn ตอบว่า \"รับไปแล้ว\" → หายไปทั้งชุด",
+              Handoff.alreadyTakenIn(noteOnly, round: "EP03",
+                                     paths: paths["EP03"]!, store: r9n))
+        check("ของใหม่: ยังขึ้นแถบ",
+              Handoff.isWaiting(noteOnly, round: "EP03", paths: paths["EP03"]!, store: r9n))
+        var tagOnly = pkgs["EP03"]!
+        tagOnly.at = "2026-11-25T11:00:00+07:00"
+        tagOnly.songs[n9]!.tags = ["ยุค 90"]
+        check("tag เดี่ยว ๆ ก็เหมือนกัน",
+              Handoff.isWaiting(tagOnly, round: "EP03", paths: paths["EP03"]!, store: r9n))
+
+        print("\n10) ปฏิเสธ row แล้วต้องไม่วนกลับมา")
+        // Declining leaves the local value and `base` agreeing with each other and both
+        // differing from the sender — which is exactly what §8e asks `apply` to do. So no
+        // comparison can tell a declined review from an untouched round, and the strip returned
+        // on every launch with the sheet PRE-ACCEPTING the rows that had just been turned down.
+        let r10 = Store(rawForTest: [:])
+        Handoff.apply(Handoff.plan(pkgs["EP01"]!, round: "EP01", paths: paths["EP01"]!, store: r10),
+                      accepted: [], store: r10)
+        var pushy = pkgs["EP01"]!
+        pushy.at = "2026-11-25T12:00:00+07:00"
+        let n10 = Library.baseName(paths["EP01"]![0])
+        let mine10 = r10.config(for: paths["EP01"]![0]).introEnd
+        pushy.songs[n10]!.b.introEnd = mine10 + 4
+        let p10 = Handoff.plan(pushy, round: "EP01", paths: paths["EP01"]!, store: r10)
+        check("มี row ให้เลือก", p10.rows.count == 1, "\(p10.rows.count) แถว")
+        Handoff.apply(p10, accepted: [], store: r10)          // ปฏิเสธ
+        check("ค่าเดิมของเครื่องนี้อยู่ครบ (ปฏิเสธได้ผล)",
+              r10.config(for: paths["EP01"]![0]).introEnd == mine10)
+        check("base ถูกปั๊มจากผลลัพธ์ ไม่ใช่จากผู้ส่ง (§8e) → ไม่มีป้าย \"แก้ที่กอง\" ปลอม",
+              r10.config(for: paths["EP01"]![0]).base?.introEnd == mine10)
+        check("ของเดิม: alreadyTakenIn ตอบ false ตลอดไป → นี่คือเหตุที่มันวนกลับมา",
+              !Handoff.alreadyTakenIn(pushy, round: "EP01", paths: paths["EP01"]!, store: r10))
+        check("ของใหม่: ไม่ขึ้นอีก",
+              !Handoff.isWaiting(pushy, round: "EP01", paths: paths["EP01"]!, store: r10))
+        // And it has to survive a relaunch, which is the whole reason it is in `_settings`.
+        r10.settingsChanged()
+        let r10b = Store(rawForTest: r10.raw)
+        check("เปิดแอปใหม่แล้วยังไม่ขึ้น",
+              !Handoff.isWaiting(pushy, round: "EP01", paths: paths["EP01"]!, store: r10b))
+        check("แต่ถ้าผู้ส่งแก้มาจริงอีกรอบ ยังขึ้นปกติ", {
+            var again2 = pushy
+            again2.at = "2026-11-25T13:00:00+07:00"
+            again2.songs[n10]!.b.hook += 9
+            return Handoff.isWaiting(again2, round: "EP01", paths: paths["EP01"]!, store: r10b)
+        }())
+
+        print("\n11) คีย์ของ \"ตรวจแล้ว\" ผูกกับเนื้อหา ไม่ใช่แค่เวลา export")
+        let k1 = Handoff.reviewKey(round: "EP01", pkg: pkgs["EP01"]!)
+        check("ไฟล์เดิมอ่านซ้ำ = คีย์เดิม",
+              k1 == Handoff.reviewKey(round: "EP01", pkg: pkgs["EP01"]!))
+        check("คนละโฟลเดอร์ = คนละคีย์",
+              k1 != Handoff.reviewKey(round: "EP09", pkg: pkgs["EP01"]!))
+        // The reason this is NOT `IncomingRound.id`: that is folder + `at`, so a round.json
+        // edited by hand while keeping its timestamp would be swallowed as already-reviewed.
+        var handEdited = pkgs["EP01"]!
+        handEdited.songs[n10]!.b.introEnd += 1          // at ไม่เปลี่ยน
+        check("แก้เนื้อหาโดย at เท่าเดิม = คนละคีย์ (ซึ่ง IncomingRound.id แยกไม่ออก)",
+              Handoff.reviewKey(round: "EP01", pkg: handEdited) != k1 &&
+              IncomingRound(round: "EP01", pkg: handEdited).id
+                  == IncomingRound(round: "EP01", pkg: pkgs["EP01"]!).id)
+        check("note เปลี่ยนก็นับ", Handoff.reviewKey(round: "EP03", pkg: noteOnly)
+              != Handoff.reviewKey(round: "EP03", pkg: pkgs["EP03"]!))
+        check("tag เปลี่ยนก็นับ", Handoff.reviewKey(round: "EP03", pkg: tagOnly)
+              != Handoff.reviewKey(round: "EP03", pkg: pkgs["EP03"]!))
+
+        print("\n12) ล้างรายการเก่าต้องเทียบกับ \"ทุกชุดบนดิสก์\" ไม่ใช่ \"ชุดที่รออยู่\"")
+        // A reviewed package is BY DEFINITION not waiting, so pruning against the waiting set
+        // deletes every record on the first sweep and puts the feature back where it started.
+        // `packagesOnDisk` exists for this, and it lives in `Handoff` so the sweep still has one
+        // implementation (§8e: the defect was the loop, not the per-round decision).
+        // What is ON DISK for EP01 is the re-export section 10 reviewed, not the original — the
+        // prune set has to be built from the files as they stand, and getting that wrong is the
+        // whole point of this section.
+        var disk = pkgs
+        disk["EP01"] = pushy
+        let onDisk = Handoff.packagesOnDisk(rounds, read: { disk[$0] })
+        check("packagesOnDisk เห็นทุกชุด ไม่กรอง", onDisk.count == rounds.count,
+              "\(onDisk.count) จาก \(rounds.count)")
+        let liveKeys = Set(onDisk.map { Handoff.reviewKey(round: $0.round, pkg: $0.pkg) })
+        let kept = r10b.takenIn.intersection(liveKeys).count
+        r10b.pruneTakenIn(to: liveKeys)
+        check("ล้างด้วยชุดที่ถูก → รายการที่ยังอยู่บนดิสก์ไม่หาย", r10b.takenIn.count == kept,
+              "\(r10b.takenIn.count) รายการ")
+        check("ของใหม่: ยังไม่ขึ้นหลังล้าง",
+              !Handoff.isWaiting(pushy, round: "EP01", paths: paths["EP01"]!, store: r10b))
+        // The counterfactual with a number, because this is the mistake that looks correct.
+        let r12 = Store(rawForTest: r10.raw)
+        let before12 = r12.takenIn.count
+        let waitingKeys = Set(Handoff.waitingRounds(rounds, store: r12,
+                                                    songsIn: { paths[$0] ?? [] },
+                                                    read: { disk[$0] })
+            .map { Handoff.reviewKey(round: $0.round, pkg: $0.pkg) })
+        r12.pruneTakenIn(to: waitingKeys)
+        check("ถ้าล้างด้วย \"ชุดที่รออยู่\" (ผิด) → เหลือ \(r12.takenIn.count) จาก \(before12) " +
+              "= ลืมที่ตรวจแล้วทั้งหมด", before12 > 0 && r12.takenIn.isEmpty)
+        check("และแถบที่ปฏิเสธไว้จะกลับมา (นี่คือราคาของการล้างผิดชุด)",
+              Handoff.isWaiting(pushy, round: "EP01", paths: paths["EP01"]!, store: r12))
 
         print("\nผ่าน \(pass)  ตก \(fail)")
-        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+        Diagnostics.verdict(fail == 0, "✓ ผ่าน", "✗ ไม่ผ่าน")
     }
 
     static func filterTest() {
@@ -2755,7 +2904,7 @@ enum Diagnostics {
                               : suspect.sorted().joined(separator: ", "))
 
         print("\nผ่าน \(pass)  ตก \(fail)")
-        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+        Diagnostics.verdict(fail == 0, "✓ ผ่าน", "✗ ไม่ผ่าน")
     }
 
     // MARK: - tags
@@ -3107,7 +3256,47 @@ enum Diagnostics {
         }
 
         print("\nผ่าน \(pass)  ตก \(fail)")
-        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+        Diagnostics.verdict(fail == 0, "✓ ผ่าน", "✗ ไม่ผ่าน")
     }
 
+}
+
+// MARK: - Verdict, and the process exit code
+
+extension Diagnostics {
+    /// Set by any suite that prints a FAILING verdict. Read by `App` to pick the exit code.
+    nonisolated(unsafe) static var sawFailure = false
+
+    /// Every suite's verdict goes through here, so the PROCESS EXIT CODE can reflect it.
+    ///
+    /// `App.swift` had 32 `exit(0)` and zero `exit(1)`: every diagnostic in this project exited
+    /// 0 whatever it found. `INTROPLAYER_DIAG=1 $BIN --remodetest && echo ok` printed `ok` with
+    /// the intro-end guard deliberately broken, so none of these checks could fail a script, a
+    /// release step or a pre-push hook — they could only be read by a human who remembered to
+    /// look. §12's `--loudtest` lesson is that a suite which cannot report its verdict reads
+    /// exactly like one that passed; this was the same hole one level out, for all of them.
+    ///
+    /// The strings are passed through untouched so no suite's wording, leading newline or
+    /// trailing explanation changes.
+    @discardableResult
+    static func verdict(_ ok: Bool, _ good: String, _ bad: String) -> Bool {
+        if !ok { sawFailure = true }
+        print(ok ? good : bad)
+        return ok
+    }
+
+    /// "I could not check this" — which is NOT "this is fine", and must not exit 0.
+    ///
+    /// `--remodetest` and `--overview` are the only end-to-end checks of the intro-end stop and
+    /// of the waveform the markers are placed on, and both opened with
+    /// `guard let s = songs.first else { print("no songs"); return }`. On a fresh clone, in CI,
+    /// or on a `/Applications` install before the operator has pointed the app at a library,
+    /// they printed one line and exited 0 — indistinguishable from a pass, on the two checks it
+    /// matters most to have actually run.
+    static func cannotRun(_ why: String) {
+        sawFailure = true
+        print("✗ ตรวจไม่ได้ — \(why)")
+    }
+
+    static var exitCode: Int32 { sawFailure ? 1 : 0 }
 }

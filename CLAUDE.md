@@ -534,7 +534,7 @@ INTROPLAYER_DIAG=1 $BIN --overview     # overview strip: same data as columnPeak
 INTROPLAYER_DIAG=1 $BIN --notetest     # the note: clamps, merge rule, measured layout, the ※ (§8g)
 INTROPLAYER_DIAG=1 $BIN --tagtest      # tags: registry, UNION merge, the chosen colour, the box (§8g)
 INTROPLAYER_DIAG=1 $BIN --filtertest   # tag filter + filename search narrow the LIST only (§8g)
-INTROPLAYER_DIAG=1 $BIN --incomingtest # receive sweep + who sent it: 27 assertions (§8e)
+INTROPLAYER_DIAG=1 $BIN --incomingtest # receive sweep, note/tag-only, declined rows: 50 (§8e)
 INTROPLAYER_DIAG=1 $BIN --focustest    # คลิกที่อื่นแล้วต้องเลิกพิมพ์ — 8 assertions (§8g)
 INTROPLAYER_DIAG=1 $BIN --roottest     # where the questions live: order, exclusions, .none (§5d)
 INTROPLAYER_DIAG=1 $BIN --updatecheck  # semver compare, feed resolution, blocked URL schemes (§15)
@@ -684,7 +684,7 @@ property, not the mechanism: amber is YELLOW against a BLUE accent, and deutan l
 blue-yellow axis intact. The real separation is ΔE 67 in light (74 in dark), and the carrier of
 last resort is still the word next to it.
 
-`--palettetest` measures both themes in Swift — 167 assertions over the ladder, text contrast,
+`--palettetest` measures both themes in Swift — 195 assertions over the ladder, text contrast,
 fill-vs-surface, `ink`-on-fill, the tinted chips, and the deutan pairs.
 
 > `Palette.audit` is the list it measures, and it must name **every** value. It first shipped
@@ -713,6 +713,56 @@ And one straight §6d violation it made obvious: `Markers.all` still coloured **
 while the waveform drew it cyan. Green has one meaning, and §6d names "Intro End marker" among
 the four it was supposed to have given up. Bright green vs bright cyan hid it; dark green vs
 dark teal did not.
+
+### `audit` IS the colours now, not a copy of them (`Palette.named`)
+
+For as long as both existed, `Palette.audit` was a hand-maintained hex table running parallel to
+38 `dyn(...)` literals **with nothing tying the two together** — and `PaletteCheck` reads only
+`audit`, `auditHex`, `tagSlots` and `tagSwatch`, never a real colour. So every assertion in
+`--palettetest` measured the table while the app rendered the literals.
+
+Measured rather than argued: setting `amber = dyn(0x2FD17A, 0x1F5534)` — amber byte-identical to
+green, i.e. §6d's "the intro-end stop is not armed" rendered in the colour that means "a human
+answered correctly", with the deutan separation gone — left the suite at **187 ผ่าน / 0 ตก with
+byte-identical output.**
+
+**Third occurrence of the `Palette.audit` lesson, and the first fix that removes the second copy
+instead of adding a check over it.** The 38 were verified equal to their audit entries *before*
+being rewritten to go through `Palette.named("x")`, so no colour changed. What stays outside it is
+deliberate: `outline` / `onHeader` / `onHeaderWarn` must not flip with the theme, and the tag
+ramps are arrays whose completeness the indexed loop already covers.
+
+> A name not in `audit` now resolves to **screaming magenta**, not `0x808080`. A typo in one of
+> those strings is the new structure's only failure mode, and grey is a value this palette could
+> plausibly have wanted — which makes it the worst possible sentinel. Note the existing assertion
+> spelled `0x808080` as a literal, so moving the sentinel would have made it pass *for free on
+> exactly the colour that had gone missing*; it reads `Palette.missingColour` now.
+
+**And the comment that sent `tagSwatch` to `audit` claimed an assertion that did not exist** —
+"`--palettetest` already asserts `audit` names every value". What actually works is the *indexed*
+loop over `tagFill\(i)`; the named scalars had no enumeration and therefore no coverage at all.
+
+#### amber vs red collides in the LIGHT theme, at deutan ΔE 6.1
+
+Found by running the negative control after the fix above: amber := green still passed 191/0,
+because **section 5 compared amber against `accent` and `purple` only.** Adding green and red:
+
+| | dark | light |
+|---|---|---|
+| amber vs green | 16.1 | 22.3 |
+| amber vs red | 20.6 | **6.1** |
+
+6.1 is the same colour to a deutan viewer. **Pinned, not fixed**, by the same reasoning §6d
+applies to accent-vs-purple — separating it means moving a shipping status colour, and this
+palette's light-theme lightness budget is already spent (a white ground forces every accent down
+to roughly L\* 46, which is what flattens the spread).
+
+Survivable for specific reasons rather than hopeful ones: light is the **setter's** theme at a
+desk, so neither state is read under time pressure there; both carry a word, and §6d's rule is
+that amber plus a word is the carrier and never the hue alone; and the save-failure bar is not
+this red — it sits on `header`, dark in both themes with fixed-light text. **So amber and red may
+never be the sole difference between two things in the light theme.** If that ever has to be
+fixed rather than pinned, it is a decision about the show's colours, not a threshold to nudge.
 
 > **Dark is the default and that is not a style preference.** The operator's position is a dim
 > corner of a studio; a white 2560×1080 panel at arm's length is a light source pointed at the
@@ -1469,6 +1519,61 @@ The strip also names the **folder**, not `package.round`, and says so when they 
 round under another folder name is legal by design — `round.json` is keyed by file name for
 exactly that — so `package.round` is where it came FROM while the folder is where accepting it
 lands. `ImportPlan.round` carries the same value, so `applyImport` cannot clear the wrong round.
+
+### "Has a human dealt with this?" is not a comparison (`Store.takenIn`, `Handoff.reviewKey`)
+
+`alreadyTakenIn` asks **"does `base` equal the package's values"**, and for two years that was
+treated as the same question as "has this been reviewed". It is not, and the gap cost the
+feature its two most important cases. Both were found by a review pass and then confirmed by
+reading the code, not by running anything — neither had a test.
+
+| | what happened | why no comparison can see it |
+|---|---|---|
+| a handover carrying only a **note** or a **tag** | matched on every song, `alreadyTakenIn` answered "already taken in", **no strip and no 📥** — the operator never saw the field §8g exists for, while the setter watched `round.json` land and assumed it had arrived | `base` is a `SongBase`: the five marker fields. `note` and `tags` are not in it (§9) and never will be |
+| **declining** a row | the strip came back on every launch and activation, and the sheet pre-accepts every row — so the obvious button accepted the thing that had just been turned down | `apply` stamps `base` from the RESULT, correctly (§8e: stamp it from the sender and "แก้ที่กอง" means nothing). So local and `base` agree while both differ from the sender — identical to an untouched round |
+
+§8e derives everything it can, on purpose, because a stored flag goes stale. **This is the one
+piece of handover state that is genuinely not derivable**, so it is stored — in `_settings`,
+beside `resetAt` and `dismissedUpdate`, which are the same species of "a human already dealt
+with this".
+
+**The key is `Handoff.reviewKey`, not `IncomingRound.id`.** The id is folder + `at`, which is
+right for the "ไว้ก่อน" dismissal — §8e wants a re-export to reappear even when nothing changed,
+because a wave-off is "not now" rather than a decision. A review *is* a decision, so it is keyed
+on what was decided about: folder + `at` + an FNV-1a fingerprint of the content. With `at` alone
+a `round.json` hand-edited while keeping its timestamp would have been swallowed as
+already-reviewed, which is strictly worse than the bug being fixed.
+
+> `Store.fnv1a` is now one function with two callers — the tag-colour slot and this. **Never
+> `hashValue`**: Swift seeds it per process, which §8g already records as the defect that made
+> `tagsInUse` pick a tag's surviving spelling at random between launches. The refactor is pinned
+> by `--tagtest` staying at 89, the same way `clampName`/`clampNote` are pinned by `--notetest`
+> staying at 66.
+
+Two more pieces, each for a reason that is invisible in a screenshot:
+
+- **`DiffField.isAdditive`.** The first fix was a `takenIn` check alone, and `--incomingtest`
+  **caught that it was incomplete** — `isWaiting` still ended on `return !alreadyTakenIn(...)`,
+  so a note-only package was vetoed on the strength of the markers agreeing. An additive row is
+  *unambiguous*: `plan` raises one only when the sender has something this machine does not, so
+  unlike a marker row it can never be our own on-site edit looking back at us. It is therefore
+  checked BEFORE `alreadyTakenIn` gets a vote. Deliberately a separate property from `isProse`,
+  which happens to name the same two cases today: one is about how a row is laid out, the other
+  about whether it may be ignored, and a field that is additive but fits in a value column would
+  have to split them.
+- **`Handoff.packagesOnDisk`, and it lives in `Handoff`.** The prune set for `takenIn` has to be
+  *every* package on disk, because a reviewed package is by definition not waiting — pruning
+  against the waiting set deletes every record on the first sweep and puts the feature back where
+  it started. `--incomingtest` section 12 measures that counterfactual (`เหลือ 0 จาก 2`). It is
+  not a second loop in `AppModel` for the reason §8e already gives: the defect the sweep replaced
+  was never the per-round decision, it was **how many rounds the caller asked about**, so a loop
+  written in the UI layer is exactly the shape that regressed. `waitingRounds` is now a filter
+  over `packagesOnDisk`, so there is one implementation.
+
+`markTakenIn` is called from **`Handoff.apply`**, not from `AppModel`'s two import paths. That is
+the choke point both already go through, so a third caller cannot forget it — and it is what lets
+`--incomingtest`, which drives `apply` directly, see the behaviour at all. The first version put
+it in `applyImport` and the test could not reach it.
 
 ### Who sent it (`_settings.setterName` → `round.json`'s `by`)
 
@@ -2257,6 +2362,18 @@ protected the *typed field*, which never had a rate limit either: §10's rule th
 only ARM the intro-end guard, never disarm it. The nudge also commits through a 350 ms debounce,
 so a held key cannot thrash the node.
 
+> **A debounce that is re-armed per keypress is never reached by a HELD key, and that is not a
+> detail.** Autorepeat arrives every ~30 ms against a 350 ms timer, so `remode` never ran at all
+> while the key was down: the node stayed bounded at the OLD Intro End, the audio stopped there,
+> and the guard strip counted down to the new value with the button still reading Pause. Not a
+> §10 violation — nothing played past Intro End — but a dropout during the one task the key
+> exists for. `Player.boundRunsOutEarly` commits immediately *only* when the node is about to run
+> out; holding the key far from the boundary still coalesces into one commit on release, which is
+> what the debounce is for. Note the physics the fix does not change: 0.01 s per press against a
+> playhead advancing 1 s per second means **you cannot outrun the playhead by holding the key** —
+> the marker will be overtaken, and a few re-schedules in that window is the right trade against
+> silence.
+
 It uses `updateConfig(commit: false)` plus a 350 ms debounce, exactly like the waveform drag:
 committing calls `player.remode`, which re-schedules the node once the accumulated move passes
 0.05 s — an audible dropout every sixth keypress, during the one task the key exists for. It also
@@ -2876,6 +2993,70 @@ the day it does not help.
   LastResort *is* the placeholder box. `Palette.audit` in a new costume, and the negative
   control is the only reason it was not shipped green.
 
+> **The test-honesty audit.** One question — do these diagnostics fail when the thing they claim
+> to check is broken? — answered by injecting 16 deliberate defects. Everything below was then
+> confirmed by hand before being acted on.
+
+- **Every diagnostic in this project exited 0, whatever it found.** `App.swift` had **32
+  `exit(0)` and zero `exit(1)`**, so `INTROPLAYER_DIAG=1 $BIN --remodetest && echo ok` printed
+  `ok` with the intro-end guard deliberately broken. None of these checks could fail a script, a
+  release step or a pre-push hook — they could only be read by a human who remembered to look.
+  §12's `--loudtest` lesson is that a suite which cannot report its verdict reads exactly like
+  one that passed; this was the same hole one level out, for all of them at once. Verdicts go
+  through `Diagnostics.verdict` now and the diagnostic exits are `exit(Diagnostics.exitCode)`.
+  `--version` and `--whereami` stay at 0 — they report, they do not assert.
+- **`--playtest` printed three lines of facts and NO verdict**, while §14 described it as
+  "asserts playback stops AT introEnd (overshoot must be 0)". It asserted nothing: a human had
+  to read `overshoot=0.000` and know what it should be. That is the only end-to-end check of §1's
+  core requirement. It has a verdict now, and it needs **both** halves — a guard that never
+  released would make `overshoot` 0 forever and look perfect, so `ignoreEnd` having to go PAST
+  the boundary is what proves the stop is a decision rather than a wall.
+  > Writing it, the first version read `stopped` *after* the second phase had reset it to nil and
+  > failed a passing run. Capture a phase's verdict inside the phase.
+- **"no songs" read as a pass.** `--remodetest` and `--overview` — the only end-to-end checks of
+  the intro-end stop and of the waveform markers are placed on — opened with
+  `guard let s = songs.first else { print("no songs"); return }` and exited 0. On a fresh clone,
+  in CI, or on a `/Applications` install before the operator has chosen a library, they printed
+  one line and claimed nothing was wrong. `Diagnostics.cannotRun` says "ตรวจไม่ได้" and fails:
+  **"I could not check this" is not "this is fine".**
+- The handover's receive sweep could not see a **note-only or tag-only** package, and a
+  **declined** row made the round wait forever with the decline pre-accepted. See §8e's
+  `Store.takenIn` section; `--incomingtest` went 27 → 50 and its negative control fails exactly
+  the four assertions that are about the new guard.
+- `Palette.audit` was a parallel copy of the colours and **nothing measured the real ones** —
+  amber could become green with 187 assertions saying the palette was fine. And `--palettetest`
+  never compared amber against green or red at all. See §6d.
+- **`/` then `L` then `L` silently killed the transport.** `ContentView`'s
+  `if model.showLog { LogPanel() } else { SongListView() }` gives the two branches separate view
+  identities, so toggling the log remounts the whole song list and refires every `onAppear` in
+  it — including `searchRow`'s unconditional autofocus. First responder landed back in the search
+  field with nobody having touched it, which turns the key monitor's `typing` branch on: `S`,
+  `R`, `T`, `E`, `I`/`O`/`H`, `M`, `L`, `Tab`, `Return` and the arrows all dead, with the row
+  looking exactly as it did. "Search a song, open the log to check the running order, close it"
+  is an ordinary sequence mid-taping. `AppModel.searchWantsFocus` is a one-shot: the focus belongs
+  to the ACT of opening the row, not to the row appearing.
+- **Holding `←`/`→` on Intro End during playback made the audio stop dead.** The nudge commits
+  through a 350 ms debounce on purpose (committing per keypress calls `remode`, which
+  re-schedules and clicks), but the arrows are the one pair exempt from the app-wide autorepeat
+  suppression (§11) and autorepeat arrives every ~30 ms — so a held key **re-armed the debounce
+  before it could ever fire**. `remode` never ran, the node stayed bounded at the old Intro End,
+  and the guard strip went on counting down to the new value while the button still read Pause.
+  On camera that is indistinguishable from a hang. Not a §10 violation — nothing played past
+  Intro End — but a dropout during the exact task the key exists for.
+  `Player.boundRunsOutEarly` is a read-only query (it schedules nothing); `nudgeFocused` commits
+  immediately only when the node is genuinely about to run out, so holding the key far from the
+  boundary still coalesces into one commit on release.
+- `switchDataRoot` cleared every per-path cache and left **`incomingRounds` / `dismissedIncoming`
+  describing the folder it had just left.** Round names repeat across libraries (`EP01` exists in
+  both), so the strip and the picker's 📥 answered for the wrong folder and a round genuinely
+  waiting in the new one stayed invisible until the next window activation — §8e's measured
+  "เห็น 1 จาก 3 — หาย 2 ชุด" through a different door. Nothing could be written across libraries
+  (`openImport` re-reads under the new `AppPaths.root`), so the cost was what was on screen.
+- The `ignoreEnd` Intro End marker was **fainter than the value its own comment said it was
+  rescuing**: `marker` halves an unfocused marker and `Color.opacity` MULTIPLIES, so 0.55 × 0.5
+  composited to **0.275** against the 0.30 it replaced. The value there is a factor, not a
+  result — work out both composites before changing it.
+
 **Web version:**
 - `selectSong` cleared `env` but **not `sqPrefix`**, which every guard downstream tests
   (`rmsRange`, `measuredRms`, `rebuildCols`). So after switching songs those guards passed on
@@ -2998,6 +3179,39 @@ Product / UX
 - Countdown timer / buzzer-time display during intro.
 
 Engineering
+- **Coverage gaps the test-honesty audit found and that are still open.** Each was reproduced by
+  injecting the real defect and watching the suite stay green, so none of these is a guess. In
+  the order they are worth doing:
+  1. **`setNote` / `addTag` / `removeTag` have no assertion that they use `updateConfigQuiet`.**
+     Routing all three through `updateConfig` instead — §8g's named trap, which stamps
+     `configured = true, auto = false` and drops the song out of the `Return`/`Tab` sweep AND out
+     of the pre-flight's `stillAuto` and `hookDefault` warnings, so a round nobody reviewed
+     passes the handover check — leaves `--notetest` 66/66, `--tagtest` 89/89 and `--filtertest`
+     25/25 all green. `--tagtest` already asserts exactly this property for `setTagColor`
+     (`"เลือกสีแล้วเพลงไม่ถูกแตะ — configured false"`), so the pattern is known; it was never
+     applied to the write path it protects. Structural cause: these suites build
+     `Store(rawForTest:)` and never an `AppModel`.
+  2. **`songsIn(_:)` has zero assertion coverage anywhere in the project.** Putting the tag
+     filter inside it — which hands a round over missing its hidden questions, scores the review
+     sweep against a view, and makes `✓ ยืนยันครบทุกเพลงในรอบนี้` a lie — leaves every suite
+     green. §8g is honest that no headless check can prove the UI calls the right accessor, but
+     its stated defence ("narrowing the handover requires typing `visibleSongs` somewhere it does
+     not belong") only covers one direction; the other needs no `visibleSongs` at all. The fix is
+     cheap: `songsIn` is a one-line pure filter and can be lifted to `Library` where a test
+     reaches it.
+  3. **`--roottest`'s 7 resolution-order assertions are skipped in exactly the configuration §5d
+     was built for.** They sit behind `if AppPaths.looksLikeLibrary(programRoot)`, so they run
+     here (27) and vanish on a `/Applications` install, a fresh clone or CI (20). Injecting §5d's
+     own documented defect — `breadcrumb` checked before `beside` — is invisible in that state.
+     Build the stand-in library in a fixture the test creates, so the section never depends on
+     ambient state.
+  4. **`--tagtest`'s hash guard passes by luck, 3 runs in 10.** With FNV-1a replaced by
+     `hashValue` it failed 7 times and passed 3, because the assertion compares two `Store`s
+     *within one process*, where the seed is constant. §12's own rule: a check that passes by
+     luck is worse than no check. Pin a golden value — `tagColors[tagKey("ยุค 90")] == <const>`
+     — which tests the hash rather than two runs of it.
+  5. `--handoff`'s `✓ ผ่าน` is printed **unconditionally**, and it is one of the write-y flags so
+     it is the least-run of the lot.
 - **Refactor `index.html`** into `app.js` + `styles.css` if it keeps growing (still no build step).
 - Add a small **test suite** (e.g. Playwright) for the state machine and the intro-end/fade logic.
 - Make **port configurable** (env var / CLI arg). "Port already in use" is handled; the `.app`
@@ -3024,7 +3238,7 @@ INTROPLAYER_DIAG=1 $BIN --analyse     # detection + loudness per song
 INTROPLAYER_DIAG=1 $BIN --playtest    # overshoot must be 0.000, ignoreEnd must still bypass
 INTROPLAYER_DIAG=1 $BIN --revealtest  # Reveal plays on, and the intro guard re-arms after it
 INTROPLAYER_DIAG=1 $BIN --grabtest    # two-stage marker rule, 10 assertions
-INTROPLAYER_DIAG=1 $BIN --palettetest # both themes: contrast, ladder, deutan ΔE — 167 assertions
+INTROPLAYER_DIAG=1 $BIN --palettetest # both themes: contrast, ladder, deutan ΔE — 195 assertions
 INTROPLAYER_DIAG=1 $BIN --loudtest    # + the reveal lands on target, 12 assertions — §7a5
 INTROPLAYER_DIAG=1 $BIN --autodetect  # Intro End / Hook guesses with their evidence
 INTROPLAYER_DIAG=1 $BIN --guesstest   # clamps vs NaN/inf/1e19 + the admission rules per song
@@ -3038,7 +3252,7 @@ INTROPLAYER_DIAG=1 $BIN --overview    # strip data matches columnPeaks; caches s
 INTROPLAYER_DIAG=1 $BIN --notetest    # note: 66 assertions. Writes NOTHING — Store(rawForTest:)
 INTROPLAYER_DIAG=1 $BIN --tagtest     # tags: 89 assertions, the registry, the chosen colour, the handover
 INTROPLAYER_DIAG=1 $BIN --filtertest  # 25: filter + search cannot reach the handover/pre-flight
-INTROPLAYER_DIAG=1 $BIN --incomingtest # receive sweep + setterName: 27 assertions, read-only
+INTROPLAYER_DIAG=1 $BIN --incomingtest # receive sweep + setterName: 50 assertions, read-only
 INTROPLAYER_DIAG=1 $BIN --focustest   # click-outside ends editing: 8 assertions, read-only
 INTROPLAYER_DIAG=1 $BIN --preflight   # the handover checklist
 INTROPLAYER_DIAG=1 $BIN --updatecheck # semver compare + the configured feed (§15)

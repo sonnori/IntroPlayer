@@ -12,25 +12,24 @@ import SwiftUI
 /// song on camera cannot share a colour with "this song was played".
 enum Palette {
     // surfaces — dark L* 3.3/9.2/16.0/23.0/28.4, light 82.1/88.6/94.1/100 (panel3 recessed)
-    static let bg         = dyn(0x0A0C10, 0xC7CDD3)
-    static let panel      = dyn(0x161A22, 0xD9DFE6)
-    static let panel2     = dyn(0x222834, 0xE8EFF5)
+    static let bg         = named("bg")
+    static let panel      = named("panel")
+    static let panel2     = named("panel2")
     /// Controls inside a card. In dark it comes FORWARD (lighter); in light it is RECESSED
     /// (8.0 L* below the card), which is how a light-theme control reads — the requirement is
     /// a step of at least 5.5 L*, not a direction.
-    static let panel3     = dyn(0x2F3747, 0xD2D8DF)
-    static let float      = dyn(0x3A4358, 0xFFFFFF)
-    static let hair       = dyn(0x272E3A, 0xC1C7CE)
-    static let line       = dyn(0x3C4659, 0xABB1B8)
-    static let lineStrong = dyn(0x5A6880, 0x81878D)
-
+    static let panel3     = named("panel3")
+    static let float      = named("float")
+    static let hair       = named("hair")
+    static let line       = named("line")
+    static let lineStrong = named("lineStrong")
     // text — dark 12.49/6.83/4.07 on panel2, light 13.48/6.00/4.00
-    static let text  = dyn(0xEAECF0, 0x1F2429)
-    static let muted = dyn(0xA7B1C2, 0x555A60)
-    static let dim   = dyn(0x7C8799, 0x70757B)
+    static let text  = named("text")
+    static let muted = named("muted")
+    static let dim   = named("dim")
     /// Text ON a saturated fill. The fills invert between themes — bright in dark, dark in
     /// light — so this has to invert with them or every button legend disappears.
-    static let ink   = dyn(0x0A0C10, 0xFFFFFF)
+    static let ink   = named("ink")
     /// A DARK hairline, in both themes. Not `ink`, even though they were the same value before
     /// there was a light theme: the playhead is a dark outline under a white core, so an `ink`
     /// that follows the theme turned the playhead white-on-white — invisible, on the one element
@@ -40,7 +39,7 @@ enum Palette {
     /// bed, near-black against the light one. Distinct from `outline`, which is fixed dark
     /// because it is the hairline the playhead's white core is drawn on top of — that pair
     /// works in both themes precisely because only one of the two moves.
-    static let onWave = dyn(0xFFFFFF, 0x0A0C10)
+    static let onWave = named("onWave")
     /// The header bar is a saturated dark red in BOTH themes, so whatever sits on it sits on
     /// dark and must not flip. Measured: the light theme's amber on the light header is 1.2:1,
     /// and the thing drawn in it is the save-failure warning — the single condition that
@@ -52,18 +51,18 @@ enum Palette {
     /// BOTH themes — they are the same colour to a deutan viewer — so blue-vs-purple must never
     /// be the only carrier of the armed/disarmed state. That is why the guard uses amber plus
     /// a word. `--palettetest` pins the collision so nobody "fixes" it by accident.
-    static let accent = dyn(0x4A8CFF, 0x0063D6)
+    static let accent = named("accent")
     /// The Intro bracket: BOTH ends. They are two ends of one range, told apart by which edge
     /// their flag sits on, which also makes two markers on the same time individually grabbable.
-    static let cyan = dyn(0x1FC8E8, 0x007A93)
+    static let cyan = named("cyan")
     /// Only ever "a human answered correctly".
-    static let green = dyn(0x2FD17A, 0x1F5534)
-    static let greenText = dyn(0x7DE9AF, 0x0A4C2F)
+    static let green = named("green")
+    static let greenText = named("greenText")
     /// Wrong / burned question, and destructive controls. The outcome pair is the one separation
     /// that must never be traded away: measured deutan ΔE 11.9 dark / 23.9 light for the fills,
     /// 21.3 / 27.5 for the badge text. The light values came out BETTER because the light fills
     /// have more lightness spread available under a white ground.
-    static let red = dyn(0xF4374E, 0xE1123E)
+    static let red = named("red")
     /// Only ever "the intro-end stop is not armed, or something is wrong".
     ///
     /// The light value could not satisfy §6d's "~24 ΔL* from accent and purple" — on a white
@@ -71,50 +70,46 @@ enum Palette {
     /// bonus property, not the mechanism: amber is YELLOW against a BLUE accent, and deutan
     /// leaves the blue-yellow axis intact, so the real separation is ΔE 67 in light (74 in dark)
     /// and the carrier of last resort is still the word next to it.
-    static let amber = dyn(0xFFC53D, 0x926800)
+    static let amber = named("amber")
     /// Reveal, and the Hook marker it jumps to — one meaning, two places.
-    static let purple = dyn(0xA06BFF, 0x6E3FCD)
-    static let hook = dyn(0xA06BFF, 0x6E3FCD)
+    static let purple = named("purple")
+    static let hook = named("hook")
     /// Only ever "changed after the handover".
-    static let onsite = dyn(0xF763B8, 0xC82C8D)
+    static let onsite = named("onsite")
     /// White on it: 4.97:1 dark, 6.22:1 light. The old #E25232 was 3.83:1 at 15px bold — below
     /// 4.5 and too small for the large-text exemption.
-    static let header = dyn(0xC8402A, 0xBA2616)
-
+    static let header = named("header")
     // ---- tinted chips -------------------------------------------------------------------
     // These were hardcoded `Color(red:...)` darks scattered through SetupPanel, LogPanel and the
     // column headers. Under a light theme `Palette.text` goes near-black and lands on them: dark
     // cyan on dark teal measured 1.6:1. A chip whose own label is unreadable is worse than no
     // theme at all, so each tint is named by ROLE and resolved per theme.
     /// "automatic / this control is on" — the 🎯 and the toggles.
-    static let tintCyan = dyn(0x12303F, 0xBDE3EE)
-    static let tintCyanLine = dyn(0x2A6B80, 0x6AAABB)
+    static let tintCyan = named("tintCyan")
+    static let tintCyanLine = named("tintCyanLine")
     /// "played / Ignore Intro End" — amber's meaning, as a background wash.
-    static let tintWarn = dyn(0x2A2418, 0xF3D9B0)
-    static let tintWarnLine = dyn(0x6B5A33, 0xBB9C64)
+    static let tintWarn = named("tintWarn")
+    static let tintWarnLine = named("tintWarnLine")
     /// "this is the active column / the row you are on".
-    static let tintSelect = dyn(0x243049, 0xD3D9F7)
-    static let tintSelectText = dyn(0xCFE0FF, 0x214583)
+    static let tintSelect = named("tintSelect")
+    static let tintSelectText = named("tintSelectText")
     /// Log rows: answered vs burned. The row text is `Palette.text`, so these carry it.
-    static let tintGood = dyn(0x121F22, 0xC0E6CA)
-    static let tintBad = dyn(0x2E2412, 0xFFD2CF)
-    static let tintGoodLine = dyn(0x2F5B41, 0x78AC88)
+    static let tintGood = named("tintGood")
+    static let tintBad = named("tintBad")
+    static let tintGoodLine = named("tintGoodLine")
     /// The level bar's fill.
-    static let levelBar = dyn(0x5BD6FF, 0x0190A9)
-
+    static let levelBar = named("levelBar")
     /// Text drawn ON a tint of its OWN hue. Putting `cyan` on `tintCyan` is the natural thing
     /// to write and it does not reach 4.5:1 in either theme (measured 3.66:1 light, and
     /// `red` on `tintBad` only 4.00:1 in dark) — a tint and its accent are by construction
     /// close in hue, so only lightness can separate them and the tint has already spent it
     /// staying distinct from the surface behind it. Same hue, pushed to the legible end.
-    static let cyanOnTint = dyn(0x00E2FF, 0x00697F)
-    static let amberOnTint = dyn(0xFFCD00, 0x815700)
-    static let redOnTint = dyn(0xFF495B, 0xC20024)
-
+    static let cyanOnTint = named("cyanOnTint")
+    static let amberOnTint = named("amberOnTint")
+    static let redOnTint = named("redOnTint")
     // waveform envelope: inside vs outside the intro, 14.5 ΔL* apart in dark, 14.4 in light
-    static let waveOut = dyn(0x3E4A61, 0xA2ACB9)
-    static let waveIn = dyn(0x5C6D8C, 0x7C8693)
-
+    static let waveOut = named("waveOut")
+    static let waveIn = named("waveIn")
     /// One definition, two themes. A dynamic `NSColor` is resolved by AppKit against whatever
     /// appearance is current, so nothing in the app has to know which theme is on and no view
     /// needs to observe the setting to repaint.
@@ -203,8 +198,17 @@ enum Palette {
     ///
     /// The colours come out of `Palette.audit` by name, not from a second copy of the hex. §15's
     /// rule: a list that names its subjects literally stops covering the subject that arrives
-    /// later — and `--palettetest` already asserts `audit` names every value, so wiring the
-    /// swatch to it means a seventh colour cannot ship with a stale grey square.
+    /// later, so wiring the swatch to `audit` means a seventh colour cannot ship with a stale
+    /// square.
+    ///
+    /// **This comment used to claim "`--palettetest` already asserts `audit` names every value",
+    /// and that assertion did not exist** — the swatch was wired on the strength of a guarantee
+    /// nobody had written. What covers the tag ramps is the INDEXED loop (section 9 walking
+    /// `tagFill\(i)` for `i` in `0..<tagSlots`, plus `TagColor.allCases.count == tagSlots`),
+    /// which does work: adding a seventh slot missing from `audit` produces five named failures.
+    /// It is the NAMED scalars — `amber`, `green`, `accent` — that had no enumeration to loop
+    /// and therefore no coverage at all, which is why they now go through `Palette.named` and
+    /// read out of `audit` directly instead of being checked against it.
     static func tagSwatch(_ slot: Int) -> NSImage {
         let i = max(0, slot) % tagSlots
         let dark = NSApp?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
@@ -234,9 +238,40 @@ enum Palette {
 
     private static var swatchCache: [String: NSImage] = [:]
 
+    /// A missing name resolves to SCREAMING MAGENTA, not to a plausible grey.
+    ///
+    /// Everything in this file is now named out of `audit`, so a typo in one of those strings is
+    /// the one way a colour can go wrong — and `0x808080` is a value this palette could
+    /// plausibly have wanted, which makes it the worst possible sentinel. Magenta cannot be
+    /// mistaken for a decision. `--palettetest` asserts no real entry carries it.
+    static let missingColour: UInt32 = 0xFF00FF
+
     static func auditHex(_ name: String, dark: Bool) -> UInt32 {
-        guard let e = audit.first(where: { $0.0 == name }) else { return 0x808080 }
+        guard let e = audit.first(where: { $0.0 == name }) else { return missingColour }
         return dark ? e.1 : e.2
+    }
+
+    /// A named colour, resolved from `audit` — which is now THE definition rather than a copy.
+    ///
+    /// **Third occurrence of the `Palette.audit` lesson (§6d, §12), and the first fix that
+    /// removes the second copy instead of adding a check over it.** `audit` used to be a
+    /// hand-maintained hex table running parallel to 38 `dyn(...)` literals with nothing tying
+    /// the two together — and `PaletteCheck` reads only `audit`, `auditHex`, `tagSlots` and
+    /// `tagSwatch`, never a real colour. So all 187 assertions measured the table while the app
+    /// rendered the literals.
+    ///
+    /// Measured, not argued: setting `amber = dyn(0x2FD17A, 0x1F5534)` — making it byte-identical
+    /// to `green`, i.e. §6d's "the intro-end stop is not armed" rendered in the colour that means
+    /// "a human answered correctly", with the deutan separation §6d measured silently gone — left
+    /// the suite at **187 ผ่าน / 0 ตก with byte-identical output.**
+    ///
+    /// The 38 were verified equal to their audit entries before being rewritten to go through
+    /// here, so this introduced no colour change. What is left outside it is deliberate:
+    /// `outline`, `onHeader` and `onHeaderWarn` must NOT flip with the theme (§6d — that bar is
+    /// dark red in both), and the tag ramps are arrays whose completeness `--palettetest`
+    /// already covers by index.
+    static func named(_ n: String) -> Color {
+        dyn(auditHex(n, dark: true), auditHex(n, dark: false))
     }
 
     static let audit: [(String, UInt32, UInt32)] = [
@@ -587,9 +622,16 @@ struct WaveformView: View {
         // is exactly song 102's real state (introStart == introEnd).
         let fm = model.focusMarker
         marker(ctx, x1, Palette.cyan, h, "IN", top: true, focused: fm == .introStart)
-        // `ignoreEnd` fades OUT because the marker is inert — but `marker` now halves an
-        // unfocused one as well, and 0.3 x 0.5 is invisible. 0.55 keeps both cues legible.
-        marker(ctx, x2, c.ignoreEnd ? Palette.cyan.opacity(0.55) : Palette.cyan, h, "OUT",
+        // `ignoreEnd` fades OUT because the marker is inert. The number has to be read together
+        // with `marker`, which halves an UNFOCUSED marker — and `Color.opacity` MULTIPLIES the
+        // opacity it already carries rather than replacing it. So the value here is a factor,
+        // not a result: 0.6 composites to 0.6 focused and 0.6 x 0.5 = 0.30 unfocused, which is
+        // the value this fade had before the focus emphasis existed.
+        //
+        // The previous 0.55 was chosen by the same reasoning and got the arithmetic backwards:
+        // it landed at 0.275 unfocused, i.e. FAINTER than the 0.30 its own comment said it was
+        // rescuing. Whatever this becomes, work out both composites before changing it.
+        marker(ctx, x2, c.ignoreEnd ? Palette.cyan.opacity(0.6) : Palette.cyan, h, "OUT",
                top: false, focused: fm == .introEnd)
         if c.hook > 0 {
             marker(ctx, timeToX(c.hook, w), Palette.hook, h, "HOOK", top: true, dashed: true,

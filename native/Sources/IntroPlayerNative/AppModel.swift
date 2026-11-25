@@ -317,10 +317,25 @@ final class AppModel: ObservableObject {
     /// the search in one press from inside its own field while still meaning plain "blur" in
     /// every other field (the note field and the search row can be open at the same time).
     var searchFieldFocused = false
+    /// A ONE-SHOT, consumed by the search row's `.onAppear`. The autofocus belongs to the ACT of
+    /// opening the row, not to the row appearing — and those are not the same event.
+    ///
+    /// `ContentView` renders `if model.showLog { LogPanel() } else { SongListView() }`, and the
+    /// two branches of a `ViewBuilder` `if` have separate view identities, so toggling the log
+    /// **remounts the whole song list** and refires every `onAppear` inside it. With the focus
+    /// unconditional there, `/` → type → `Return` (which drops focus on purpose) → `L` → `L`
+    /// put first responder back in the search field with nobody having touched it, which turns
+    /// the key monitor's `typing` branch on: `S`, `R`, `T`, `E`, `I`/`O`/`H`, `M`, `L`, `Tab`,
+    /// `Return` and the arrows all stop working, with the row looking exactly as it did. §12
+    /// records that a dead shortcut which cannot be told from a working one is the defect, and
+    /// "search a song, open the log to check the running order, close it" is an ordinary
+    /// sequence in the middle of a taping.
+    var searchWantsFocus = false
 
     func openSearch() {
         guard !searching else { return }
         searching = true
+        searchWantsFocus = true
         objectWillChange.send()
     }
 
@@ -533,6 +548,18 @@ final class AppModel: ObservableObject {
         coverCache.removeAll()
         tagFilter = ""
         closeSearch()
+        // Both describe the folder being LEFT. `IncomingRound.id` is round name + export time,
+        // and round names repeat across libraries (`EP01` exists in both), so a stale list makes
+        // the strip and the picker's 📥 answer for the wrong folder: a round genuinely waiting
+        // here stays invisible until the next window activation, which is §8e's measured
+        // "เห็น 1 จาก 3 — หาย 2 ชุด" reached through a different door. `detectIncoming` below
+        // refills them from this library.
+        //
+        // Nothing can be written across libraries by this — `openImport` re-reads
+        // `RoundPackage.url(forRound:)` under the NEW `AppPaths.root` — so the cost is what is
+        // on screen, not the questions. Same family as every per-path cache above it.
+        incomingRounds = []
+        dismissedIncoming = []
         store.load()
         logStore.load()
         invalidateStatus()
@@ -544,6 +571,10 @@ final class AppModel: ObservableObject {
         let pls = playlists
         if !pls.contains(currentPlaylist) { currentPlaylist = pls.first ?? "" }
         if let first = songsIn(currentPlaylist).first { select(first) }
+        // Refill from THIS library rather than waiting for the next window activation. A setter
+        // who switches folders to pick up a round that has just been handed to them would
+        // otherwise see nothing until they clicked away and back.
+        detectIncoming()
         // §5c, for the library we just moved INTO. Read after `store.load()` so it is the bytes
         // on disk rather than anything this session has done, and deduplicated by `Snapshot.write`
         // itself if an identical copy is already the newest one.
@@ -852,6 +883,13 @@ final class AppModel: ObservableObject {
         // The drag defers to `commitConfig()` on mouse-up; a key has no mouse-up, so it debounces.
         updateConfig(commit: false) { $0[keyPath: k] = max(0, (($0[keyPath: k] + d) * 100).rounded() / 100) }
         flash(String(format: "%@ %.2fs", focusMarker.label, config()[keyPath: k]))
+        // A HELD key re-arms the debounce on every autorepeat (~30 ms), so on its own the
+        // debounce NEVER fires and `remode` never runs: the node keeps the old Intro End and the
+        // audio stops there while the countdown reads the new value. Commit immediately only
+        // when the node is genuinely about to run out — holding the key far from the boundary
+        // still coalesces into one commit on release, which is the whole point of the debounce.
+        // See `Player.boundRunsOutEarly`.
+        if player.boundRunsOutEarly(config: config()) { commitConfig() }
         scheduleNudgeCommit()
     }
 
@@ -2062,6 +2100,11 @@ final class AppModel: ObservableObject {
     /// is **not** called from `body` — only from `didBecomeActiveNotification` and `onAppear` —
     /// so the file I/O is not on a per-frame path (§15's `manifestLocation` lesson).
     func detectIncoming() {
+        // Prune against EVERY package on disk, not the waiting ones — a reviewed package is by
+        // definition not waiting, so the waiting set would wipe the record on the first sweep.
+        // `Handoff` owns both loops (§8e: the sweep must have one implementation).
+        store.pruneTakenIn(to: Set(Handoff.packagesOnDisk(playlists)
+            .map { Handoff.reviewKey(round: $0.round, pkg: $0.pkg) }))
         let found = Handoff.waitingRounds(playlists, store: store, songsIn: songsIn)
         // Forget wave-offs for items that are no longer waiting, so copying a folder back in
         // later raises the strip again instead of being silently swallowed by a stale dismissal.

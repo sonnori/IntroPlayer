@@ -756,7 +756,20 @@ struct SongListView: View {
             // the field is in the responder chain and is unreliable on macOS — and a search box
             // that opens without focus means the first thing you type goes to the key monitor
             // instead, where letters are shortcuts: `S` resets, `R` reveals on camera.
-            .onAppear { DispatchQueue.main.async { searchFocused = true } }
+            //
+            // Gated on the one-shot, NOT unconditional: toggling the log remounts this whole
+            // pane (`if showLog { LogPanel() } else { SongListView() }` — separate view
+            // identities), so an unconditional focus here stole first responder on every
+            // `L`/`L` and silently killed the transport. See `AppModel.searchWantsFocus`.
+            // The hop is also where the `@Published` write belongs — §6c: never write one
+            // from inside a layout pass.
+            .onAppear {
+                DispatchQueue.main.async {
+                    guard model.searchWantsFocus else { return }
+                    model.searchWantsFocus = false
+                    searchFocused = true
+                }
+            }
             .onDisappear { model.searchFieldFocused = false }
             .onChange(of: searchFocused) { f in model.searchFieldFocused = f }
         }

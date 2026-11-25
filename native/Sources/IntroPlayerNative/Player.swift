@@ -364,6 +364,43 @@ final class Player: ObservableObject {
         if want > scheduledEndFrame + AVAudioFramePosition(0.05 * sr) { play(from: p) }
     }
 
+    /// Will the scheduled segment run out BEFORE the Intro End the config now holds, with the
+    /// playhead close enough for that to be heard?
+    ///
+    /// The window this exists to close. `AppModel.nudgeFocused` writes with
+    /// `updateConfig(commit: false)` and a 350 ms debounce, deliberately: committing per
+    /// keypress calls `remode`, which re-schedules the node and clicks. But `←`/`→` are the one
+    /// pair exempt from the app-wide autorepeat suppression — §11, because 0.01 s per press
+    /// means a held key has to work or the feature does not exist — and autorepeat arrives
+    /// roughly every 30 ms, so a HELD key re-arms that debounce before it can ever fire.
+    /// `remode` therefore never ran: the node stayed bounded at the OLD Intro End, the audio
+    /// stopped there, and the guard strip went on counting down to the new value while the
+    /// button still read Pause. On camera that is indistinguishable from a hang.
+    ///
+    /// **Not a §10 violation** — nothing plays past Intro End, so the core requirement held
+    /// throughout. It is a dropout, and it happened during the exact task the key exists for:
+    /// listening for the cut while moving it.
+    ///
+    /// Read-only by construction. It schedules nothing and changes no state; the caller decides
+    /// whether to commit, and `remode` re-derives everything for itself when it does.
+    func boundRunsOutEarly(config c: SongConfig) -> Bool {
+        // `.free` and `.reveal` are not bounded by Intro End, so nothing can run out early;
+        // `.fading` means the cut has already begun and `remode` would decline anyway.
+        guard isPlaying, !fading, let f = file, mode == .intro else { return false }
+        guard !c.ignoreEnd, c.introEnd > c.introStart else { return false }
+        let sr = f.processingFormat.sampleRate
+        let want = min(f.length, AVAudioFramePosition(min(duration, c.introEnd) * sr))
+        // The same 0.05 s hysteresis `remode` applies, so this can never answer "commit" to a
+        // `remode` that then declines to re-schedule.
+        guard want > scheduledEndFrame + AVAudioFramePosition(0.05 * sr) else { return false }
+        // Only once the playhead is actually approaching the stale bound. Holding the key with
+        // twenty seconds still to run must keep coalescing into ONE commit on release, or this
+        // trades silence for a re-schedule every 350 ms. The lead is the fade length because
+        // the cut begins at `introEnd - fadeSec` — deciding later than that is deciding too
+        // late to be silent about it.
+        return livePosition() + Player.fadeSec >= Double(scheduledEndFrame) / sr
+    }
+
     func pause() {
         // Read the playhead BEFORE stopping: playerTime(forNodeTime:) returns nil the moment the
         // node stops, so livePosition() would fall through to the stale `pausedAt` and assign it

@@ -304,6 +304,26 @@ enum DiffField: Hashable {
         case .tags: return "แท็ก"
         }
     }
+    /// The fields that merge ADDITIVELY (§8e): `plan` raises one of these rows only when the
+    /// sender has something this machine does not, so unlike a marker row it can never be our
+    /// own on-site edit looking back at us.
+    ///
+    /// That asymmetry is load-bearing in `isWaiting`. `alreadyTakenIn` compares `base`, and
+    /// `base` is a `SongBase` — the five marker fields — so it cannot see these fields at all
+    /// and must not be allowed to veto them. Before this, a handover whose only change was a
+    /// note or a tag matched on every marker, `alreadyTakenIn` answered "already taken in", and
+    /// the round raised no strip and no 📥.
+    ///
+    /// The same set as `isProse` today, and deliberately a SEPARATE property: that one is about
+    /// how a row is laid out, this one about whether the row can be ignored. A field that is
+    /// additive but fits in a value column would have to split them, and discovering that by
+    /// watching a strip quietly stop appearing is not an acceptable way to find out.
+    var isAdditive: Bool {
+        switch self {
+        case .marker: return false
+        case .note, .tags: return true
+        }
+    }
     /// Rendered on its own lines rather than in a value column — a sentence or a tag list
     /// cannot be compared in ~160 pt, and reading both sides IS the decision the row exists for.
     var isProse: Bool {
@@ -435,10 +455,73 @@ enum Handoff {
     }
 
     /// Is this package something the round still has to take in? The sweep's per-round decision.
+    ///
+    /// Two independent tests, and they are complementary rather than redundant:
+    ///
+    /// - `store.takenIn` — a human has reviewed THIS package (this folder, this export time).
+    ///   The authoritative answer, and the only one that can see a review whose outcome was
+    ///   "no": a declined row leaves the local value and `base` agreeing with each other and
+    ///   both differing from the sender, so no comparison can tell it from an untouched round.
+    ///   It is also the only one that notices a handover carrying nothing but a `note` or a
+    ///   `tag`, because `SongBase` holds the five marker fields and nothing else.
+    /// - `alreadyTakenIn` — the values already match what was signed off, so there is nothing to
+    ///   take. This covers the round a setter exported and still holds locally, which was never
+    ///   "reviewed" here and must not raise a strip either.
     static func isWaiting(_ pkg: RoundPackage, round: String, paths: [String], store: Store) -> Bool {
         let p = plan(pkg, round: round, paths: paths, store: store)
         guard !(p.fresh.isEmpty && p.rows.isEmpty) else { return false }
+        guard !store.takenIn.contains(reviewKey(round: round, pkg: pkg)) else { return false }
+        // An additive row is unambiguous — see `DiffField.isAdditive`. `alreadyTakenIn` compares
+        // `base`, which holds the five marker fields only, so it cannot see these and gets no
+        // vote on them. Checked BEFORE it, or it would veto the whole package on the strength of
+        // the markers agreeing.
+        if p.rows.contains(where: { $0.field.isAdditive }) { return true }
         return !alreadyTakenIn(pkg, round: round, paths: paths, store: store)
+    }
+
+    /// The key `Store.takenIn` records a review under: the folder, the export time, **and a
+    /// fingerprint of the content**.
+    ///
+    /// Deliberately NOT `IncomingRound.id`, which is folder + `at` only. That id is right for
+    /// the "ไว้ก่อน" dismissal — §8e wants a re-export to reappear even if nothing changed,
+    /// because a wave-off is a "not now" and not a decision. A REVIEW is a decision, so it has
+    /// to be keyed on what was decided about: with `at` alone, a `round.json` edited by hand
+    /// while keeping its timestamp would have been swallowed as already-reviewed and the
+    /// operator would never have seen it. Including the content makes the record mean exactly
+    /// "I have seen these values", which is the only claim it is entitled to make.
+    ///
+    /// Canonical before hashing — sorted keys, fixed field order, two decimals on the markers
+    /// the way `Store.round2` stores them — so the same package hashes the same on both
+    /// machines and across launches.
+    static func reviewKey(round: String, pkg: RoundPackage) -> String {
+        var s = ""
+        for name in pkg.songs.keys.sorted() {
+            guard let e = pkg.songs[name] else { continue }
+            s += name
+            s += String(format: "|%.2f|%.2f|%.2f|%.2f|%@",
+                        e.b.introStart, e.b.introEnd, e.b.hook, e.b.trimDb,
+                        e.b.ignoreEnd ? "1" : "0")
+            s += "|" + e.note + "|" + e.tags.sorted().joined(separator: ",") + "\n"
+        }
+        return "\(round)\u{1}\(pkg.at)\u{1}\(String(Store.fnv1a(s), radix: 36))"
+    }
+
+    /// Every round holding a `round.json`, read once and unfiltered.
+    ///
+    /// Separate from `waitingRounds` because the prune set for `Store.takenIn` is "every package
+    /// on disk", which is the complement of what `waitingRounds` returns. It lives HERE and not
+    /// in `AppModel` on purpose: §8e's defect was never the per-round decision, it was how many
+    /// rounds the caller asked about, so a second loop over `playlists` written in the UI layer
+    /// is exactly the shape that regressed — and a test of the decision alone would pass either
+    /// way. One loop, one place, injected `read`.
+    static func packagesOnDisk(
+        _ rounds: [String],
+        read: (String) -> RoundPackage? = { RoundPackage.read(RoundPackage.url(forRound: $0)) }
+    ) -> [IncomingRound] {
+        rounds.compactMap { round in
+            guard let pkg = read(round) else { return nil }
+            return IncomingRound(round: round, pkg: pkg)
+        }
     }
 
     /// Every round holding a `round.json` that has not been taken in yet.
@@ -456,11 +539,10 @@ enum Handoff {
         songsIn: (String) -> [String],
         read: (String) -> RoundPackage? = { RoundPackage.read(RoundPackage.url(forRound: $0)) }
     ) -> [IncomingRound] {
-        rounds.compactMap { round in
-            guard let pkg = read(round),
-                  isWaiting(pkg, round: round, paths: songsIn(round), store: store)
-            else { return nil }
-            return IncomingRound(round: round, pkg: pkg)
+        // Built on `packagesOnDisk` rather than walking `rounds` again, so the sweep this
+        // function exists to guarantee has exactly one implementation.
+        packagesOnDisk(rounds, read: read).filter {
+            isWaiting($0.pkg, round: $0.round, paths: songsIn($0.round), store: store)
         }
     }
 
@@ -576,6 +658,18 @@ enum Handoff {
         // lands — `Store.setTagColor` is unaffected by that, but `tagColors` reads `songs`, and
         // ordering it the other way would have the cache rebuilt from a library missing the tag.
         store.mergeTagColors(plan.package.tagColors)
+        // The review happened, whatever its outcome. HERE and not in `AppModel.applyImport`,
+        // because this is the choke point both import paths already go through — the no-choices
+        // path in `openImport` and the sheet — so a third caller cannot forget it, and
+        // `--incomingtest` (which drives `apply` directly) can actually see it.
+        //
+        // Needed because neither of the two comparisons can see a review on its own:
+        // DECLINING every row leaves the local value and `base` agreeing while both still
+        // differ from the sender, so `alreadyTakenIn` is false forever and the strip returned on
+        // every launch — with the sheet pre-accepting the rows that had just been turned down.
+        // And `SongBase` holds the five marker fields, so a handover carrying only a `note` or a
+        // `tag` matched on every song and raised nothing at all. See `Store.takenIn`.
+        store.markTakenIn(Handoff.reviewKey(round: plan.round, pkg: plan.package))
         store.saveNow()
     }
 }

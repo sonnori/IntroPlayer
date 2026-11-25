@@ -42,127 +42,127 @@ struct IntroPlayerApp: App {
         // headless mode for verifying the ported analysis against the web version
         if CommandLine.arguments.contains("--analyse") {
             Diagnostics.analyseAll()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         // Read-only. Is the intro auto-gain actually levelling what the audience hears?
         if CommandLine.arguments.contains("--loudtest") {
             Diagnostics.loudTest()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--rescantest") {
             MainActor.assumeIsolated { Diagnostics.rescanTest() }
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--resetflow") {
             MainActor.assumeIsolated { Diagnostics.resetFlow() }
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--resettest") {
             Diagnostics.resetTest()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--playtest") {
             Diagnostics.playTest()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--handoff") {
             Diagnostics.handoffTest()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--titles") {
             Diagnostics.titles()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--preflight") {
             Diagnostics.preflightReport()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--takes") {
             Diagnostics.takesReport()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--remodetest") {
             Diagnostics.remodeTest()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--artwork") {
             Diagnostics.artworkReport()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--guessflow") {
             Diagnostics.guessFlow()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--snapshot") {
             Diagnostics.snapshotReport()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--guesstest") {
             Diagnostics.guessSafety()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--autodetect") {
             Diagnostics.autoDetectReport()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--palettetest") {
             Diagnostics.paletteTest()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--grabtest") {
             Diagnostics.grabTest()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--revealtest") {
             Diagnostics.revealTest()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--updatecheck") {
             Diagnostics.updateCheck()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--updatestage") {
             Diagnostics.updateStage()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         // Read-only: every Store it builds is `init(rawForTest:)`, which cannot write.
         if CommandLine.arguments.contains("--notetest") {
             Diagnostics.noteTest()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         // Read-only: temp fixtures only, and it never reads or writes the stored data root.
         if CommandLine.arguments.contains("--roottest") {
             Diagnostics.rootTest()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         // Read-only, same as --notetest.
         if CommandLine.arguments.contains("--focustest") {
             Diagnostics.focusTest()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--incomingtest") {
             Diagnostics.incomingTest()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--filtertest") {
             Diagnostics.filterTest()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--tagtest") {
             Diagnostics.tagTest()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--timefmt") {
             Diagnostics.timeFmt()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--overview") {
             Diagnostics.overviewTest()
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
         if let i = CommandLine.arguments.firstIndex(of: "--columns") {
             Diagnostics.columns(match: CommandLine.arguments.count > i + 1 ? CommandLine.arguments[i + 1] : "")
-            exit(0)
+            exit(Diagnostics.exitCode)
         }
     }
 

@@ -210,12 +210,43 @@ extension Diagnostics {
             assertThat("green vs red", g >= 10.0, String(format: "ΔE %.1f", g))
             assertThat("greenText vs red", gt >= 20.0, String(format: "ΔE %.1f", gt))
 
-            // 5. amber is the armed/disarmed carrier and must not collapse onto the transport.
-            print("  5) amber (= ไม่หยุดเอง) ต้องไม่กลืนกับ accent / purple")
+            // 5. amber is the armed/disarmed carrier and must not collapse onto anything else
+            //    that carries a meaning. §6d gives each hue exactly one, and amber's is "the
+            //    intro-end stop is not armed".
+            print("  5) amber (= ไม่หยุดเอง) ต้องไม่กลืนกับสีที่มีความหมายอื่น")
             for n in ["accent", "purple"] {
                 let d = ColorMath.deutanDeltaE(c("amber", dark: dark), c(n, dark: dark))
                 assertThat("amber vs \(n)", d >= 40.0, String(format: "ΔE %.1f", d))
             }
+            // green and red were MISSING from this loop, and green is the pair that matters
+            // most: it means "a human answered correctly" and amber means "the whole song is
+            // about to play on camera". Found by negative control — setting amber's audit entry
+            // to green's hex left the suite at 191 ผ่าน / 0 ตก, so the one rule §6d calls
+            // load-bearing was measured by nothing at all.
+            let aVsGreen = ColorMath.deutanDeltaE(c("amber", dark: dark), c("green", dark: dark))
+            assertThat("amber vs green", aVsGreen >= 10.0, String(format: "ΔE %.1f", aVsGreen))
+            // amber vs red: 20.6 dark, **6.1 light** — to a deutan viewer, the same colour on a
+            // white ground. MEASURED, and pinned rather than fixed, for the same reason §6d pins
+            // accent-vs-purple: separating it means moving a shipping status colour, and this
+            // palette's light-theme lightness budget is already spent (§6d — a white ground
+            // forces every accent down to roughly L* 46, which is what flattens the spread).
+            //
+            // Survivable, and the reasons are specific rather than hopeful. Light is the
+            // SETTER's theme at a desk (§6d: dark is the operator's, and an unreadable `theme`
+            // value falls back to dark for that reason), so neither state is being read under
+            // time pressure there. Both carry a word — the guard strip says "⚠ ไม่หยุดเอง" and
+            // §6d's rule is that amber plus a word is the carrier, never the hue alone. And the
+            // save-failure bar is NOT this red: it sits on `header`, which is dark in both
+            // themes with fixed-light text on it.
+            //
+            // So: amber and red may never be the sole difference between two things in the light
+            // theme. If this ever needs fixing rather than pinning, it is a decision about the
+            // show's colours, not a test threshold to nudge.
+            let aVsRed = ColorMath.deutanDeltaE(c("amber", dark: dark), c("red", dark: dark))
+            assertThat(dark ? "amber vs red" : "amber vs red (ธีมสว่าง: กลืนกัน ตามที่วัดไว้)",
+                       dark ? aVsRed >= 15.0 : aVsRed < 10.0,
+                       String(format: "ΔE %.1f%@", aVsRed,
+                              dark ? "" : " — ห้ามใช้เหลือง/แดงเป็นตัวแยกสถานะเดี่ยว ๆ"))
 
             // 6. PINNED, not fixed. accent vs purple are the same colour to a deutan viewer in
             //    both themes. A future "improvement" that separated them would quietly invite
@@ -349,13 +380,16 @@ extension Diagnostics {
         }
         // The fallback must be reachable ONLY by asking for a name that does not exist. If a
         // real slot can reach it, a colour ships as a grey square.
-        assertThat("ชื่อที่ไม่มีจริง → คืนค่าเทาสำรอง",
-                   Palette.auditHex("tagFillไม่มีจริง", dark: true) == 0x808080, "")
+        assertThat("ชื่อที่ไม่มีจริง → คืนค่าสำรอง (ม่วงแปร๋น ไม่ใช่เทา — ดู Palette.missingColour)",
+                   Palette.auditHex("tagFillไม่มีจริง", dark: true) == Palette.missingColour, "")
         for i in 0..<Palette.tagSlots {
             let nm = TagColor(rawValue: i)?.label ?? "\(i)"
+            // `Palette.missingColour`, NOT a literal: the sentinel moved from 0x808080 to
+            // magenta, and a test spelling the old value would have passed for free on exactly
+            // the colour that had gone missing.
             assertThat("\(nm) มีอยู่ใน audit จริง ไม่ได้ตกไปใช้ค่าสำรอง",
-                       Palette.auditHex("tagFill\(i)", dark: true) != 0x808080
-                       && Palette.auditHex("tagInk\(i)", dark: true) != 0x808080,
+                       Palette.auditHex("tagFill\(i)", dark: true) != Palette.missingColour
+                       && Palette.auditHex("tagInk\(i)", dark: true) != Palette.missingColour,
                        String(format: "#%06X", Palette.auditHex("tagFill\(i)", dark: true)))
         }
         // Distinct swatches: if two slots drew the same square the menu would be lying about
@@ -365,7 +399,44 @@ extension Diagnostics {
         assertThat("ทั้ง \(Palette.tagSlots) ช่องวาดคนละสี", seen.count == Palette.tagSlots,
                    "\(seen.count) สีที่ต่างกัน")
 
+        print("\n10) audit คือตัวสีจริง ไม่ใช่สำเนาของมัน")
+        // The whole suite reads `audit`, `auditHex`, `tagSlots` and `tagSwatch` and NEVER a real
+        // colour — so while `audit` was a table running parallel to 38 `dyn(...)` literals, all
+        // 187 assertions measured the table and nothing measured what the app renders. Injecting
+        // `amber = dyn(0x2FD17A, 0x1F5534)` — amber byte-identical to green, i.e. §6d's "the
+        // intro-end stop is not armed" in the colour that means "a human answered correctly" —
+        // left this suite at 187/0 with byte-identical output.
+        //
+        // The named colours now resolve THROUGH `audit` (`Palette.named`), so that drift cannot
+        // exist. What this section guards is the new structure's own failure mode: a typo in one
+        // of those name strings.
+        assertThat("ชื่อใน audit ไม่ซ้ำกัน (ชื่อซ้ำ = ตัวที่สองเข้าไม่ถึงตลอดกาล)",
+                   Set(Palette.audit.map(\.0)).count == Palette.audit.count,
+                   "\(Palette.audit.count) รายการ / \(Set(Palette.audit.map(\.0)).count) ชื่อ")
+        assertThat("ชื่อที่ไม่มีจริง → ได้สีม่วงแปร๋น ไม่ใช่เทาที่ดูเหมือนตั้งใจ",
+                   Palette.auditHex("__ไม่มีสีนี้__", dark: true) == Palette.missingColour
+                   && Palette.auditHex("__ไม่มีสีนี้__", dark: false) == Palette.missingColour,
+                   String(format: "#%06X", Palette.auditHex("__ไม่มีสีนี้__", dark: true)))
+        let clashes = Palette.audit.filter {
+            $0.1 == Palette.missingColour || $0.2 == Palette.missingColour
+        }
+        assertThat("ไม่มีสีจริงไหนใช้ค่า sentinel (ไม่งั้นแยก \"หาย\" กับ \"ตั้งใจ\" ไม่ออก)",
+                   clashes.isEmpty, clashes.map(\.0).joined(separator: ", "))
+        // Every name the app asks for by hand must be in the table. Listed literally because
+        // there is no way to enumerate the call sites — and §15's rule says a literal list stops
+        // covering what arrives later, so this is a floor and not a ceiling: it is here to catch
+        // a RENAME of something already in use, which is the realistic accident.
+        let mustExist = ["bg", "panel", "panel2", "panel3", "float", "hair", "line", "lineStrong",
+                         "text", "muted", "dim", "ink", "accent", "cyan", "green", "greenText",
+                         "red", "amber", "purple", "hook", "onsite", "header", "outline",
+                         "onHeader", "onHeaderWarn", "tintCyan", "tintWarn", "tintSelect",
+                         "tintGood", "tintBad", "levelBar", "cyanOnTint", "amberOnTint",
+                         "redOnTint", "waveOut"]
+        let missing = mustExist.filter { n in !Palette.audit.contains { $0.0 == n } }
+        assertThat("สีที่โค้ดเรียกด้วยชื่อ มีใน audit ครบ \(mustExist.count) ค่า",
+                   missing.isEmpty, missing.joined(separator: ", "))
+
         print("\nผ่าน \(pass)  ตก \(fail)")
-        print(fail == 0 ? "✓ ผ่าน" : "✗ ไม่ผ่าน")
+        Diagnostics.verdict(fail == 0, "✓ ผ่าน", "✗ ไม่ผ่าน")
     }
 }

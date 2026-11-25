@@ -363,6 +363,32 @@ final class Store {
     /// is a number that did NOT appear, which is not something an operator can check.
     var lastRanVersion = ""
 
+    /// Handover packages a human has already dealt with, keyed exactly as the strip keys them
+    /// (`IncomingRound.id` = round + the package's export time), so a sender who RE-exports is a
+    /// different item and asks again.
+    ///
+    /// **This is the one piece of handover state that cannot be derived, and the only reason it
+    /// is stored.** §8e derives everything it can — `onsiteEdits` from `base`, the tag registry
+    /// from use — because a stored flag goes stale. Reviewing a package does not reduce to a
+    /// comparison, for two measured reasons:
+    ///
+    /// - `alreadyTakenIn` asks `base == the package's markers`, and `SongBase` holds the five
+    ///   marker fields only. So a handover whose ONLY change is a `note` or a `tag` matched on
+    ///   every song, reported "already taken in", and raised no strip and no 📥 — the operator
+    ///   never saw the field §8g exists to carry, while the setter watched the file land on disk
+    ///   and assumed it had arrived.
+    /// - DECLINING a row is a legitimate review outcome that leaves no trace in the data:
+    ///   `apply` stamps `base` from the RESULT (correctly — §8e: stamp it from the sender and
+    ///   "แก้ที่กอง" means nothing), so the local value and `base` agree while both still differ
+    ///   from the sender. `base == e.b` is therefore false forever, the strip returned on every
+    ///   launch and activation, and the sheet pre-accepts every row — so the obvious button
+    ///   accepted the thing that had been deliberately declined.
+    ///
+    /// Pruned to packages still on disk by `AppModel.detectIncoming`, the same way
+    /// `dismissedIncoming` is, which also bounds it to roughly the number of round folders. The
+    /// 64 cap only guards a hand-edited file.
+    var takenIn: Set<String> = []
+
     /// A store that can never write. Set only by `init(rawForTest:)`.
     ///
     /// Not test scaffolding — a safety property. The headless checks run in the operator's own
@@ -425,7 +451,20 @@ final class Store {
         dismissedUpdate = String(((s["dismissedUpdate"] as? String) ?? "").prefix(24))
         dismissedSchema = (s["dismissedSchema"] as? Int) ?? 0
         lastRanVersion = String(((s["lastRanVersion"] as? String) ?? "").prefix(24))
+        // Per entry, not as a whole-array cast: §12 records `resetAt` decoded with a
+        // whole-dictionary cast, where one bad value failed the lot and `writeSettings` then
+        // ERASED every reset stamp in the file. Same shape, same fix. Each id is bounded
+        // because it arrives from a file another machine wrote.
+        takenIn = Set(((s["takenIn"] as? [Any]) ?? [])
+            .compactMap { $0 as? String }
+            .filter { !$0.isEmpty }
+            .map { String($0.prefix(160)) }
+            .prefix(Store.takenInMax))
     }
+
+    /// A readability/abuse bound on a hand-editable list, not a design limit — `detectIncoming`
+    /// prunes to packages still on disk, which is what actually keeps this small.
+    static let takenInMax = 64
 
     /// Upper bound for any marker on the way IN, equal to `AppModel.maxTime`.
     ///
@@ -613,6 +652,20 @@ final class Store {
     /// places" stays a property you can check by reading this file rather than by remembering.
     func clearTagCaches() { tagCache = nil; tagColorCache = nil }
 
+    /// FNV-1a over a string's UTF-8. **Never `hashValue`**, which Swift seeds per process — the
+    /// defect `tagsInUse` recorded once, where a tag's surviving spelling changed at random
+    /// between launches, and §12's rule that a check passing by luck is worse than no check.
+    ///
+    /// One copy, two callers: the tag-colour slot (where the answer must agree across machines
+    /// with nothing travelling in `round.json`) and `Handoff.reviewKey` (where it must agree
+    /// across launches of the same machine, since it is written to `config.json`). Both need a
+    /// hash that is a pure function of the bytes and of nothing else.
+    static func fnv1a(_ s: String) -> UInt64 {
+        var h: UInt64 = 0xcbf2_9ce4_8422_2325
+        for b in s.utf8 { h = (h ^ UInt64(b)) &* 0x1000_0000_01b3 }
+        return h
+    }
+
     /// Which colour slot each tag gets (§8g).
     ///
     /// From a HASH of the word, never from its position in `tagsInUse`: that list is ordered by
@@ -647,9 +700,7 @@ final class Store {
             taken[s] = true
         }
         for key in keys.sorted() where out[key] == nil {
-            var h: UInt64 = 0xcbf2_9ce4_8422_2325
-            for b in key.utf8 { h = (h ^ UInt64(b)) &* 0x1000_0000_01b3 }
-            var slot = Int(h % UInt64(n)), steps = 0
+            var slot = Int(Store.fnv1a(key) % UInt64(n)), steps = 0
             while taken[slot] && steps < n { slot = (slot + 1) % n; steps += 1 }
             taken[slot] = true
             out[key] = slot
@@ -844,7 +895,37 @@ final class Store {
         if !dismissedUpdate.isEmpty { s["dismissedUpdate"] = dismissedUpdate }
         if dismissedSchema > 0 { s["dismissedSchema"] = dismissedSchema }
         s["lastRanVersion"] = AppVersion.short
+        // Sorted, because `config.json` is a file people read and hand-edit and an unordered
+        // dump would churn the diff on every save. Absent when empty, like `setterName`.
+        if takenIn.isEmpty {
+            if s["takenIn"] != nil { s.removeValue(forKey: "takenIn") }
+        } else {
+            s["takenIn"] = takenIn.sorted()
+        }
         raw["_settings"] = s
+    }
+
+    /// Record that a human has reviewed this handover package. Idempotent, so the import paths
+    /// can call it without checking.
+    func markTakenIn(_ id: String) {
+        guard !id.isEmpty, !takenIn.contains(id) else { return }
+        takenIn.insert(id)
+        if takenIn.count > Store.takenInMax {
+            takenIn = Set(takenIn.sorted().suffix(Store.takenInMax))
+        }
+        settingsChanged()
+    }
+
+    /// Forget packages that are no longer on disk, so a folder copied back in later asks again
+    /// rather than being swallowed by a stale record — §8e's rule for `dismissedIncoming`.
+    ///
+    /// `live` must be EVERY package on disk, not the waiting ones: a package that has been taken
+    /// in is by definition not waiting, so pruning against the waiting set would delete every
+    /// record on the first sweep and put the whole feature back where it started.
+    func pruneTakenIn(to live: Set<String>) {
+        guard !takenIn.isSubset(of: live) else { return }
+        takenIn.formIntersection(live)
+        settingsChanged()
     }
 
     func settingsChanged() { writeSettings(); scheduleSave() }
