@@ -27,6 +27,7 @@ struct HandoverPanel: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(PressStyle()).foregroundStyle(Palette.muted)
+                .accessibilityLabel("ปิด")
             }
             .padding(14)
             Divider().overlay(Palette.line)
@@ -239,7 +240,10 @@ struct DiffPanel: View {
                     if !r.field.isProse {
                         Text(r.mine).font(Typo.font(12, mono: true))
                             .foregroundStyle(Palette.muted)
+                        // Reads "mine → theirs" visually; in the VoiceOver order the two
+                        // values are adjacent already, so the arrow is furniture.
                         Text("→").font(Typo.font(11)).foregroundStyle(Palette.muted)
+                            .accessibilityHidden(true)
                         Text(r.theirs).font(Typo.font(12, .semibold, mono: true))
                             .foregroundStyle(on ? Palette.text : Palette.muted)
                     }
@@ -352,7 +356,7 @@ struct ReceiveBanner: View {
 
     @ViewBuilder private func strip<C: View>(@ViewBuilder _ content: () -> C) -> some View {
         HStack(spacing: 12) {
-            Text("📥").font(Typo.font(14))
+            Text("📥").font(Typo.font(14)).accessibilityHidden(true)
             content()
         }
         .padding(.horizontal, 18).padding(.vertical, 9)

@@ -29,6 +29,19 @@ final class AppModel: ObservableObject {
     /// Three columns need ~780pt of list; below that the layout falls back to one column, exactly
     /// like the web version's max-width:1500px media query.
     @Published var isWide = true
+
+    /// The width of the LEFT pane. **The song list and the log pane share that slot, so they must
+    /// share this number**, and the whole point of it being a function is that they cannot drift.
+    ///
+    /// They were both 780 until the list was widened to 900 on request ("มัน width แคบไป") and
+    /// the log pane was left behind — so `L` moved the centre pane by **120 pt**: the waveform,
+    /// the playhead, every marker, the transport row and ✓ Correct / ✗ Wrong all jumped sideways,
+    /// on a key the operator presses *during a take* to check the running order. §12 records that
+    /// exact class three times over — the transport buttons that slid when playback started (a
+    /// click aimed at Reset could land on Reveal), the conditional focus-hint line, the cover
+    /// frame that appeared and disappeared — and it is the one this project keeps re-learning.
+    /// Two literals in two files is how it came back.
+    static func leftPaneWidth(wide: Bool) -> CGFloat { wide ? 900 : 300 }
     /// Which on-screen button is flashing because its keyboard shortcut just fired.
     @Published var pulseID: String?
     private var pulseTask: Task<Void, Never>?

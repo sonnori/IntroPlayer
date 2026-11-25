@@ -284,6 +284,7 @@ struct AboutPanel: View {
                 }
                 .buttonStyle(PressStyle(corner: 6))
                 .foregroundStyle(Palette.muted)
+                .accessibilityLabel("ปิด")
             }
             .padding(.horizontal, 20).padding(.top, 16).padding(.bottom, 12)
             Divider().overlay(Palette.line)

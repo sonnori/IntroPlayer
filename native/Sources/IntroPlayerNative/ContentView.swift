@@ -153,11 +153,24 @@ struct ContentView: View {
                     .frame(width: logo.size.width, height: logo.size.height)
                     .accessibilityHidden(true)
             }
+            // The words only when there is NO logo. `WindowGroup("RGF Intro Player")` keeps the
+            // native titlebar, which already carries the name 28 pt above this bar — so with the
+            // logo up, this was the app's name three times in two strips (titlebar, logo, text).
+            // A custom bar duplicating the titlebar is the one thing a native-design audit always
+            // catches, and here it also spent ~170 pt of header width that the live chips want.
+            //
+            // Kept as a fallback rather than deleted, because it has two real states: a public
+            // build carries no `brand/` payload (§15), and in fullscreen macOS hides the titlebar
+            // — either way the bar must still say what it is.
+            //
             // `Palette.onHeader`, not `.white`. They are the same value, but this bar is dark
             // red in BOTH themes, so what sits on it must be a FIXED-light role — §6d records
             // the save-failure text measuring 1.2:1 in light because it used a theme-flipping
             // colour here.
-            Text("RGF INTRO PLAYER").font(Typo.font(15, .bold)).foregroundStyle(Palette.onHeader)
+            if ShowLogo.prepared == nil {
+                Text("RGF INTRO PLAYER").font(Typo.font(15, .bold))
+                    .foregroundStyle(Palette.onHeader)
+            }
             Spacer()
             if model.reviewRemaining > 0 {
                 headerChip("ยังต้องตรวจ \(model.reviewRemaining)", Palette.cyan) {
@@ -567,6 +580,7 @@ struct SongListView: View {
                             .frame(width: 38, height: 26)
                             .contentShape(Rectangle())
                     }
+                    .accessibilityLabel("คำสั่งอื่น")
                     .menuStyle(.borderlessButton)
                     .menuIndicator(.hidden)
                     .fixedSize()
@@ -622,7 +636,10 @@ struct SongListView: View {
         // ~40 pt — which is what decides whether a 2-line clamped title still tells two songs
         // apart (§8c). At the `isWide` breakpoint (1900) this leaves the centre pane 660 pt,
         // well clear of the 378 pt that made §12 raise that breakpoint in the first place.
-        .frame(width: model.isWide ? 900 : 300)
+        //
+        // Through `AppModel.leftPaneWidth` because `LogPanel` occupies this same slot and has to
+        // be the same width — see that function for what 120 pt of difference did.
+        .frame(width: AppModel.leftPaneWidth(wide: model.isWide))
         .background(Palette.panel)
         .overlay(alignment: .trailing) { Rectangle().fill(Palette.line).frame(width: 1) }
     }
@@ -712,6 +729,7 @@ struct SongListView: View {
             let other = shown == 0 && !model.search.isEmpty ? model.searchElsewhere() : []
             HStack(spacing: 8) {
                 Text("⌕").font(Typo.font(13, latinOnly: true)).foregroundStyle(Palette.muted)
+                    .accessibilityHidden(true)
                 TextField("ชื่อไฟล์เพลง — Enter เลือกเพลงแรก, Esc ปิด", text: Binding(
                     get: { model.search }, set: { model.setSearch($0) }))
                     .textFieldStyle(.plain)

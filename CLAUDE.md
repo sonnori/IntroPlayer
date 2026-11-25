@@ -593,6 +593,49 @@ These are not style notes — each one was a user-visible defect.
   times a second. `LogEvent.date` is parsed once at load; `status(of:)` is memoised behind
   `invalidateStatus()`; `resetAt` is parsed once into `resetAtCache`.
 
+### Why this is an `HStack` and not `NavigationSplitView` — and a custom header bar
+
+A native-macOS design audit (the `macos-golden-gate-design` skill, from `github/awesome-copilot`)
+finds exactly two structural divergences here. Both are deliberate, and the skill's own rule is
+that a divergence has to carry its reason, so here it is. **Do not "modernise" either without
+reading this.**
+
+What the audit found that we PASS, because it is worth knowing the app is not guessing: zero
+`.material`, zero `NSVisualEffectView`, zero `glassEffect` — nothing in this app is translucent,
+so "hierarchy depends on blur or wallpaper colour" and "stops being coherent with Reduce
+Transparency" are passed *by construction*. The panes are flat `Palette.panel` fills meeting at
+1 pt `Rectangle` hairlines with **no rounded wrapper anywhere structural**: the largest corner
+radius in the project is 10 pt and 65 of the ~97 `RoundedRectangle`s are radius 6 or 7, i.e.
+buttons. The "structural card budget of zero" is met.
+
+**`NavigationSplitView` is wrong for this app**, for reasons that are about the taping and not
+about taste:
+
+- The left pane is a **fixed 900 pt** (§8c, raised from 780 on request). A split view's divider is
+  user-draggable by design — which adds a way to resize the waveform mid-take by brushing the
+  mouse. §12's recurring defect is a control that moves under the cursor; a draggable structural
+  divider is that defect promoted to a feature.
+- The left pane is not a source list. It is **three independent `ScrollView`s side by side**
+  (1xx / 2xx / 3xx, §8c) with their own keyboard navigation (`[` / `]`). `List(selection:)` is one
+  list.
+- The log **replaces** that pane rather than covering the app, which is what let §12 delete the
+  `1`/`2`/`I`/`O`/`H` carve-outs. That swap is the thing `NavigationSplitView` is least willing to
+  do cheaply.
+- `.inspector` is macOS 14. We target **macOS 13** so the folder still runs on the older crew
+  Macs, and the universal build exists for the same reason.
+
+**The header bar stays custom**, because a native toolbar cannot be brick red with the
+programme's logo in it, and that colour belongs to the production rather than to this program
+(§6e). It is also not merely a title banner: it carries live state (`ยังต้องตรวจ n`,
+`✎ แก้ที่กอง n จุด`) and the handover action. What the audit was right about is the part that
+*was* duplication — see §12 for the app name appearing three times in two strips.
+
+> The one thing in the audit this app genuinely has no answer to is its macOS 27 half: Liquid
+> Glass, `backgroundExtensionEffect`, edge-reaching sidebars and concentric corners are all
+> `macOS 26`/`27` API. At a macOS 13 target none of it compiles, and raising the target would
+> strand the crew machines. So the *material* half of that skill is permanently out of scope
+> here; the *structural* half is version-independent and is what was applied.
+
 ---
 
 ## 6d. Type and colour (`Typography.swift`; `Palette` is in `WaveformView.swift`)
@@ -3056,6 +3099,27 @@ the day it does not help.
   rescuing**: `marker` halves an unfocused marker and `Color.opacity` MULTIPLIES, so 0.55 × 0.5
   composited to **0.275** against the 0.30 it replaced. The value there is a factor, not a
   result — work out both composites before changing it.
+- **`L` moved the centre pane sideways by 120 pt.** `SongListView` and `LogPanel` occupy the same
+  slot and were both 780 until 1.6.2 widened the list to 900 on request and left the log pane
+  behind. So pressing `L` — which the operator does *during a take* to check the running order —
+  moved the waveform, the playhead, every marker, the transport row and ✓/✗ 120 pt across
+  (measured at the 1900 breakpoint: the centre pane went 660 ↔ 780). §12 already records that
+  class three times (the transport buttons that slid when playback started, where a click aimed at
+  Reset could land on Reveal; the conditional focus-hint line; the cover frame that appeared and
+  disappeared). **Two literals in two files is how it came back** — `AppModel.leftPaneWidth` is
+  now the one source, so a future divergence requires typing a literal where a function call is,
+  which is §8g's "a visible mistake instead of an invisible one".
+- The app's name was on screen **three times in two strips**: the native titlebar
+  (`WindowGroup("RGF Intro Player")` keeps it), the show's logo, and `Text("RGF INTRO PLAYER")`
+  28 pt below the titlebar — which also spent ~170 pt of header width the live chips want. The
+  words now render only when `ShowLogo.prepared == nil`, which is a real state twice over: a
+  public build carries no `brand/` payload (§15), and macOS hides the titlebar in fullscreen.
+- Symbol-only controls had **one `accessibilityLabel` in the whole app** and 20 `.help(...)`
+  tooltips, which set help text and not a label — so `⋯`, `🎯`, `↺`, the trim `0` and the sheet
+  closes were unnamed to VoiceOver and Full Keyboard Access. Labelled now. The decorative glyphs
+  (`♪` for "no cover", `⌕`, the diff row's `→`, the strip's `📥`) are `accessibilityHidden`
+  instead: **labelling furniture is worse than leaving it**, because it announces decoration as
+  an action.
 
 **Web version:**
 - `selectSong` cleared `env` but **not `sqPrefix`**, which every guard downstream tests

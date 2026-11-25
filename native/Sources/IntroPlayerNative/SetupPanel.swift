@@ -260,6 +260,7 @@ struct SetupPanel: View {
                     .buttonStyle(PressStyle(corner: 6))
                     .foregroundStyle(Palette.amber)
                     .help("คืนค่าที่คนเซ็ตส่งมา")
+                    .accessibilityLabel("คืนค่าที่คนเซ็ตส่งมา")
                 }
             }
             if let f = m.field, let b = c.base, c.onsiteEdits.contains(f) {
@@ -320,6 +321,7 @@ struct SetupPanel: View {
                         }
                     } label: { Text("🎯").frame(width: 38, height: 38).contentShape(Rectangle()) }
                     .buttonStyle(PressStyle())
+                    .accessibilityLabel("ให้โปรแกรมเดาทั้ง 3 จุด")
                     .background(Palette.tintCyan)
                     .overlay(RoundedRectangle(cornerRadius: 7).stroke(Palette.tintCyanLine)
                         .allowsHitTesting(false))
@@ -448,6 +450,7 @@ struct SetupPanel: View {
                     model.updateConfigQuiet { $0.trimDb = 0 }; model.refreshGain()
                 } label: { Text("0").frame(width: 30, height: 26).contentShape(Rectangle()) }
                 .buttonStyle(PressStyle())
+                .accessibilityLabel("ล้างค่า trim กลับเป็น 0 dB")
                 .background(Palette.panel)
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.line))
                 .clipShape(RoundedRectangle(cornerRadius: 6))

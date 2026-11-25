@@ -112,7 +112,10 @@ struct CenterView: View {
             } else {
                 Rectangle().fill(Palette.panel2)
                     .overlay(Text("♪").font(Typo.font(17, latinOnly: true))
-                        .foregroundStyle(Palette.dim.opacity(0.7)))
+                        .foregroundStyle(Palette.dim.opacity(0.7))
+                        // Furniture: it means "no cover art", which the absence of a picture
+                        // already says. Labelling it would announce a decoration as content.
+                        .accessibilityHidden(true))
             }
         }
         .frame(width: 52, height: 52)

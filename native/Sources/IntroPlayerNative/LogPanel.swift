@@ -149,7 +149,10 @@ struct LogPanel: View {
         }
         // Matches the song list it replaces, so the three panes keep their widths and the centre
         // pane does not resize when the log opens mid-taping.
-        .frame(width: model.isWide ? 780 : 300)
+        // The song list's width, not a number of its own: this pane REPLACES that one, so a
+        // different value moves the centre pane every time `L` is pressed. See
+        // `AppModel.leftPaneWidth`.
+        .frame(width: AppModel.leftPaneWidth(wide: model.isWide))
         .frame(maxHeight: .infinity)
         .background(Palette.panel)
         .overlay(alignment: .trailing) {
