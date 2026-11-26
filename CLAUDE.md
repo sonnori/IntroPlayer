@@ -536,6 +536,8 @@ INTROPLAYER_DIAG=1 $BIN --tagtest      # tags: registry, UNION merge, the chosen
 INTROPLAYER_DIAG=1 $BIN --filtertest   # tag filter + filename search narrow the LIST only (§8g)
 INTROPLAYER_DIAG=1 $BIN --incomingtest # receive sweep, note/tag-only, declined rows: 50 (§8e)
 INTROPLAYER_DIAG=1 $BIN --focustest    # คลิกที่อื่นแล้วต้องเลิกพิมพ์ — 8 assertions (§8g)
+INTROPLAYER_DIAG=1 $BIN --logotest     # โลโก้: memo ค้างไว้ และ invalidate ได้จริง (§6e)
+INTROPLAYER_DIAG=1 $BIN --foldtest     # พับคอลัมน์: ตารางการตัดสิน 13 ข้อ (§8c)
 INTROPLAYER_DIAG=1 $BIN --roottest     # where the questions live: order, exclusions, .none (§5d)
 INTROPLAYER_DIAG=1 $BIN --updatecheck  # semver compare, feed resolution, blocked URL schemes (§15)
 INTROPLAYER_DIAG=1 $BIN --updatestage  # download + unpack + verify a real release, then delete (§15)
@@ -877,12 +879,32 @@ It also resamples **once at load, to the exact pixel count the logo will occupy*
 44 pt frame to rescale on every draw. `prepared` therefore carries the image and its point size
 together — they cannot be resolved separately without the 1:1 guarantee breaking.
 
-**Loaded once per process**, as a lazy `static let`. `ContentView` is re-initialised on every
-model publish (§6c) and the header re-renders at the player's tick rate, so reading the disk
-from `body` would `stat` 50 times a second — §8f's memoised-cover lesson. The cost is that
-swapping the file needs a relaunch, which `brand/README.txt` says. Dimensions are read from the
-file header *before* decoding and anything over 4096 px a side is refused; a missing, empty or
-corrupt file draws nothing and raises nothing.
+**Loaded once per process**, memoised **including the memo for "looked, and it is not there"**.
+`ContentView` is re-initialised on every model publish (§6c) and the header re-renders at the
+player's tick rate, so reading the disk from `body` would `stat` 50 times a second — §8f's
+memoised-cover lesson. Dimensions are read from the file header *before* decoding and anything
+over 4096 px a side is refused; a missing, empty or corrupt file draws nothing and raises
+nothing.
+
+> **It was a `static let`, which made the memo permanent, and that was a bug on a machine with
+> no library yet.** `Seeding.run` is guarded on `AppPaths.hasRoot`, so on a FIRST run it copies
+> nothing; the header then draws and memoises nil; the operator picks a folder, `switchDataRoot`
+> seeds the logo in — and nothing re-read it, so **the logo did not appear until the app was
+> relaunched**. Reported from the first install on a second machine. `ShowLogo.invalidate()` is
+> called from **`Seeding.run` itself**, when and only when it actually placed a file, so a third
+> caller cannot forget it — the same reason `markTakenIn` lives in `Handoff.apply` (§8e). The
+> blast radius was exactly the first launch on a new crew machine, which is where branding
+> matters most. `--logotest` is the cover; swapping the file by hand still needs a relaunch,
+> which `brand/README.txt` says.
+
+**The wordmark is drawn beside it, always** — `{logo} RGF INTRO PLAYER`, on request, in their own
+`HStack(spacing: 10)` so the pair reads as one lockup against the bar's 14 pt. §12's design audit
+had made the words conditional on there being NO logo, and that reasoning was not wrong, it just
+did not bind: at `App.swift`'s declared `minWidth: 1100`, with both header chips up, both buttons,
+the save state and the logo at its full 90 pt cap, the bar needs **792 pt — 308 pt spare** (the
+real 44 pt logo leaves 354). The words cost 156 pt of that. Measured through `Typo`'s own cascade
+rather than estimated, because the audit's "~170 pt" was the whole case for removing them. The
+titlebar still carries the name too, and the duplication is the owner's call.
 
 > It replaced a hardcoded 9 pt **green** dot with no state behind it — decoration, and a live
 > §6d violation, since green in this app means "a human answered correctly" and nothing else.
@@ -1365,6 +1387,45 @@ column, and a file with no leading digit lands in column 3.
   group headers stacked inline, so a narrower window still works.
 - Titles are clamped to 2 lines with the full name in a `title` tooltip — uniform row heights
   matter more than complete titles when scanning during a take.
+
+### Folding a column (`AppModel.collapsedCols`, `ColumnFold.decide`) — native only
+
+The three columns are `.frame(maxWidth: .infinity)` in an `HStack`, i.e. fixed thirds — 299 pt
+each of the 898 the pane has after its two dividers. Measured on the real round, which is
+**7 / 1 / 1**: two thirds of the pane renders two songs while seven share the other third. A
+folded column becomes a 36 pt rail and `1xx` gets ~826 pt, **2.8×**, which is what decides whether
+two 2-line clamped Thai titles still tell two songs apart.
+
+> A fully prepared taping is presumably nearer 7/7/7 and the gain shrinks. This is worth most on
+> a round that is half-prepared or uses one group.
+
+Six things, each for a reason that is invisible in a screenshot:
+
+- **The fold control is a small glyph at the header's trailing edge, NOT the header strip.** The
+  header sits directly above row 1 and `select()` has **no playing guard** — it calls
+  `player.load(url:)` at once — so a whole-strip toggle would put "reflow every row sideways" one
+  slip above "cut the audio on camera". §12 records that class four times. `‹` measures 5.48 pt at
+  12 pt bold and resolves to `.SFNS-Bold`, not LastResort (§12's glyph lesson: the honest test is
+  which FONT the run lands in, because LastResort has a glyph for every codepoint).
+- **The folded rail is ENTIRELY the unfold button**, which is safe exactly where the header is
+  not: a folded column holds no song rows, so a click in it can only mean one thing.
+- **Folded, not hidden.** The rail still reads `1xx` and `(7)`. §8g measured a view state that
+  hides questions as §8c's "the app can't find my songs", reported from real use once already.
+- **It dies with the process. No `_settings` key** — `tagFilter`'s and `search`'s measured reason.
+  Cleared by `setPlaylist` too: a `2xx` that was empty and folded in the round you are leaving may
+  be the fullest column in the one you are entering.
+- **It is a width, not a filter.** Nothing in it touches `songsIn(_:)`, so the handover, the
+  pre-flight and the `Return`/`Tab` review sweep are untouched. Implementing a fold by dropping
+  rows from the list is the one way this becomes a defect instead of a layout.
+- **Two states are refused rather than left to the UI**: the column holding the selection may not
+  fold (§8g — one guard at the choke point, with `select` unfolding from the other direction, next
+  to the tag-filter and search guards that are there for the same reason), and the last expanded
+  column may not fold. Unfolding is never refused: it can only reveal.
+
+`ColumnFold.decide` is pure, which is the house pattern for a decision no headless test can drive
+— `MarkerGrab.decide` (§11) and `FocusRelease.shouldRelease` (§8g). `--foldtest` proves the table
+(13 assertions) and its negative control, deleting the selection guard, fails exactly the three
+assertions that are about it. What no check here can establish is that the UI calls it; see §13.
 
 ### Why paths, not filenames
 Config keys had to move from bare filename to relative path. If two rounds contain the same
@@ -2338,6 +2399,7 @@ explicitly. Pause-on-buzz → Space resumes exactly where it stopped, still in `
 | `T` | Toggle Played on current song — **one key from `R`**, see below |
 | `I` / `O` / `H` | Mark introStart / introEnd / hook at playhead — **confirm-on-second-press while playing** |
 | `←` / `→` | Nudge the **focused** marker by 0.01 s (`AppModel.nudgeStep`). Autorepeats — hold to slew |
+| `Shift` + `←` / `→` | The same nudge at **0.1 s** (`nudgeStepCoarse`) — the `±` buttons' own step, i.e. Unity's 10× |
 | `M` | Cycle which marker `←`/`→` nudges |
 | `/` | Open the song search (filename) — `Esc` closes, `Return` takes the first match |
 | `E` | Toggle Ignore Intro End — same two-press rule |
@@ -2350,7 +2412,7 @@ explicitly. Pause-on-buzz → Space resumes exactly where it stopped, still in `
 | `+` / `−` | Zoom waveform in / out (around the playhead) |
 | `0` | Zoom to fit the whole song |
 | `Z` | Zoom to the intro range |
-| `Shift` + `←` / `→` | Pan the view by 25% of the visible span |
+| `⌥` + `←` / `→` | Pan the view by 25% of the visible span (was `Shift`, which the coarse nudge took) |
 
 Handler ignores keystrokes when focus is in an `<input>`, and bails on Cmd/Ctrl/Alt so `Cmd+R`
 reloads instead of firing Reveal.
@@ -2412,10 +2474,28 @@ so a held key cannot thrash the node.
 > §10 violation — nothing played past Intro End — but a dropout during the one task the key
 > exists for. `Player.boundRunsOutEarly` commits immediately *only* when the node is about to run
 > out; holding the key far from the boundary still coalesces into one commit on release, which is
-> what the debounce is for. Note the physics the fix does not change: 0.01 s per press against a
-> playhead advancing 1 s per second means **you cannot outrun the playhead by holding the key** —
-> the marker will be overtaken, and a few re-schedules in that window is the right trade against
-> silence.
+> what the debounce is for.
+>
+> **Superseded, and worth reading before touching either step.** That paragraph used to end "the
+> physics the fix does not change: 0.01 s per press against a playhead advancing 1 s per second
+> means you cannot outrun the playhead by holding the key". `Shift` + the same keys is 0.1 s a
+> press, i.e. **~3.3 s of marker movement per second of real time**, so you can. Measured, that
+> changes nothing about safety, and the measurement is the point:
+>
+> - `boundRunsOutEarly` answers true only when the bound moved **OUTWARD** (`want >
+>   scheduledEndFrame`). A held `Shift+←` therefore calls `remode` **zero** times, and the node
+>   stays bounded at the original Intro End.
+> - What stops the audio is the **guard timer**. `Player.tick` reads `configProvider()` live every
+>   20 ms and fades at `introEnd - fadeSec` with no reference to the scheduled end — §8b's
+>   independent safety net, doing exactly its job. Measured on the real library: slewing Intro End
+>   from 20 s at 5 s/s from a playhead at 4 s, the two meet at ~6.7 s and the audio stops at
+>   **7.500 s**. Not the 13-second hang the node bound alone would have given.
+>
+> `--remodetest` case 4 pins that, and its negative control is instructive: making the guard
+> refuse to stop earlier than the scheduled end sends `maxReached` to **19.580**. Note that
+> removing §10's arm-only rule does NOT fail case 4 — `remode` is never called on that path, so
+> the control's code never runs. Case 1 is what covers §10. **Two protections, two cases; do not
+> read either as cover for the other.**
 
 It uses `updateConfig(commit: false)` plus a 350 ms debounce, exactly like the waveform drag:
 committing calls `player.remode`, which re-schedules the node once the accumulated move passes
@@ -3112,8 +3192,29 @@ the day it does not help.
 - The app's name was on screen **three times in two strips**: the native titlebar
   (`WindowGroup("RGF Intro Player")` keeps it), the show's logo, and `Text("RGF INTRO PLAYER")`
   28 pt below the titlebar — which also spent ~170 pt of header width the live chips want. The
-  words now render only when `ShowLogo.prepared == nil`, which is a real state twice over: a
+  words were made conditional on `ShowLogo.prepared == nil`, which is a real state twice over: a
   public build carries no `brand/` payload (§15), and macOS hides the titlebar in fullscreen.
+  **Superseded on request** — the words are back beside the logo unconditionally. The width half
+  of the argument is measured in §6e and was never close to binding: 308 pt spare at the declared
+  minimum window width. An estimate ("~170 pt") carried a design decision it could not support.
+- **`วิธีใช้งาน-SETUP.md` had the two arrow bindings swapped**, and had since 1.6.2 moved the
+  nudge off `Shift`: the guide said `Shift+←/→` nudged the marker 0.01 s and that a bare `←/→`
+  panned the view, while the code did the opposite. The one document a crew machine actually
+  carries, describing the two keys a setter uses most. Found only because the owner asked for
+  `Shift+←/→` to be *added* — which it reads as if it already was. **A shortcut table is code's
+  only user-visible contract and nothing checks it**; when a binding moves, the table moves in
+  the same commit.
+- **The show's logo did not appear until the app was relaunched, on a new machine only.**
+  `ShowLogo.prepared` was a `static let`, i.e. a permanent memo, and `Seeding.run` is guarded on
+  `AppPaths.hasRoot` — so a first run copies nothing, the header memoises "no logo", and the
+  folder the operator then chooses seeds the file in with nothing left to re-read it. The comment
+  above the `Seeding.run` call said "Before anything renders… nothing has touched it yet", which
+  was true and not the problem: the problem was that on that run there was nowhere to copy TO.
+  Invisible on this machine, where `brand/logo.png` is in place before launch — it took a fresh
+  install on a second machine to see it, which is also the only place it can happen. The memo is
+  dropped by `Seeding.run` itself when it actually places a file; `--logotest` asserts both halves
+  (the memo holds, and `invalidate()` really re-reads), and its negative control — making
+  `invalidate()` a no-op — fails exactly the one assertion that is about it.
 - Symbol-only controls had **one `accessibilityLabel` in the whole app** and 20 `.help(...)`
   tooltips, which set help text and not a label — so `⋯`, `🎯`, `↺`, the trim `0` and the sheet
   closes were unnamed to VoiceOver and Full Keyboard Access. Labelled now. The decorative glyphs
@@ -3206,6 +3307,17 @@ Product / UX
   list.
 - **A global tag rename/delete** (fixing a typo across a round) is bulk work: no cross-song undo,
   and `afterBulkChange` drops the stack. Out of scope on purpose.
+- **`songsIn(_:)` and the fold: no check can prove the UI calls the right accessor.** `ColumnFold`
+  and `--foldtest` cover the decision, and §8c's defence is that narrowing the handover would
+  require typing `visibleSongs` somewhere it does not belong — but a fold implemented as a filter
+  needs no `visibleSongs` at all, which is §13's existing item 2 in a new place. The fix is the
+  same and still cheap: lift `songsIn` to `Library` where a test can reach it.
+- **`AppModel` has no test harness, so three write paths are still uncovered.** `setColumnCollapsed`
+  routes through a pure decision now, but `select`'s unfold, `setPlaylist`'s and `switchDataRoot`'s
+  clears, and (from §13 item 1) `setNote`/`addTag`/`removeTag`'s use of `updateConfigQuiet` all
+  live on an `AppModel` that no suite constructs — every one of them can be broken with the whole
+  suite green. The blocker is that `AppModel.init` loads the real store, seeds and snapshots; a
+  `AppModel(rawForTest:)` in the shape of `Store(rawForTest:)` is what would unlock all of them.
 - **Port the handover UI to the web version.** The web app plays, marks and logs as before and
   round-trips `base` untouched, but export / import / diff / pre-flight exist only in the native
   app. Only matters if the setter's machine is not a Mac.
@@ -3318,6 +3430,8 @@ INTROPLAYER_DIAG=1 $BIN --tagtest     # tags: 89 assertions, the registry, the c
 INTROPLAYER_DIAG=1 $BIN --filtertest  # 25: filter + search cannot reach the handover/pre-flight
 INTROPLAYER_DIAG=1 $BIN --incomingtest # receive sweep + setterName: 50 assertions, read-only
 INTROPLAYER_DIAG=1 $BIN --focustest   # click-outside ends editing: 8 assertions, read-only
+INTROPLAYER_DIAG=1 $BIN --logotest    # the logo memo holds, and invalidate re-reads: 7, read-only
+INTROPLAYER_DIAG=1 $BIN --foldtest    # the column-fold decision table: 13, pure, no disk
 INTROPLAYER_DIAG=1 $BIN --preflight   # the handover checklist
 INTROPLAYER_DIAG=1 $BIN --updatecheck # semver compare + the configured feed (§15)
 INTROPLAYER_DIAG=1 $BIN --updatestage # the in-app chain minus the swap (needs a feed) (§15)

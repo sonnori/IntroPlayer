@@ -143,33 +143,48 @@ struct ContentView: View {
             // violation: green has exactly one meaning in this app, "a human answered
             // correctly", and spending it on an ornament is how a palette stops meaning
             // anything. It was not even a `Palette` value. Replacing it fixes both at once.
-            if let logo = ShowLogo.prepared {
-                // The bitmap is already exactly `size x backingScale` pixels, so this frame is
-                // 1:1 and SwiftUI has no rescaling left to do. `.interpolation(.high)` stays
-                // only to cover the case where the window is dragged to a display of a
-                // different scale than the one resolved at launch.
-                Image(nsImage: logo.image)
-                    .resizable().interpolation(.high)
-                    .frame(width: logo.size.width, height: logo.size.height)
-                    .accessibilityHidden(true)
-            }
-            // The words only when there is NO logo. `WindowGroup("RGF Intro Player")` keeps the
-            // native titlebar, which already carries the name 28 pt above this bar — so with the
-            // logo up, this was the app's name three times in two strips (titlebar, logo, text).
-            // A custom bar duplicating the titlebar is the one thing a native-design audit always
-            // catches, and here it also spent ~170 pt of header width that the live chips want.
             //
-            // Kept as a fallback rather than deleted, because it has two real states: a public
-            // build carries no `brand/` payload (§15), and in fullscreen macOS hides the titlebar
-            // — either way the bar must still say what it is.
-            //
-            // `Palette.onHeader`, not `.white`. They are the same value, but this bar is dark
-            // red in BOTH themes, so what sits on it must be a FIXED-light role — §6d records
-            // the save-failure text measuring 1.2:1 in light because it used a theme-flipping
-            // colour here.
-            if ShowLogo.prepared == nil {
+            // The logo and the wordmark are ONE lockup, so they sit in their own `HStack` at a
+            // tighter 10 pt than the 14 pt that separates the bar's independent items.
+            HStack(spacing: 10) {
+                if let logo = ShowLogo.prepared {
+                    // The bitmap is already exactly `size x backingScale` pixels, so this frame
+                    // is 1:1 and SwiftUI has no rescaling left to do. `.interpolation(.high)`
+                    // stays only to cover the case where the window is dragged to a display of a
+                    // different scale than the one resolved at launch.
+                    //
+                    // `accessibilityHidden`, because the `Text` beside it says the same thing:
+                    // labelling both would announce the name twice.
+                    Image(nsImage: logo.image)
+                        .resizable().interpolation(.high)
+                        .frame(width: logo.size.width, height: logo.size.height)
+                        .accessibilityHidden(true)
+                }
+                // ALWAYS, beside the logo — `{logo} RGF INTRO PLAYER`, on request.
+                //
+                // Superseded, and the reasoning is kept because it was not wrong, it just did
+                // not bind. A native-design audit removed these words: `WindowGroup("RGF Intro
+                // Player")` keeps the titlebar, which carries the name 28 pt above this bar, so
+                // with the logo up the app's name was on screen three times in two strips, and
+                // the words also spent ~170 pt of header width the live chips want.
+                //
+                // The width half is now measured instead of asserted. At `App.swift`'s declared
+                // `minWidth: 1100`, with BOTH chips up, both buttons, the save state, and the
+                // logo at its full 90 pt cap, the bar needs 792 pt — **308 pt spare**; the real
+                // 44 pt logo leaves 354. The words cost 156 pt of that. So the objection was
+                // real and never close to binding, and the duplication is the owner's call.
+                //
+                // Still correct when there is no logo at all, which is a real state twice over:
+                // a public build carries no `brand/` payload (§15), and macOS hides the titlebar
+                // in fullscreen — either way the bar must say what it is.
+                //
+                // `Palette.onHeader`, not `.white`. They are the same value, but this bar is dark
+                // red in BOTH themes, so what sits on it must be a FIXED-light role — §6d records
+                // the save-failure text measuring 1.2:1 in light because it used a theme-flipping
+                // colour here.
                 Text("RGF INTRO PLAYER").font(Typo.font(15, .bold))
                     .foregroundStyle(Palette.onHeader)
+                    .fixedSize()
             }
             Spacer()
             if model.reviewRemaining > 0 {
@@ -317,6 +332,22 @@ struct ContentView: View {
                 default: return e
                 }
             }
+            // `⌥` + `←`/`→` pans the view. `Shift` + that pair used to, and 1.6.4 gave Shift to
+            // the coarse marker nudge on request (Unity's idiom) — pan has three other entry
+            // points, a drag on empty canvas, shift-wheel / horizontal wheel and the overview
+            // strip (§8b), while a coarse keyboard step had none.
+            //
+            // It must sit ABOVE the bail below, which hands every Control/Option event straight
+            // back to the system. `typing` and `sheetUp` are therefore re-checked here rather
+            // than inherited from the branches further down: in a text field `⌥←` is word-left
+            // and has to stay that way, and with a sheet up the arrows belong to the sheet.
+            // Autorepeat is deliberately allowed, like every other arrow — holding it to pan is
+            // the point, and the `isARepeat` guard below is also further down.
+            if !typing, !sheetUp, e.modifierFlags.contains(.option),
+               e.keyCode == 123 || e.keyCode == 124 {
+                model.pan(by: (e.keyCode == 123 ? -1 : 1) * model.viewSpan * 0.25)
+                return nil
+            }
             if e.modifierFlags.intersection([.control, .option]).isEmpty == false { return e }
 
             if typing {
@@ -455,12 +486,13 @@ struct ContentView: View {
             // moves onto the modifier. The arrows are the precision neither the ± buttons
             // (0.1 s) nor a drag at a readable zoom can reach, and they are also what a hand
             // reaches for right after `I`/`O` without thinking.
+            // `Shift` = 10× (the `±` buttons' own 0.1 s). Pan moved to `⌥`, handled above.
             case 123:
-                if e.modifierFlags.contains(.shift) { model.pan(by: -model.viewSpan * 0.25) }
-                else { model.nudgeFocused(by: -AppModel.nudgeStep) }
+                model.nudgeFocused(by: e.modifierFlags.contains(.shift)
+                                   ? -AppModel.nudgeStepCoarse : -AppModel.nudgeStep)
             case 124:
-                if e.modifierFlags.contains(.shift) { model.pan(by: model.viewSpan * 0.25) }
-                else { model.nudgeFocused(by: AppModel.nudgeStep) }
+                model.nudgeFocused(by: e.modifierFlags.contains(.shift)
+                                   ? AppModel.nudgeStepCoarse : AppModel.nudgeStep)
             default: return e
             }
             return nil
@@ -605,6 +637,8 @@ struct SongListView: View {
                         if i < 2 { Divider().overlay(Palette.line) }
                     }
                 }
+                // The divider stays between every pair, folded or not: a rail with no boundary
+                // reads as part of its neighbour's scroller.
             } else {
                 // Narrow: one scroller for the whole list, columns become section headers.
                 ScrollViewReader { proxy in
@@ -870,6 +904,10 @@ struct ColumnHeader: View {
     @EnvironmentObject var model: AppModel
     let index: Int
     let count: Int
+    /// Only the wide, three-across layout can fold a column sideways. The narrow layout is one
+    /// scroller with pinned section headers, where the equivalent gesture is a vertical fold —
+    /// a different feature, deliberately not bundled in here.
+    var collapsible = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -877,6 +915,30 @@ struct ColumnHeader: View {
                 .foregroundStyle(model.activeCol == index ? Palette.tintSelectText : Palette.text)
             Text("(\(count))").font(Typo.font(11)).foregroundStyle(Palette.muted)
             Spacer()
+            // A small glyph at the trailing edge, and NOT the whole header strip, which was the
+            // obvious way to build this and the wrong one. The header sits directly above row 1
+            // and `select()` has no playing guard — it calls `player.load(url:)` at once — so a
+            // whole-strip toggle would put "reflow every row sideways" one slip above "cut the
+            // audio on camera". §12 records that class four times: the transport buttons that
+            // slid when playback started (a click meant for Reset could land on Reveal), the
+            // conditional focus-hint line, the cover frame that came and went, and `L` moving the
+            // centre pane 120 pt.
+            //
+            // `‹` measured 5.48 pt at 12 pt bold and lands in `.SFNS-Bold`, not in CoreText's
+            // LastResort — §12's glyph lesson, where the honest test is which FONT the laid-out
+            // run resolves to, because LastResort supplies a glyph for every codepoint in
+            // Unicode and "the glyph exists" therefore never fails.
+            if collapsible {
+                Button { model.setColumnCollapsed(index, true) } label: {
+                    Text("\u{2039}").font(Typo.font(12, .bold))
+                        .frame(width: 20, height: 20)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PressStyle(corner: 5))
+                .foregroundStyle(Palette.muted)
+                .accessibilityLabel("พับคอลัมน์ \(Library.columnLabels[index])")
+                .help("พับคอลัมน์นี้ให้เหลือราง เพื่อให้คอลัมน์อื่นกว้างขึ้น")
+            }
         }
         .padding(.horizontal, 10).padding(.vertical, 7)
         .background(model.activeCol == index ? Palette.tintSelect : Palette.panel2)
@@ -888,10 +950,46 @@ struct ColumnView: View {
     @EnvironmentObject var model: AppModel
     let index: Int
 
+    @ViewBuilder
     var body: some View {
+        if model.isColumnCollapsed(index) { rail } else { expanded }
+    }
+
+    /// Folded: a rail that still says which column it is and how many songs are in it. **Never
+    /// hidden** — §8g measured a view state that hides questions as §8c's "the app can't find my
+    /// songs", which was reported from real use once already.
+    ///
+    /// The WHOLE rail is the unfold button, which is safe exactly where a whole-header fold
+    /// button is not: a folded column has no song rows in it, so a click anywhere in it can only
+    /// mean one thing. See `ColumnHeader` for the other direction.
+    private var rail: some View {
+        let n = model.visibleSongs(column: index).count
+        let on = model.activeCol == index
+        return Button { model.setColumnCollapsed(index, false) } label: {
+            VStack(spacing: 6) {
+                Text("\u{203A}").font(Typo.font(12, .bold)).foregroundStyle(Palette.muted)
+                Text(Library.columnShort[index])
+                    .font(Typo.font(12, .bold))
+                    .foregroundStyle(on ? Palette.tintSelectText : Palette.text)
+                Text("(\(n))").font(Typo.font(11, .regular, latinOnly: true))
+                    .foregroundStyle(Palette.muted)
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 7)
+            .frame(width: AppModel.collapsedColWidth)
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle(corner: 0))
+        .background(on ? Palette.tintSelect : Palette.panel2)
+        .accessibilityLabel("เปิดคอลัมน์ \(Library.columnLabels[index]) ที่พับไว้ — \(n) เพลง")
+        .help("เปิดคอลัมน์ \(Library.columnLabels[index]) คืน")
+    }
+
+    private var expanded: some View {
         let list = model.visibleSongs(column: index)
-        VStack(spacing: 0) {
-            ColumnHeader(index: index, count: list.count)
+        return VStack(spacing: 0) {
+            ColumnHeader(index: index, count: list.count, collapsible: true)
 
             // ScrollViewReader: ↑/↓ move the selection without scrolling, so past ~20 songs the
             // GM was navigating blind — the highlighted row was off-screen.

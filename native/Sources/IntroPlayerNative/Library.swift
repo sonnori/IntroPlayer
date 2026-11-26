@@ -293,6 +293,15 @@ enum Seeding {
                 continue
             }
         }
+        // `brand/logo.png` is one of `items` and `ShowLogo` memoises per process, so the run that
+        // PLACES the logo has to be what drops the memo — otherwise the header keeps the "not
+        // there" answer it cached before this folder existed, and the logo waits for a relaunch.
+        //
+        // In the callee, not at the two call sites, so a third caller cannot forget it — the same
+        // reason `markTakenIn` lives in `Handoff.apply` rather than in `AppModel`'s import paths
+        // (§8e). At the `AppModel.init` call site this is a no-op by construction: nothing has
+        // read `prepared` yet, so there is no memo to drop.
+        if placed > 0 { ShowLogo.invalidate() }
         return placed
     }
 }
@@ -328,7 +337,28 @@ enum ShowLogo {
     /// The image AND the size to draw it at, resolved together. They have to be, because the
     /// bitmap is pre-scaled to exactly the pixels that size occupies — see `load`.
     struct Prepared { let image: NSImage; let size: CGSize }
-    static let prepared: Prepared? = load()
+
+    /// Memoised per process, **including the memo for "looked, and it is not there"** — §8f's
+    /// cover-art lesson. `ContentView` is re-initialised on every model publish and the header
+    /// re-renders at the player's tick rate, so a plain `load()` from `body` would `stat` and
+    /// decode 50 times a second.
+    ///
+    /// It was a `static let`, and that was a bug on a machine with no library yet: `Seeding.run`
+    /// is guarded on `AppPaths.hasRoot`, so on a FIRST run it copies nothing, the header then
+    /// draws and memoises nil, and the logo the operator chose a folder for did not appear until
+    /// the app was relaunched. Reported from the first install on a second machine. The outer
+    /// optional is "has anyone looked yet", the inner one is the answer.
+    nonisolated(unsafe) private static var cache: Prepared??
+    static var prepared: Prepared? {
+        if let answered = cache { return answered }
+        let p = load()
+        cache = .some(p)
+        return p
+    }
+
+    /// Look again. Called from `Seeding.run` and nowhere else — see there for why it is the
+    /// callee's job rather than each caller's.
+    static func invalidate() { cache = nil }
 
     private static func load() -> Prepared? {
         let u = brandFile
@@ -620,12 +650,55 @@ enum Library {
 
     /// Display-only — nothing is stored per column.
     static let columnLabels = ["1xx", "2xx", "3xx + อื่นๆ"]
+    /// What a FOLDED column's rail says (§8c). It has to fit `AppModel.collapsedColWidth`
+    /// without rotating the text — measured at 12 pt bold through the real cascade, the widest
+    /// of these is `3xx+` at **29.78 pt**, which is what sets that width. Rotation was the first
+    /// idea and was dropped: `rotationEffect` is a visual transform only, so the layout box stays
+    /// the UNROTATED width and a 70 pt label would have forced the rail open again.
+    static let columnShort = ["1xx", "2xx", "3xx+"]
     static func column(of p: String) -> Int {
         switch baseName(p).first {
         case "1": return 0
         case "2": return 1
         default:  return 2
         }
+    }
+}
+
+/// Whether a fold is allowed, as a pure function.
+///
+/// The house pattern for a decision no headless test can drive: `MarkerGrab.decide` for the
+/// two-stage marker grab (§11) and `FocusRelease.shouldRelease` for click-outside (§8g). A click
+/// on a column header cannot be synthesised — §6c forbids driving the running app with synthetic
+/// keystrokes — so the *decision* is lifted out and `--foldtest` proves the table instead.
+///
+/// Both refusals are about work going missing on a show day, which is why they are refusals here
+/// rather than conventions the UI is trusted to keep.
+enum ColumnFold {
+    enum Outcome: Equatable {
+        /// Fold it.
+        case fold
+        /// Unfold it. Never refused: unfolding can only reveal.
+        case unfold
+        /// §8g's rule — the selection can never be hidden.
+        case refuseHoldsSelection
+        /// Folding every column leaves no list at all.
+        case refuseLastExpanded
+        /// Already in the asked-for state, or the index is not a column.
+        case noop
+    }
+
+    static func decide(index: Int, collapsed: Bool, folded: Set<Int>,
+                       selectionColumn: Int?, columns: Int) -> Outcome {
+        guard columns > 0, (0..<columns).contains(index) else { return .noop }
+        guard collapsed else { return folded.contains(index) ? .unfold : .noop }
+        guard !folded.contains(index) else { return .noop }
+        // Checked BEFORE the last-expanded rule, so the message names the reason the operator can
+        // actually act on: moving the selection is a thing they can do, "a column must stay open"
+        // is not something they can do anything about on a two-column-folded round.
+        if selectionColumn == index { return .refuseHoldsSelection }
+        if folded.count >= columns - 1 { return .refuseLastExpanded }
+        return .fold
     }
 }
 
@@ -1102,6 +1175,70 @@ enum Diagnostics {
 
         // 3) tighten but stay AHEAD of the playhead. Must stop at the new, earlier boundary.
         run("tighten Intro End, still ahead", introEnd0: 20, editTo: 8, at: 4, mustStopBy: 8.0)
+
+        // 4) `Shift` + `←` HELD. `AppModel.nudgeStepCoarse` is 0.1 s a press against a ~30 ms
+        //    autorepeat — ~3.3 s of marker movement per second of real time, which is fast enough
+        //    to OVERTAKE the playhead. §11's old 0.01 s step could not, and leaned on that. The
+        //    thing that actually protects this was never the step size: it is §10's rule that
+        //    `remode` may only ARM the intro-end guard and never disarm it. This is the case that
+        //    proves it at a speed the suite had never seen, and it steps HARDER than the real key
+        //    (one press per 20 ms loop tick = 5 s/s).
+        func slew(_ title: String, introEnd0: Double, from trigger: Double,
+                  step: Double, mustStopBy: Double) {
+            var c = SongConfig(); c.introStart = 2; c.introEnd = introEnd0; c.ignoreEnd = false
+            p.configProvider = { c }
+            var stopped: Double?
+            var maxSeen = 0.0
+            var presses = 0
+            p.onAutoStop = { stopped = p.position }
+            p.seek(to: c.introStart, config: c)
+            p.toggleStart(config: c)
+            let deadline = Date().addingTimeInterval(introEnd0 + 8)
+            // `updateConfig`'s own floor, so the slew bottoms out where the real one would
+            // instead of reaching a degenerate `introEnd <= introStart` the player never sees
+            // from a real edit.
+            let floor = c.introStart + 0.5
+            while Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+                if p.position > maxSeen { maxSeen = p.position }
+                if stopped != nil { break }
+                if p.position >= trigger, c.introEnd > floor {
+                    c.introEnd = max(floor, ((c.introEnd - step) * 100).rounded() / 100)
+                    presses += 1
+                    // EXACTLY what `AppModel.nudgeFocused` does, and the reason this case is
+                    // worth having: the nudge commits through a 350 ms debounce, and §12 records
+                    // that a HELD key re-arms that debounce every ~30 ms so it never fires at
+                    // all. `boundRunsOutEarly` is the only thing that can commit mid-hold. A
+                    // test that called `remode` on every press instead would be testing a code
+                    // path the app does not have — and would pass with §10's guard removed,
+                    // which is how the first version of this case was written.
+                    if p.boundRunsOutEarly(config: c) { p.remode(config: c) }
+                }
+            }
+            let good = stopped != nil && maxSeen <= mustStopBy
+            if !good { ok = false }
+            print(String(format: "  %@", title))
+            print(String(format: "     %d presses of %.2fs from ~%.1fs — introEnd %.2f -> %.2f",
+                         presses, step, trigger, introEnd0, c.introEnd))
+            print(String(format: "     stoppedAt=%@ maxReached=%.3f  must be <= %.2f  %@",
+                         stopped.map { String(format: "%.3f", $0) } ?? "— NEVER STOPPED",
+                         maxSeen, mustStopBy, good ? "ok" : "✗ FAIL"))
+            print(String(format: "     mode=%@ playing=%@", "\(p.mode)", p.isPlaying ? "yes" : "no"))
+            p.pause()
+        }
+        // What this case actually pins, which is NOT what case 1 pins. `boundRunsOutEarly` only
+        // answers true when the bound moved OUTWARD, so a held `Shift+←` calls `remode` zero
+        // times — measured. Nothing re-schedules the node, which stays bounded at the original
+        // 20 s, and what stops the audio is the guard timer in `tick()`: it reads
+        // `configProvider()` live every 20 ms and fades at `introEnd - fadeSec` with no reference
+        // to the scheduled end. So the marker and the playhead close at 5 s/s + 1 s/s and meet at
+        // ~6.7 s; the fade and the timer's granularity put the stop at ~7.5.
+        //
+        // `mustStopBy` is therefore set to fail loudly if the audio ran on to the OLD bound —
+        // which is the dropout §12 calls indistinguishable from a hang — while leaving room
+        // around the real figure. "It stopped eventually" is not the claim.
+        slew("hold Shift+← on Intro End, straight through the playhead",
+             introEnd0: 20, from: 4, step: AppModel.nudgeStepCoarse, mustStopBy: 9.0)
 
         Diagnostics.verdict(ok, "\n✓ ผ่าน — แก้ marker ตอนเล่นอยู่ ไม่ทำให้เล่นเลย Intro End", "\n✗ ไม่ผ่าน — มีกรณีที่เล่นเลย Intro End")
     }
@@ -3257,6 +3394,105 @@ enum Diagnostics {
 
         print("\nผ่าน \(pass)  ตก \(fail)")
         Diagnostics.verdict(fail == 0, "✓ ผ่าน", "✗ ไม่ผ่าน")
+    }
+
+    /// `--logotest`: the header logo's memo, and that it can be dropped.
+    ///
+    /// `ShowLogo.prepared` is memoised per process for a measured reason — `ContentView` is
+    /// re-initialised on every model publish and the header re-renders at the player's tick
+    /// rate, so reading the disk from `body` would `stat` and decode 50 times a second (§6e).
+    /// It was a `static let`, which made that memo permanent, and on a FIRST run on a machine
+    /// with no library the memo is taken BEFORE `Seeding.run` has anywhere to copy the logo to
+    /// — so the logo did not appear until the app was relaunched. Reported from the first
+    /// install on a second machine.
+    ///
+    /// Two properties, pulling in opposite directions, which is why both are asserted: the memo
+    /// must HOLD across reads, and `invalidate()` must genuinely RE-READ. Neither is visible in
+    /// a screenshot, and quietly losing the first one is a 50 Hz disk read in the header.
+    ///
+    /// Identity is the discriminator: `Prepared.image` is an `NSImage`, a class, so getting the
+    /// same instance back proves nothing was loaded again.
+    ///
+    /// What this does NOT cover is the end-to-end path — no library, choose a folder, logo
+    /// appears without a relaunch. Pointing the real data root at a fixture is the one thing
+    /// `--roottest` refuses to do on purpose, so that half stays a hand-test on a fresh machine.
+    static func logoTest() {
+        var pass = 0, fail = 0
+        func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+            if ok { pass += 1 } else { fail += 1 }
+            print("   \(ok ? "ok  " : "✗   ")\(label)\(detail.isEmpty ? "" : "  — " + detail)")
+        }
+        print("ไฟล์โลโก้: \(ShowLogo.brandFile.path)")
+        guard let first = ShowLogo.prepared else {
+            // NOT a pass. A data folder with no `brand/logo.png` cannot answer the question this
+            // suite exists for, and §12's rule is that "I could not check this" must not exit 0.
+            cannotRun("ไม่มี brand/logo.png ในโฟลเดอร์งานนี้ — ตรวจ memo ไม่ได้")
+            return
+        }
+
+        print("\n1) จำไว้แล้วต้องไม่อ่านดิสก์ซ้ำ")
+        let again = ShowLogo.prepared
+        check("อ่านครั้งที่สองได้ instance เดิม", again?.image === first.image)
+        check("ขนาดที่จะวาดเท่าเดิม", again?.size == first.size,
+              String(format: "%.1f x %.1f pt", first.size.width, first.size.height))
+        check("สูงไม่เกินกรอบ header", first.size.height <= ShowLogo.height + 0.5)
+        check("กว้างไม่เกินเพดาน", first.size.width <= ShowLogo.maxWidth + 0.5)
+
+        print("\n2) invalidate() ต้องทำให้อ่านใหม่จริง")
+        ShowLogo.invalidate()
+        let after = ShowLogo.prepared
+        check("ได้ instance ใหม่ = อ่านไฟล์ซ้ำจริง", after?.image !== first.image)
+        check("ยังหาไฟล์เจอ ได้ขนาดเดิม", after?.size == first.size)
+
+        print("\n3) memo กลับมาทำงานหลัง invalidate")
+        check("อ่านอีกครั้งได้ instance เดิม", ShowLogo.prepared?.image === after?.image)
+
+        verdict(fail == 0, "\n✓ ผ่าน \(pass)",
+                "\n✗ ไม่ผ่าน — ผ่าน \(pass) ตก \(fail)")
+    }
+
+    /// `--foldtest`: the column-fold decision table (§8c).
+    ///
+    /// `ColumnFold.decide` is pure for the reason `MarkerGrab.decide` and
+    /// `FocusRelease.shouldRelease` are — a click on a column header cannot be driven headlessly,
+    /// and §6c forbids synthetic keystrokes against the running app. So the decision is what gets
+    /// proved; that the UI calls it is not something a check here can establish.
+    static func foldTest() {
+        var pass = 0, fail = 0
+        func check(_ label: String, _ got: ColumnFold.Outcome, _ want: ColumnFold.Outcome) {
+            let ok = got == want
+            if ok { pass += 1 } else { fail += 1 }
+            print("   \(ok ? "ok  " : "✗   ")\(label)\(ok ? "" : "  — ได้ \(got) ควรเป็น \(want)")")
+        }
+        func d(_ i: Int, _ collapsed: Bool, _ folded: Set<Int>, sel: Int?) -> ColumnFold.Outcome {
+            ColumnFold.decide(index: i, collapsed: collapsed, folded: folded,
+                              selectionColumn: sel, columns: 3)
+        }
+
+        print("1) ปกติ")
+        check("พับคอลัมน์ว่าง ไม่มี selection", d(1, true, [], sel: 0), .fold)
+        check("เปิดคืนคอลัมน์ที่พับไว้", d(1, false, [1], sel: 0), .unfold)
+        check("พับหนึ่ง เหลืออีกสอง", d(2, true, [1], sel: 0), .fold)
+
+        print("\n2) ห้ามพับคอลัมน์ที่มีเพลงที่เลือก (§8g)")
+        check("selection อยู่ในคอลัมน์นั้น", d(0, true, [], sel: 0), .refuseHoldsSelection)
+        check("แม้มีอีกสองคอลัมน์เปิดอยู่ก็ห้าม", d(2, true, [], sel: 2), .refuseHoldsSelection)
+        check("ไม่มี selection เลย พับได้", d(0, true, [], sel: nil), .fold)
+
+        print("\n3) ห้ามพับคอลัมน์สุดท้ายที่เปิดอยู่")
+        check("พับไปสองแล้ว พับที่สามไม่ได้", d(2, true, [0, 1], sel: nil), .refuseLastExpanded)
+        check("เหตุผล selection มาก่อน เพราะแก้ได้", d(2, true, [0, 1], sel: 2),
+              .refuseHoldsSelection)
+        check("เปิดคืนไม่เคยถูกห้าม แม้พับหมด", d(0, false, [0, 1, 2], sel: nil), .unfold)
+
+        print("\n4) สั่งซ้ำสิ่งที่เป็นอยู่แล้ว = ไม่ทำอะไร")
+        check("พับสิ่งที่พับไว้อยู่", d(1, true, [1], sel: 0), .noop)
+        check("เปิดสิ่งที่เปิดอยู่", d(1, false, [], sel: 0), .noop)
+        check("index นอกช่วง", d(7, true, [], sel: nil), .noop)
+        check("index ติดลบ", d(-1, true, [], sel: nil), .noop)
+
+        verdict(fail == 0, "\n✓ ผ่าน \(pass)",
+                "\n✗ ไม่ผ่าน — ผ่าน \(pass) ตก \(fail)")
     }
 
 }

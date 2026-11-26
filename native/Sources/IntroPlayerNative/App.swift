@@ -34,7 +34,8 @@ struct IntroPlayerApp: App {
                      "--columns", "--handoff", "--preflight", "--titles",
                      "--revealtest", "--grabtest", "--palettetest", "--autodetect", "--artwork", "--timefmt", "--overview", "--remodetest", "--takes",
                      "--updatecheck", "--updatestage", "--loudtest", "--guesstest", "--snapshot", "--guessflow",
-                     "--notetest", "--tagtest", "--filtertest", "--roottest", "--incomingtest", "--focustest"]
+                     "--notetest", "--tagtest", "--filtertest", "--roottest", "--incomingtest", "--focustest",
+                     "--logotest", "--foldtest"]
         if !diag, let f = CommandLine.arguments.first(where: flags.contains) {
             FileHandle.standardError.write("\(f) needs INTROPLAYER_DIAG=1\n".data(using: .utf8)!)
             exit(2)
@@ -138,6 +139,16 @@ struct IntroPlayerApp: App {
         // Read-only, same as --notetest.
         if CommandLine.arguments.contains("--focustest") {
             Diagnostics.focusTest()
+            exit(Diagnostics.exitCode)
+        }
+        // Read-only. Reads `brand/logo.png` from the data folder; writes nothing.
+        if CommandLine.arguments.contains("--logotest") {
+            Diagnostics.logoTest()
+            exit(Diagnostics.exitCode)
+        }
+        // Read-only, pure: no model, no disk.
+        if CommandLine.arguments.contains("--foldtest") {
+            Diagnostics.foldTest()
             exit(Diagnostics.exitCode)
         }
         if CommandLine.arguments.contains("--incomingtest") {

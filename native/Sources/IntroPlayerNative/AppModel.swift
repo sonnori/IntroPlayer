@@ -13,6 +13,19 @@ final class AppModel: ObservableObject {
     @Published var songs: [String] = []
     @Published var currentPlaylist = ""
     @Published var activeCol = 0
+    /// Which of the three list columns are folded to a rail (§8c). Asked for because the real
+    /// round is **7 / 1 / 1**: `ColumnView` is `.frame(maxWidth: .infinity)` in an `HStack`, i.e.
+    /// fixed thirds, so two thirds of the 898 pt pane were rendering two songs while seven shared
+    /// the other third. Folding both gives `1xx` ~826 pt.
+    ///
+    /// **Dies with the process, and there is no `_settings` key for it on purpose** —
+    /// `tagFilter`'s and `search`'s measured reason (§8g): a view state that hides questions and
+    /// survives a relaunch is how an operator opens the app on a show day to a round that looks
+    /// like most of its work is missing. §8c records that exact report against `lastPlaylist`.
+    ///
+    /// **It is a width, not a filter.** Nothing here touches `songsIn(_:)`, so the handover, the
+    /// pre-flight and the `Return`/`Tab` review sweep are all untouched by a fold.
+    @Published private(set) var collapsedCols: Set<Int> = []
     @Published var current: String?
     @Published var analysis: Analysis?
     @Published var analysing = false
@@ -145,6 +158,24 @@ final class AppModel: ObservableObject {
     /// One hundredth of a second: the precision markers are actually stored at. The ± buttons
     /// deliberately stay at 0.1 s — this is the step you cannot get from them or from a drag.
     static let nudgeStep: Double = 0.01
+    /// `Shift` + `←`/`→`, on request — Unity's "hold Shift to go faster". **0.1 s, which is the
+    /// number the `±` buttons already use**, so the app has two step sizes rather than three and
+    /// the keyboard agrees with the buttons. 10×, which is also Unity's multiplier.
+    ///
+    /// It costs a property §11 used to lean on: at 0.01 s against a playhead advancing 1 s per
+    /// second you could not outrun the playhead by holding the key. At 0.1 s against a ~30 ms
+    /// autorepeat you can — roughly **3.3 s of marker movement per second of real time**, either
+    /// direction, during playback. Nothing becomes unsafe, because that was never the protection:
+    /// §10's `remode` may only ARM the intro-end guard and never disarm it, so pulling Intro End
+    /// behind the playhead holds `.intro` and `beginFade`'s "already late" branch cuts at once,
+    /// and `Player.boundRunsOutEarly` still commits immediately near the boundary. What changes
+    /// is that the correct behaviour is now reachable in a fraction of a second.
+    /// `nonisolated` so `--remodetest`, which runs off the main actor, can pin the real
+    /// constant instead of a literal that would drift from it.
+    nonisolated static let nudgeStepCoarse: Double = 0.1
+    /// A folded column's rail. `Library.columnShort`'s widest entry measures 29.78 pt at 12 pt
+    /// bold, so this is that plus padding — see there for why the label is not rotated.
+    static let collapsedColWidth: CGFloat = 36
     /// Hard ceiling on any stored time, matching `Analysis`'s own implausible-duration limit.
     ///
     /// This is not cosmetic. `Store.round2` computes `(v * 100).rounded() / 100`, which overflows
@@ -561,6 +592,7 @@ final class AppModel: ObservableObject {
         coverCache.removeAll()
         tagFilter = ""
         closeSearch()
+        collapsedCols.removeAll()   // a fold describes the library being left, same as the filter
         // Both describe the folder being LEFT. `IncomingRound.id` is round name + export time,
         // and round names repeat across libraries (`EP01` exists in both), so a stale list makes
         // the strip and the picker's 📥 answer for the wrong folder: a round genuinely waiting
@@ -606,6 +638,10 @@ final class AppModel: ObservableObject {
         // The term was typed about the round you are leaving. Carrying it over is how the new
         // round opens showing two of its songs.
         closeSearch()
+        // Same reasoning as the search term, and it is not hypothetical: a `2xx` that was empty
+        // and folded in the round you are leaving may be the fullest column in the one you are
+        // entering, and the fold would hide it.
+        collapsedCols.removeAll()
         currentPlaylist = p
         store.lastPlaylist = p
         store.settingsChanged()
@@ -659,6 +695,12 @@ final class AppModel: ObservableObject {
             closeSearch()
             flash("เลิกค้นหา \"\(q)\" — เพลงที่เลือกไม่ตรงกับคำค้น")
         }
+        // A folded column may not hold the selection (§8g). The same choke point as the two
+        // guards above, and for the same reason: `moveColumn`, `Tab`, `Return`'s advance, a log
+        // row and `nextNeedingReview` all target the whole ROUND on purpose, so any of them can
+        // land in a column that is folded. No toast — unlike the filter, which looks like it
+        // switched itself off, a column visibly opening explains itself.
+        collapsedCols.remove(Library.column(of: path))
         current = path
         activeCol = Library.column(of: path)
         analysisTask?.cancel()
@@ -714,6 +756,35 @@ final class AppModel: ObservableObject {
         guard !list.isEmpty else { return }
         let i = current.flatMap { list.firstIndex(of: $0) } ?? -1
         select(list[max(0, min(list.count - 1, i + d))])
+    }
+
+    func isColumnCollapsed(_ i: Int) -> Bool { collapsedCols.contains(i) }
+
+    /// Fold or unfold a list column. It REFUSES two states rather than letting the UI make them,
+    /// because both are ways for work to go missing on a show day:
+    ///
+    /// - the column holding the selection may not fold. §8g's rule — the selection can never be
+    ///   hidden — enforced here at the one choke point instead of as a rule every caller has to
+    ///   remember. `select` unfolds for the same reason from the other direction.
+    /// - the last expanded column may not fold, or the list is gone entirely.
+    ///
+    /// Unfolding is never refused: it can only reveal.
+    func setColumnCollapsed(_ i: Int, _ collapsed: Bool) {
+        switch ColumnFold.decide(index: i, collapsed: collapsed, folded: collapsedCols,
+                                 selectionColumn: current.map(Library.column(of:)),
+                                 columns: Library.columnLabels.count) {
+        case .fold:
+            collapsedCols.insert(i)
+            flash("พับ \(Library.columnLabels[i]) แล้ว — กดที่รางเพื่อเปิดคืน")
+        case .unfold:
+            collapsedCols.remove(i)
+        case .refuseHoldsSelection:
+            flash("พับไม่ได้ — เพลงที่เลือกอยู่ในคอลัมน์นี้")
+        case .refuseLastExpanded:
+            flash("พับไม่ได้ — ต้องเหลือคอลัมน์ที่เปิดอยู่อย่างน้อยหนึ่งคอลัมน์")
+        case .noop:
+            break
+        }
     }
 
     func moveColumn(by d: Int) {
@@ -894,8 +965,23 @@ final class AppModel: ObservableObject {
         // re-schedules the node once the accumulated move passes 0.05 s — i.e. an audible dropout
         // every sixth keypress, during the one task this key exists for (listening to the cut).
         // The drag defers to `commitConfig()` on mouse-up; a key has no mouse-up, so it debounces.
+        let before = config()
         updateConfig(commit: false) { $0[keyPath: k] = max(0, (($0[keyPath: k] + d) * 100).rounded() / 100) }
-        flash(String(format: "%@ %.2fs", focusMarker.label, config()[keyPath: k]))
+        let after = config()
+        // `updateConfig` clamps `introEnd >= introStart + minIntro`, so a nudge that reaches the
+        // floor starts dragging the OTHER marker along. The flash prints only the focused value,
+        // so without this the second marker moves invisibly — and at `nudgeStepCoarse` a held key
+        // is ~3.3 s of movement per second, i.e. it gets there in about one second. §11 gives the
+        // same reasoning for why the typed field does not commit per keystroke: the lone `1` on
+        // the way to `1:20` would drag the other marker with it.
+        var msg = String(format: "%@ %.2fs", focusMarker.label, after[keyPath: k])
+        if let dragged = MarkerField.times.first(where: { f in
+            guard let other = f.timeKey, other != k else { return false }
+            return before[keyPath: other] != after[keyPath: other]
+        }), let other = dragged.timeKey {
+            msg += String(format: "  ·  ดัน %@ ไป %.2fs ด้วย", dragged.label, after[keyPath: other])
+        }
+        flash(msg)
         // A HELD key re-arms the debounce on every autorepeat (~30 ms), so on its own the
         // debounce NEVER fires and `remode` never runs: the node keeps the old Intro End and the
         // audio stops there while the countdown reads the new value. Commit immediately only
