@@ -206,20 +206,69 @@ struct CenterView: View {
             // half, that no tag ink can be mistaken for green, red or amber.
             for (n, tag) in c.tags.enumerated() {
                 if n > 0 {
-                    var sep = AttributedString(" · ")
+                    // A plain space, not " · ": with the tag runs now carrying a FILL, the
+                    // separator's own job is done by the gap between two fills, and a dot
+                    // floating between two chips reads as a third thing.
+                    var sep = AttributedString(" ")
                     sep.font = Typo.font(12)
-                    sep.foregroundColor = Palette.dim
                     out += sep
                 }
-                var t = AttributedString(tag)
+                // Filled like the chips in the song list, asked for as "UI สีของ Tag เป็นแบบสีๆ
+                // ที่แสดงใน list เพลง".
+                //
+                // **An attributed run with a `backgroundColor`, not a real `TagChip`.** A chip is
+                // a view, so a row of them needs `FlowRow` beside the note's `Text`, and §8g
+                // measures a separate tag row at ~15 pt of REAL height — which this box does not
+                // have. The whole argument for the note living in the centre pane is that it
+                // costs nothing: the title row is already 52 pt because of `coverFrame`, and
+                // `.lineLimit(2)` on one `Text` is what makes overflow impossible rather than
+                // unlikely. Two sibling views cannot carry that guarantee between them, and past
+                // the waveform's `minHeight: 160` floor the overrun clips the song title off the
+                // top and ✓/✗ off the bottom (§15).
+                //
+                // So: same colours, same meaning, and the line-limit guarantee intact. What it
+                // gives up against a real chip is the rounded corner.
+                //
+                // The thin spaces (U+2009) are the chip's horizontal padding — without them the
+                // fill stops at the glyph edges and the words run into each other.
+                var t = AttributedString("\u{2009}\(tag)\u{2009}")
                 t.font = Typo.font(12)
-                t.foregroundColor = colors.isEmpty
-                    ? Palette.muted
-                    : Palette.tagInkAt(colors[Store.tagKey(tag)] ?? 0)
+                if colors.isEmpty {
+                    t.foregroundColor = Palette.muted
+                } else {
+                    let i = colors[Store.tagKey(tag)] ?? 0
+                    t.foregroundColor = Palette.tagInkAt(i)
+                    t.backgroundColor = Palette.tagFillAt(i)
+                }
                 out += t
             }
         }
         return out
+    }
+
+    /// How many runs of `noteText` carry a tag FILL, and whether the note's own run does.
+    ///
+    /// Exists so `--tagtest` can assert the thing the eye is supposed to see, from a file that
+    /// imports AppKit rather than SwiftUI — reading `run.backgroundColor` needs the SwiftUI
+    /// attribute scope, and the conversion to `NSAttributedString` does not carry it. Without
+    /// this the fill could be deleted and all 25 suites would stay green: the `Palette.audit`
+    /// lesson, which §6d records costing a palette its deutan separation.
+    static func noteTagFillAudit(_ c: SongConfig, colors: [String: Int]) -> (filled: Int,
+                                                                            noteFilled: Bool) {
+        let at = noteText(c, colors: colors)
+        var filled = 0
+        var noteFilled = false
+        for run in at.runs {
+            let hasFill = run.backgroundColor != nil
+            if hasFill { filled += 1 }
+            // The note is the first run when there is one, and it must stay unfilled: a
+            // highlighted sentence in the operator's eyeline reads as a warning, and §6d gives
+            // every hue exactly one meaning.
+            if !c.note.isEmpty, run.range.lowerBound == at.startIndex, hasFill {
+                noteFilled = true
+            }
+        }
+        return (filled, noteFilled)
     }
 
     /// The same text for a tooltip and for VoiceOver, which take a plain `String`.

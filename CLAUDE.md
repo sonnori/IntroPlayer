@@ -537,7 +537,7 @@ INTROPLAYER_DIAG=1 $BIN --filtertest   # tag filter + filename search narrow the
 INTROPLAYER_DIAG=1 $BIN --incomingtest # receive sweep, note/tag-only, declined rows: 50 (§8e)
 INTROPLAYER_DIAG=1 $BIN --focustest    # คลิกที่อื่นแล้วต้องเลิกพิมพ์ — 8 assertions (§8g)
 INTROPLAYER_DIAG=1 $BIN --logotest     # โลโก้: memo ค้างไว้ และ invalidate ได้จริง (§6e)
-INTROPLAYER_DIAG=1 $BIN --foldtest     # พับคอลัมน์: ตารางการตัดสิน 13 ข้อ (§8c)
+INTROPLAYER_DIAG=1 $BIN --foldtest     # พับคอลัมน์ + ความกว้าง: 33 ข้อ (§8c)
 INTROPLAYER_DIAG=1 $BIN --roottest     # where the questions live: order, exclusions, .none (§5d)
 INTROPLAYER_DIAG=1 $BIN --updatecheck  # semver compare, feed resolution, blocked URL schemes (§15)
 INTROPLAYER_DIAG=1 $BIN --updatestage  # download + unpack + verify a real release, then delete (§15)
@@ -1424,8 +1424,51 @@ Six things, each for a reason that is invisible in a screenshot:
 
 `ColumnFold.decide` is pure, which is the house pattern for a decision no headless test can drive
 — `MarkerGrab.decide` (§11) and `FocusRelease.shouldRelease` (§8g). `--foldtest` proves the table
-(13 assertions) and its negative control, deleting the selection guard, fails exactly the three
-assertions that are about it. What no check here can establish is that the UI calls it; see §13.
+and its negative control, deleting the selection guard, fails exactly the three assertions that
+are about it. What no check here can establish is that the UI calls it; see §13.
+
+### Dragging a column edge (`ColumnLayout`, `ColumnEdge`)
+
+Asked for as *"อยากให้แบบลากตรงขอบเพื่อปรับขยายได้"*.
+
+**§6c's refusal of a draggable divider is about a DIFFERENT divider, and that distinction is the
+whole licence for this.** §6c rejects `NavigationSplitView` partly because its divider would let
+the operator resize the *waveform* by brushing the mouse mid-take, and §12's recurring defect is a
+control that moves under the cursor. `ColumnEdge` lives *inside* the left pane, which stays a
+fixed `AppModel.leftPaneWidth`: dragging one moves the boundary between two columns of song rows,
+and the centre pane — waveform, markers, transport, ✓/✗ — cannot move at all. Do not read §6c as
+forbidding this, and do not read this as permission to make the PANE boundary draggable.
+
+- **A press that moves nothing changes nothing**, which is §11's marker-grab rule.
+  `DragGesture(minimumDistance: 2)` is what delivers it: a click on the edge is not a 0 pt drag,
+  it never starts. The handle is its own 8 pt view sitting ON the 1 pt divider, so it cannot
+  swallow a click meant for a song row — the rows end where it begins.
+- **Double-click resets to equal thirds**, the only reset that needs no memory of the previous
+  widths.
+- **The cursor push/pop is balanced by a flag**, not by trusting the two `onHover` callbacks to
+  pair up. An unmatched `push` leaves the resize cursor over the whole app; an unmatched `pop`
+  takes somebody else's off the stack. `onDisappear` pops too, because the log pane unmounts this
+  list (§12).
+- **Dies with the process**, like the fold. The reason is weaker here and goes the same way: a
+  resized column still shows every one of its songs, so unlike `collapsedCols` it cannot hide
+  work — `ColumnLayout.minWidth` (140 pt) is what guarantees that. Persisting it is one
+  `_settings` key if that turns out to be wanted.
+- **A handle exists only between two EXPANDED neighbours.** With the middle column folded the two
+  expanded ones are not adjacent, so there is no handle — a handle whose two sides are not the
+  things it sits between is worse than none.
+
+**The arithmetic is in surplus space, and the first version got it wrong in a way that looks
+right.** `widths` gives each expanded column `minWidth + surplus × f`, so the floor is a constant
+offset and **a fraction is not proportional to a width**. Converting a drag back by "share of the
+pair's width" put a +50 pt drag at 325.9 pt instead of 349.3 — an error that grows with `minWidth`
+and would have shipped as "the divider does not keep up with the mouse". `f = (w − minWidth) /
+surplus` inverts it exactly, and the pair's combined `f` is preserved by construction, so every
+other column's width is untouched. `--foldtest` section 5 asserts the round trip at ±50 and ±400
+pt, including that the third column does not move and that the three still sum to the pane.
+
+> The floors are applied *first*, with only the surplus distributed by fraction. Scaling first and
+> clamping after lets three clamped columns sum past the pane, which in an `HStack` of fixed
+> frames overflows silently and clips the third column's rows.
 
 ### Why paths, not filenames
 Config keys had to move from bare filename to relative path. If two rounds contain the same
@@ -1801,6 +1844,17 @@ Three things about that box are load-bearing:
   than taking a line each (a separate tag row costs ~15 pt of real height). With a line limit
   something has to truncate, and losing the sentence the setter wrote is worse than losing the
   tail of a list that is also visible in SETUP.
+- **The tag runs carry a FILL now**, asked for so the box matches the chips in the song list.
+  It is an attributed run with a `backgroundColor` and thin spaces (U+2009) for padding, **not a
+  real `TagChip`** — a chip is a view, so a row of them needs `FlowRow` beside the note's `Text`,
+  which is the ~15 pt of real height this box does not have, and two sibling views cannot carry
+  the `.lineLimit(2)` guarantee between them. Same colours, same meaning, guarantee intact; what
+  it gives up against a real chip is the rounded corner. The separator went from `·` to a plain
+  space, because a dot floating between two fills reads as a third chip. **The note's own run
+  must stay unfilled** — a highlighted sentence in the operator's eyeline reads as a warning, and
+  §6d gives every hue one meaning. `CenterView.noteTagFillAudit` exists so `--tagtest` can assert
+  both halves from a file that imports AppKit rather than SwiftUI: without it the fill could be
+  deleted with all 25 suites green, which is the `Palette.audit` lesson.
 - **Rendered only when there is something to show.** Absence then means "no note", which is
   unambiguous; an always-present empty frame in the operator's eyeline is the decoration §6e
   removed when it took out the green dot. The cover frame's always-render rule does not apply —
@@ -2182,6 +2236,21 @@ a setter scanning a round had to open every song to find out.
 - **Grey, never a hue** (§6d), and **note-only, never tags.** The filter above the list answers
   "which songs carry tag X" better than a glyph can, and a mark meaning "note or tags" would
   answer neither question. Absence meaning exactly "no note" is the property worth having.
+
+**The note's text is under the row too**, asked for as *"ให้โน้ตคนรันแสดงใน list เพลงด้วย
+ข้างล่างตรง ก็ได้"*. The `※` says only *that* there is one, so a setter scanning a round for
+"which question did I flag" still had to open every song.
+
+- **Reserved for every row as soon as any song in the library carries a note**, exactly like the
+  tag line and for the same measured reason: a line that appears only where a note happens to be
+  moves every row below it while lining nothing up. `Store.anyNote` is cached beside `tagsInUse`
+  and cleared by the same `clearTagCaches()` — deliberately one function, because both are
+  "something about the whole library derived from a per-song field", and a second cache with its
+  own invalidation is how one of them goes stale. A library with no notes keeps the row it had.
+- **One line, truncated.** A column is ~299 pt at equal thirds and a note is up to 120 clusters,
+  so most will clip. The row's tooltip carries it in full and the centre pane shows two lines of
+  it the moment the song is opened; a second line here would cost ~16 pt on every row in the round
+  to finish a sentence that is about to be on screen anyway.
 
 **The read-only box in the web fallback.** `index.html` now draws the same note beside the same
 title. It is the *mid-taping* fallback (§6c), so an operator who falls back to it was losing
@@ -3431,7 +3500,7 @@ INTROPLAYER_DIAG=1 $BIN --filtertest  # 25: filter + search cannot reach the han
 INTROPLAYER_DIAG=1 $BIN --incomingtest # receive sweep + setterName: 50 assertions, read-only
 INTROPLAYER_DIAG=1 $BIN --focustest   # click-outside ends editing: 8 assertions, read-only
 INTROPLAYER_DIAG=1 $BIN --logotest    # the logo memo holds, and invalidate re-reads: 7, read-only
-INTROPLAYER_DIAG=1 $BIN --foldtest    # the column-fold decision table: 13, pure, no disk
+INTROPLAYER_DIAG=1 $BIN --foldtest    # fold decisions + edge-drag arithmetic: 33, pure
 INTROPLAYER_DIAG=1 $BIN --preflight   # the handover checklist
 INTROPLAYER_DIAG=1 $BIN --updatecheck # semver compare + the configured feed (§15)
 INTROPLAYER_DIAG=1 $BIN --updatestage # the in-app chain minus the swap (needs a feed) (§15)

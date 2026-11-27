@@ -26,6 +26,15 @@ final class AppModel: ObservableObject {
     /// **It is a width, not a filter.** Nothing here touches `songsIn(_:)`, so the handover, the
     /// pre-flight and the `Return`/`Tab` review sweep are all untouched by a fold.
     @Published private(set) var collapsedCols: Set<Int> = []
+    /// How the expanded columns divide the pane, as shares of the surplus above
+    /// `ColumnLayout.minWidth` (see there — a fraction is NOT proportional to a width).
+    ///
+    /// Asked for as *"ลากตรงขอบเพื่อปรับขยาย"*. **Dies with the process, like the fold**, and the
+    /// reason is weaker here than for the fold but goes the same way: a resized column still
+    /// shows every one of its songs, so this cannot hide work the way `collapsedCols` could —
+    /// `ColumnLayout.minWidth` is what guarantees that. Session-only is the conservative default
+    /// and persisting it is one `_settings` key if it turns out to be wanted.
+    @Published private(set) var colFractions: [Double] = ColumnLayout.evenFractions(3)
     @Published var current: String?
     @Published var analysis: Analysis?
     @Published var analysing = false
@@ -175,7 +184,7 @@ final class AppModel: ObservableObject {
     nonisolated static let nudgeStepCoarse: Double = 0.1
     /// A folded column's rail. `Library.columnShort`'s widest entry measures 29.78 pt at 12 pt
     /// bold, so this is that plus padding — see there for why the label is not rotated.
-    static let collapsedColWidth: CGFloat = 36
+    nonisolated static let collapsedColWidth: CGFloat = 36
     /// Hard ceiling on any stored time, matching `Analysis`'s own implausible-duration limit.
     ///
     /// This is not cosmetic. `Store.round2` computes `(v * 100).rounded() / 100`, which overflows
@@ -593,6 +602,7 @@ final class AppModel: ObservableObject {
         tagFilter = ""
         closeSearch()
         collapsedCols.removeAll()   // a fold describes the library being left, same as the filter
+        colFractions = ColumnLayout.evenFractions(Library.columnLabels.count)
         // Both describe the folder being LEFT. `IncomingRound.id` is round name + export time,
         // and round names repeat across libraries (`EP01` exists in both), so a stale list makes
         // the strip and the picker's 📥 answer for the wrong folder: a round genuinely waiting
@@ -642,6 +652,7 @@ final class AppModel: ObservableObject {
         // and folded in the round you are leaving may be the fullest column in the one you are
         // entering, and the fold would hide it.
         collapsedCols.removeAll()
+        colFractions = ColumnLayout.evenFractions(Library.columnLabels.count)
         currentPlaylist = p
         store.lastPlaylist = p
         store.settingsChanged()
@@ -759,6 +770,40 @@ final class AppModel: ObservableObject {
     }
 
     func isColumnCollapsed(_ i: Int) -> Bool { collapsedCols.contains(i) }
+
+    /// Point width per column, for the wide 3-across layout. The two 1 pt dividers come off the
+    /// pane first, or three fixed frames plus two dividers overflow it and the third column's
+    /// rows get clipped.
+    func columnWidths() -> [CGFloat] {
+        ColumnLayout.widths(fractions: colFractions, folded: collapsedCols,
+                            total: AppModel.leftPaneWidth(wide: isWide) - 2,
+                            railWidth: AppModel.collapsedColWidth,
+                            columns: Library.columnLabels.count)
+    }
+
+    func canDragColumnEdge(after i: Int) -> Bool {
+        ColumnLayout.handleAfter(i, folded: collapsedCols, columns: Library.columnLabels.count)
+    }
+
+    /// Drag the edge after column `i`. `nil` back from `ColumnLayout.drag` means there is nothing
+    /// to drag, and must leave the fractions ALONE — a no-op write would still publish and
+    /// re-render the whole list on every mouse sample.
+    func dragColumnEdge(after i: Int, by dx: CGFloat) {
+        guard let next = ColumnLayout.drag(after: i, dx: dx, fractions: colFractions,
+                                           folded: collapsedCols,
+                                           total: AppModel.leftPaneWidth(wide: isWide) - 2,
+                                           railWidth: AppModel.collapsedColWidth,
+                                           columns: Library.columnLabels.count)
+        else { return }
+        colFractions = next
+    }
+
+    /// Double-click on an edge. Equal thirds is the only "reset" that needs no memory of what the
+    /// widths were before.
+    func resetColumnWidths() {
+        colFractions = ColumnLayout.evenFractions(Library.columnLabels.count)
+        flash("คืนความกว้างคอลัมน์เป็นสามส่วนเท่ากัน")
+    }
 
     /// Fold or unfold a list column. It REFUSES two states rather than letting the UI make them,
     /// because both are ways for work to go missing on a show day:

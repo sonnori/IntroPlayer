@@ -631,14 +631,16 @@ struct SongListView: View {
             tagFilterStrip
 
             if model.isWide {
+                let colW = model.columnWidths()
                 HStack(spacing: 0) {
                     ForEach(0..<3, id: \.self) { i in
                         ColumnView(index: i)
-                        if i < 2 { Divider().overlay(Palette.line) }
+                            .frame(width: colW.indices.contains(i) ? colW[i] : nil)
+                        // The boundary stays between every pair, folded or not: a rail with no
+                        // divider reads as part of its neighbour's scroller.
+                        if i < 2 { ColumnEdge(index: i) }
                     }
                 }
-                // The divider stays between every pair, folded or not: a rail with no boundary
-                // reads as part of its neighbour's scroller.
             } else {
                 // Narrow: one scroller for the whole list, columns become section headers.
                 ScrollViewReader { proxy in
@@ -900,6 +902,74 @@ struct SongListView: View {
     }
 }
 
+/// The 1 pt boundary between two song columns, plus the handle that drags it.
+///
+/// **§6c's refusal of a draggable divider is about a different divider.** That section rejects
+/// `NavigationSplitView` partly because its divider would let the operator resize the WAVEFORM by
+/// brushing the mouse mid-take, and §12's recurring defect is a control that moves under the
+/// cursor. This one is inside the left pane, which stays a fixed `AppModel.leftPaneWidth`: it
+/// moves the boundary between two columns of song rows and cannot touch the centre pane. The
+/// waveform, the markers, the transport and ✓/✗ all hold still.
+///
+/// What it still has to get right is the §11 marker-grab lesson: **a press that moves nothing
+/// must change nothing.** `DragGesture(minimumDistance: 2)` is what does that here — a click on
+/// the boundary is not a 0 pt drag, it never starts. And the handle is its own view sitting ON
+/// the divider, so it cannot swallow a click meant for a song row: the rows end where it begins.
+struct ColumnEdge: View {
+    @EnvironmentObject var model: AppModel
+    let index: Int
+    /// 8 pt — the divider is 1 pt, which is not a mouse target. Taken from the gap between the
+    /// columns' own padding, so no row loses width to it.
+    private static let grab: CGFloat = 8
+    @State private var cursorPushed = false
+    @State private var dragged: CGFloat = 0
+
+    var body: some View {
+        let live = model.canDragColumnEdge(after: index)
+        Rectangle().fill(Palette.line).frame(width: 1)
+            .overlay {
+                if live {
+                    // Wider than its parent on purpose: the hit area straddles the divider
+                    // instead of pushing the columns apart.
+                    Rectangle().fill(.clear)
+                        .frame(width: ColumnEdge.grab)
+                        .contentShape(Rectangle())
+                        .onHover { inside in
+                            // Balanced by the flag, not by trusting the pair of callbacks: an
+                            // unmatched `push` leaves the resize cursor over the whole app, and
+                            // an unmatched `pop` takes somebody else's off the stack.
+                            if inside, !cursorPushed {
+                                NSCursor.resizeLeftRight.push(); cursorPushed = true
+                            } else if !inside, cursorPushed {
+                                NSCursor.pop(); cursorPushed = false
+                            }
+                        }
+                        .gesture(
+                            DragGesture(minimumDistance: 2)
+                                .onChanged { g in
+                                    // The gesture reports total translation from the press, so
+                                    // feed the model the DELTA since the last sample or the drag
+                                    // accelerates away from the mouse.
+                                    let d = g.translation.width - dragged
+                                    dragged = g.translation.width
+                                    model.dragColumnEdge(after: index, by: d)
+                                }
+                                .onEnded { _ in dragged = 0 }
+                        )
+                        .onTapGesture(count: 2) { model.resetColumnWidths() }
+                        .help("ลากเพื่อปรับความกว้าง · ดับเบิลคลิกเพื่อคืนเป็นสามส่วนเท่ากัน")
+                        .accessibilityLabel("ปรับความกว้างคอลัมน์")
+                }
+            }
+            // Without this the 8 pt overlay is clipped to the 1 pt parent and only a 1 pt strip
+            // is grabbable — the handle would look present and be unusable.
+            .zIndex(1)
+            .onDisappear {
+                if cursorPushed { NSCursor.pop(); cursorPushed = false }
+            }
+    }
+}
+
 struct ColumnHeader: View {
     @EnvironmentObject var model: AppModel
     let index: Int
@@ -1063,6 +1133,7 @@ struct SongRow: View {
         let active = model.current == path
         // Cached behind `tagsInUse`, so this is one lookup per row rather than a walk.
         let showTags = !model.store.tagsInUse.isEmpty
+        let showNote = model.store.anyNote
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .top, spacing: 8) {
             // Leading edge: the trailing badge slot is already contested by ✓/✗/ตั้งค่าแล้ว.
@@ -1144,6 +1215,35 @@ struct SongRow: View {
                 }
                 .padding(.leading, 52)       // past the two glyph slots and the track number
                 .frame(height: 18)
+            }
+            // The note itself, under the row — asked for as "ให้โน้ตคนรันแสดงใน list เพลงด้วย
+            // ข้างล่างตรง ก็ได้". The `※` above says only THAT there is one; a setter scanning a
+            // round for "which question did I flag" still had to open each song.
+            //
+            // RESERVED for every row as soon as any song in the library carries a note, exactly
+            // like the tag line and for the same measured reason: §8c clamps titles to two lines
+            // because uniform row heights are what make a column scannable under pressure, and a
+            // line that appears only where a note happens to be moves every row below it while
+            // lining nothing up. A library with no notes keeps the row it had — `anyNote` is
+            // cached beside `tagsInUse`, one lookup per row, not a scan.
+            //
+            // ONE line, truncated. The column is ~299 pt at equal thirds and a note is up to 120
+            // clusters, so most will clip; the row's tooltip already carries it in full and the
+            // centre pane shows two lines of it the moment the song is opened. A second line
+            // here would cost another ~16 pt on every row in the round to finish a sentence that
+            // is about to be on screen in full anyway.
+            //
+            // `muted`, never a hue (§6d), and never the `※`'s own grey either — this is content,
+            // the glyph is a marker.
+            if showNote {
+                Text(c.note.isEmpty ? " " : c.note)
+                    .font(Typo.font(11))
+                    .foregroundStyle(Palette.muted)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .padding(.leading, 52)
+                    .frame(height: 16, alignment: .topLeading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .opacity(used ? 0.45 : 1)

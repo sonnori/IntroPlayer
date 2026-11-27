@@ -665,6 +665,113 @@ enum Library {
     }
 }
 
+/// How the three list columns divide the pane, as a pure function.
+///
+/// Asked for as *"อยากให้แบบลากตรงขอบเพื่อปรับขยายได้"*. Pure for the same reason
+/// `ColumnFold.decide` is: a drag cannot be driven headlessly, so the arithmetic is what gets
+/// proved and `--foldtest` does it.
+///
+/// **§6c's objection to a draggable divider does NOT apply here, and the distinction matters.**
+/// That section refuses `NavigationSplitView` partly because its divider would let the operator
+/// resize the WAVEFORM by brushing the mouse mid-take. These handles sit *inside* the left pane,
+/// which stays a fixed `AppModel.leftPaneWidth`: dragging one moves the boundary between two
+/// song columns and changes nothing in the centre pane. The waveform, the markers and the
+/// transport cannot move.
+enum ColumnLayout {
+    /// Below this a 2-line clamped title plus a tag chip stops being readable, so a drag may not
+    /// take a column under it however far the mouse goes.
+    static let minWidth: CGFloat = 140
+
+    /// Equal thirds — what a fresh session and a double-click on a handle both mean.
+    static func evenFractions(_ n: Int) -> [Double] {
+        n > 0 ? Array(repeating: 1.0 / Double(n), count: n) : []
+    }
+
+    /// Point widths per column. A folded column takes `railWidth` and drops out of the split;
+    /// the expanded ones share what is left in proportion to `fractions`, each held at
+    /// `minWidth`.
+    ///
+    /// The clamp is applied by giving every expanded column its minimum first and distributing
+    /// only the SURPLUS by fraction. Scaling first and clamping after would let three clamped
+    /// columns sum past the pane, which in an `HStack` of fixed frames silently overflows the
+    /// pane and clips the third column's rows.
+    static func widths(fractions: [Double], folded: Set<Int>, total: CGFloat,
+                       railWidth: CGFloat, columns: Int) -> [CGFloat] {
+        guard columns > 0 else { return [] }
+        let expanded = (0..<columns).filter { !folded.contains($0) }
+        guard !expanded.isEmpty else {
+            return (0..<columns).map { _ in railWidth }
+        }
+        let forRails = railWidth * CGFloat(columns - expanded.count)
+        let pool = max(0, total - forRails)
+        let floors = minWidth * CGFloat(expanded.count)
+        var out = [CGFloat](repeating: railWidth, count: columns)
+        guard pool > floors else {
+            // Not enough room to honour every floor — share the pool evenly and let the floors
+            // go rather than overflowing the pane. Only reachable in the narrow layout, which
+            // does not use this.
+            let each = pool / CGFloat(expanded.count)
+            for i in expanded { out[i] = each }
+            return out
+        }
+        let surplus = pool - floors
+        let sum = expanded.reduce(0.0) { $0 + max(0, fractions.indices.contains($1) ? fractions[$1] : 0) }
+        for i in expanded {
+            let f = sum > 0 ? max(0, fractions.indices.contains(i) ? fractions[i] : 0) / sum
+                            : 1.0 / Double(expanded.count)
+            out[i] = minWidth + surplus * CGFloat(f)
+        }
+        return out
+    }
+
+    /// A handle exists between `i` and `i+1` only when BOTH are expanded. With the MIDDLE column
+    /// folded the two expanded ones are not adjacent, so there is no handle — deliberately, since
+    /// a handle whose two sides are not the things it sits between is worse than none.
+    static func handleAfter(_ i: Int, folded: Set<Int>, columns: Int) -> Bool {
+        i >= 0 && i < columns - 1 && !folded.contains(i) && !folded.contains(i + 1)
+    }
+
+    /// Drag the handle after column `i` by `dx` points. Returns the new fractions, or nil when
+    /// there is nothing to drag.
+    ///
+    /// Only the two adjacent columns change, so the rest of the layout holds still — a drag that
+    /// re-proportioned every column would move rows the operator is not touching.
+    static func drag(after i: Int, dx: CGFloat, fractions: [Double], folded: Set<Int>,
+                     total: CGFloat, railWidth: CGFloat, columns: Int) -> [Double]? {
+        guard handleAfter(i, folded: folded, columns: columns) else { return nil }
+        let w = widths(fractions: fractions, folded: folded, total: total,
+                       railWidth: railWidth, columns: columns)
+        guard w.indices.contains(i), w.indices.contains(i + 1) else { return nil }
+        let pair = w[i] + w[i + 1]
+        // Clamped to the pair, so neither side can be pushed under the floor and the pair's own
+        // total never changes: every other column keeps the width it had.
+        let left = min(max(minWidth, w[i] + dx), pair - minWidth)
+        guard pair - minWidth >= minWidth else { return nil }
+        var out = fractions.count == columns ? fractions : evenFractions(columns)
+        // **Convert in SURPLUS space, not width space.** `widths` gives each expanded column
+        // `minWidth + surplus * f`, so the floor is a constant offset and a fraction is NOT
+        // proportional to a width. The first version of this rewrote both sides as their share
+        // of the pair's width, which looks right and is wrong: dragging handle 0 by +50 pt
+        // landed the column at 325.9 instead of 349.3 — an error that grows with `minWidth` and
+        // would have shipped as "the divider does not keep up with the mouse".
+        //
+        // `f = (w - minWidth) / surplus` inverts it exactly, and the pair's combined f is
+        // preserved by construction — `(left - min) + (pair - left - min) = pair - 2 * min`,
+        // whatever `left` is — so every other column's width is untouched.
+        let expanded = (0..<columns).filter { !folded.contains($0) }
+        let pool = max(0, total - railWidth * CGFloat(columns - expanded.count))
+        let surplus = pool - minWidth * CGFloat(expanded.count)
+        guard surplus > 0 else { return nil }
+        let scale = expanded.reduce(0.0) { $0 + max(0, out.indices.contains($1) ? out[$1] : 0) }
+        guard scale > 0 else { return nil }
+        // `widths` normalises by the sum over expanded columns, so the inverse has to carry that
+        // same factor or one drag would silently rescale every other column.
+        out[i] = Double((left - minWidth) / surplus) * scale
+        out[i + 1] = Double((pair - left - minWidth) / surplus) * scale
+        return out
+    }
+}
+
 /// Whether a fold is allowed, as a pure function.
 ///
 /// The house pattern for a decision no headless test can drive: `MarkerGrab.decide` for the
@@ -3240,6 +3347,15 @@ enum Diagnostics {
               NSAttributedString(CenterView.noteText(typical)).string.hasPrefix(typical.note))
         check("ไม่มีอะไรเลย → กล่องว่าง (ไม่วาด)",
               NSAttributedString(CenterView.noteText(SongConfig())).string.isEmpty)
+        // The tags in that box are FILLED like the chips in the list (§8g), and a fill that
+        // nothing measures is a fill that can be deleted silently.
+        let cols = ["ยุค 90": 2, "ผู้หิงร้อง": 4]
+        let audit = CenterView.noteTagFillAudit(typical, colors: cols)
+        check("แท็กทุกอันมีสีพื้นหลัง", audit.filled == typical.tags.count,
+              "ได้ \(audit.filled) ควร \(typical.tags.count)")
+        check("ตัวโน้ตเองไม่มีสีพื้นหลัง", !audit.noteFilled)
+        check("ไม่รู้สีแท็ก → ไม่ใส่พื้นหลังเลย",
+              CenterView.noteTagFillAudit(typical, colors: [:]).filled == 0)
         // `noteText` is built from `body`, which re-renders at the player's tick rate (§8f's
         // memoised-cover lesson). Measured so the decision not to memoise it is a measurement
         // and not a shrug. Anything approaching the 20 ms guard tick would need a cache.
@@ -3490,6 +3606,53 @@ enum Diagnostics {
         check("เปิดสิ่งที่เปิดอยู่", d(1, false, [], sel: 0), .noop)
         check("index นอกช่วง", d(7, true, [], sel: nil), .noop)
         check("index ติดลบ", d(-1, true, [], sel: nil), .noop)
+
+        print("\n5) ความกว้างคอลัมน์ (ColumnLayout)")
+        let total: CGFloat = 898, rail = AppModel.collapsedColWidth
+        func W(_ fr: [Double], _ fo: Set<Int>) -> [CGFloat] {
+            ColumnLayout.widths(fractions: fr, folded: fo, total: total, railWidth: rail,
+                                columns: 3)
+        }
+        func near(_ a: CGFloat, _ b: CGFloat, _ eps: CGFloat = 0.05) -> Bool { abs(a - b) < eps }
+        func ck(_ label: String, _ ok: Bool, _ detail: String = "") {
+            if ok { pass += 1 } else { fail += 1 }
+            print("   \(ok ? "ok  " : "✗   ")\(label)\(detail.isEmpty ? "" : "  — " + detail)")
+        }
+        let even = ColumnLayout.evenFractions(3)
+        let w0 = W(even, [])
+        ck("สามส่วนเท่ากัน รวมเต็มแผง", near(w0.reduce(0, +), total) && near(w0[0], w0[2]),
+           String(format: "%.1f / %.1f / %.1f", w0[0], w0[1], w0[2]))
+        let wf = W(even, [1])
+        ck("พับกลาง — รางเท่าราง ที่เหลือหารสอง",
+           near(wf[1], rail) && near(wf[0], wf[2]) && near(wf.reduce(0, +), total),
+           String(format: "%.1f / %.1f / %.1f", wf[0], wf[1], wf[2]))
+        ck("พับสอง — อีกอันได้ที่เหลือหมด",
+           near(W(even, [1, 2])[0], total - 2 * rail))
+        ck("ไม่มีคอลัมน์ไหนแคบกว่าพื้น", w0.allSatisfy { $0 >= ColumnLayout.minWidth - 0.01 })
+
+        for dx in [CGFloat(50), -50, 400, -400] {
+            guard let nf = ColumnLayout.drag(after: 0, dx: dx, fractions: even, folded: [],
+                                             total: total, railWidth: rail, columns: 3) else {
+                ck("ลาก \(Int(dx)) pt — คืนค่ามา", false, "ได้ nil"); continue
+            }
+            let w = W(nf, [])
+            let want = min(max(ColumnLayout.minWidth, w0[0] + dx), w0[0] + w0[1] - ColumnLayout.minWidth)
+            ck("ลาก \(Int(dx)) pt — กว้างขึ้นเท่าที่ลาก", near(w[0], want, 0.2),
+               String(format: "ได้ %.1f ควร %.1f", w[0], want))
+            ck("ลาก \(Int(dx)) pt — อีกคอลัมน์ไม่ขยับ", near(w[2], w0[2], 0.2),
+               String(format: "ได้ %.1f ควร %.1f", w[2], w0[2]))
+            ck("ลาก \(Int(dx)) pt — รวมยังเต็มแผง", near(w.reduce(0, +), total, 0.2))
+        }
+        ck("ด้ามกลางพับ — ไม่มีหูจับข้างมัน",
+           !ColumnLayout.handleAfter(0, folded: [1], columns: 3)
+           && !ColumnLayout.handleAfter(1, folded: [1], columns: 3))
+        ck("ด้านหน้าพับ — หูจับ 1|2 ยังอยู่",
+           ColumnLayout.handleAfter(1, folded: [0], columns: 3)
+           && !ColumnLayout.handleAfter(0, folded: [0], columns: 3))
+        ck("หูจับสุดท้ายไม่มี", !ColumnLayout.handleAfter(2, folded: [], columns: 3))
+        ck("ลากหูจับที่ไม่มี — คืน nil",
+           ColumnLayout.drag(after: 0, dx: 50, fractions: even, folded: [1], total: total,
+                             railWidth: rail, columns: 3) == nil)
 
         verdict(fail == 0, "\n✓ ผ่าน \(pass)",
                 "\n✗ ไม่ผ่าน — ผ่าน \(pass) ตก \(fail)")

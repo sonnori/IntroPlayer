@@ -650,7 +650,24 @@ final class Store {
     private var tagColorCache: [String: Int]?
     /// Clearing the two together, in one call, so "the caches are cleared in exactly these four
     /// places" stays a property you can check by reading this file rather than by remembering.
-    func clearTagCaches() { tagCache = nil; tagColorCache = nil }
+    func clearTagCaches() { tagCache = nil; tagColorCache = nil; noteCache = nil }
+    private var noteCache: Bool?
+
+    /// Does ANY song in the library carry a note? The song list reserves a line for the note on
+    /// every row once this is true (§8c), so it is asked once per row and has to be a lookup
+    /// rather than a scan — `SongRow` is in a `LazyVStack` that re-renders at the player's tick
+    /// rate, which is §8f's memoised-cover lesson.
+    ///
+    /// Cached beside `tagsInUse` and cleared by the same `clearTagCaches()`, deliberately: both
+    /// are "something about the whole library derived from per-song fields", and the four places
+    /// `songs` changes already call that one function. A second cache with its own invalidation
+    /// is how one of them goes stale.
+    var anyNote: Bool {
+        if let c = noteCache { return c }
+        let out = songs.values.contains { !$0.note.isEmpty }
+        noteCache = out
+        return out
+    }
 
     /// FNV-1a over a string's UTF-8. **Never `hashValue`**, which Swift seeds per process — the
     /// defect `tagsInUse` recorded once, where a tag's surviving spelling changed at random
