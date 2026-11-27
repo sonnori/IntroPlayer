@@ -306,6 +306,13 @@ final class Store {
     var normalize = true
     var loudnessScope: LoudnessScope = .intro
     var theme: AppTheme = .dark
+    /// How the window divides into list | centre | setup, as shares of the surplus above
+    /// `PaneLayout.floors`. **Persisted**, unlike the fold and the filters: with floors in force
+    /// this cannot hide a pane, let alone a question, so §8g's die-with-the-process rule does not
+    /// bite — and *"เครื่องส่วนใหญ่จะเป็นหน้าจอแคบ"* means every machine wants its own
+    /// proportions, which it would be absurd to retype each launch. Closer to `theme` than to
+    /// `tagFilter`.
+    var paneSplit: [Double] = PaneLayout.defaultFractions
     var lastPlaylist = ""
     var resetAt: [String: String] = [:]
     /// Which colour the operator CHOSE for a tag, keyed by `Store.tagKey` → slot index into
@@ -422,6 +429,11 @@ final class Store {
         // An unreadable or unknown value falls back to dark rather than to the system, so a
         // garbled settings file can never put a white screen in front of the operator mid-taping.
         theme = AppTheme(rawValue: (s["theme"] as? String) ?? "") ?? .dark
+        // `normalised` rejects the wrong count, a non-finite and a non-positive value and falls
+        // back to the default, so a hand-edited or foreign-written file cannot produce a pane
+        // of zero width — the same fail-closed shape as `theme` above.
+        paneSplit = PaneLayout.normalised((s["paneSplit"] as? [Double])
+                                          ?? (s["paneSplit"] as? [NSNumber])?.map(\.doubleValue))
         lastPlaylist = (s["lastPlaylist"] as? String) ?? ""
         // Per-key: one bad value used to fail the whole cast, and writeSettings would then erase
         // every reset stamp in the file.
@@ -872,6 +884,14 @@ final class Store {
         // string, this build would decode `""` → `.dark` and overwrite it on the next save —
         // and `writeSettings` runs on every marker edit.
         if s["theme"] == nil || s["theme"] is String { s["theme"] = theme.rawValue }
+        // Written only when it differs from the default, so a library that never touched the
+        // split keeps a file without the key — and read-it-before-you-delete-it, the rule
+        // `resetAt` was fixed for.
+        if paneSplit != PaneLayout.defaultFractions {
+            s["paneSplit"] = paneSplit.map { Store.round2($0 * 1000) / 1000 }
+        } else if s["paneSplit"] is [Any] {
+            s.removeValue(forKey: "paneSplit")
+        }
         s["lastPlaylist"] = lastPlaylist
         if !resetAt.isEmpty { s["resetAt"] = resetAt }   // never delete stamps we merely failed to read
         // Same rule as `resetAt`, one line above: only delete a key we successfully READ as

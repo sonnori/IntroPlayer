@@ -57,7 +57,7 @@ struct CenterView: View {
                 OverviewStrip().padding(.top, 6)
 
                 HStack(spacing: 14) {
-                    if model.isWide {
+                    if model.centreIsWide {
                         legend(Palette.cyan, "Intro start / end")
                         legend(Palette.hook, "Hook")
                     }

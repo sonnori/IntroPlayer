@@ -79,12 +79,16 @@ struct ContentView: View {
                     // Side by side, the transport and the current song stay visible and live, so
                     // none of that is necessary.
                     if model.showLog { LogPanel() } else { SongListView() }
+                    // The two draggable boundaries the owner asked for. §6c refused exactly this
+                    // and was not wrong; see `PaneLayout` for what carries the risk instead.
+                    PaneEdge(index: 0)
                     CenterView()
+                    PaneEdge(index: 1)
                     SetupPanel()
                 }
             }
-            .onAppear { model.setWide(geo.size.width >= 1900) }
-            .onChange(of: geo.size.width) { w in model.setWide(w >= 1900) }
+            .onAppear { model.setWindowWidth(geo.size.width) }
+            .onChange(of: geo.size.width) { w in model.setWindowWidth(w) }
         }
         .background(Palette.bg)
         // Follows the setting rather than being nailed to dark. Both halves are needed:
@@ -630,7 +634,7 @@ struct SongListView: View {
             searchRow
             tagFilterStrip
 
-            if model.isWide {
+            if model.listShowsColumns {
                 let colW = model.columnWidths()
                 HStack(spacing: 0) {
                     ForEach(0..<3, id: \.self) { i in
@@ -684,12 +688,12 @@ struct SongListView: View {
         }
         // 780 → 900 on request ("มัน width แคบไป"). Three columns share it, so each row gains
         // ~40 pt — which is what decides whether a 2-line clamped title still tells two songs
-        // apart (§8c). At the `isWide` breakpoint (1900) this leaves the centre pane 660 pt,
+        // apart (§8c). The pane is draggable now, so this is the resolved width rather than a
         // well clear of the 378 pt that made §12 raise that breakpoint in the first place.
         //
-        // Through `AppModel.leftPaneWidth` because `LogPanel` occupies this same slot and has to
-        // be the same width — see that function for what 120 pt of difference did.
-        .frame(width: AppModel.leftPaneWidth(wide: model.isWide))
+        // Through `AppModel.listWidth` because `LogPanel` occupies this same slot and has to be
+        // the same number — see that property for what 120 pt of difference did.
+        .frame(width: model.listWidth)
         .background(Palette.panel)
         .overlay(alignment: .trailing) { Rectangle().fill(Palette.line).frame(width: 1) }
     }
@@ -916,12 +920,71 @@ struct SongListView: View {
     }
 }
 
+/// The boundary between two PANES, and the handle that drags it.
+///
+/// `ColumnEdge`'s sibling, and the one §6c actually refused: *"a split view's divider is
+/// user-draggable by design — which adds a way to resize the waveform mid-take by brushing the
+/// mouse"*. The owner asked for it directly, so `PaneLayout` carries that risk instead of the
+/// feature being declined — read it before changing anything here.
+///
+/// `minimumDistance: 4`, double `ColumnEdge`'s 2, is the part that answers §6c on its own terms:
+/// a brush is not a drag. Everything else is the same construction, for the same reasons.
+struct PaneEdge: View {
+    @EnvironmentObject var model: AppModel
+    let index: Int
+    /// Taken off the window before any pane is sized — see `AppModel.paneWidths`.
+    static let width: CGFloat = 8
+    @State private var cursorPushed = false
+    @State private var dragged: CGFloat = 0
+
+    var body: some View {
+        ZStack {
+            Rectangle().fill(.clear)
+            Rectangle().fill(Palette.line).frame(width: 1)
+            // Visible at rest. The in-list version of this shipped with the cursor change as its
+            // only affordance and was reported as the feature not working at all — §12's
+            // `P`-had-no-shortcut lesson, where a control nobody can find is indistinguishable
+            // from a broken one. A structural divider has to announce itself even more than that
+            // one did, because nothing else in the window looks draggable.
+            VStack(spacing: 4) {
+                ForEach(0..<4, id: \.self) { _ in
+                    Capsule().fill(Palette.dim).frame(width: 2, height: 12)
+                }
+            }
+            .allowsHitTesting(false)
+        }
+        .frame(width: PaneEdge.width)
+        .contentShape(Rectangle())
+        .onHover { inside in
+            if inside, !cursorPushed {
+                NSCursor.resizeLeftRight.push(); cursorPushed = true
+            } else if !inside, cursorPushed {
+                NSCursor.pop(); cursorPushed = false
+            }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 4)
+                .onChanged { g in
+                    let d = g.translation.width - dragged
+                    dragged = g.translation.width
+                    model.dragPaneEdge(after: index, by: d)
+                }
+                .onEnded { _ in dragged = 0 }
+        )
+        .onTapGesture(count: 2) { model.resetPaneWidths() }
+        .help("ลากเพื่อปรับความกว้างแผง · ดับเบิลคลิกเพื่อคืนค่าเริ่มต้น")
+        .accessibilityLabel(index == 0 ? "ปรับความกว้างระหว่างรายการเพลงกับแผงกลาง"
+                                       : "ปรับความกว้างระหว่างแผงกลางกับแผงขวา")
+        .onDisappear { if cursorPushed { NSCursor.pop(); cursorPushed = false } }
+    }
+}
+
 /// The 1 pt boundary between two song columns, plus the handle that drags it.
 ///
 /// **§6c's refusal of a draggable divider is about a different divider.** That section rejects
 /// `NavigationSplitView` partly because its divider would let the operator resize the WAVEFORM by
 /// brushing the mouse mid-take, and §12's recurring defect is a control that moves under the
-/// cursor. This one is inside the left pane, which stays a fixed `AppModel.leftPaneWidth`: it
+/// cursor. This one is inside the left pane, whose own width the operator sets: it
 /// moves the boundary between two columns of song rows and cannot touch the centre pane. The
 /// waveform, the markers, the transport and ✓/✗ all hold still.
 ///

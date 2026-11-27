@@ -537,7 +537,7 @@ INTROPLAYER_DIAG=1 $BIN --filtertest   # tag filter + filename search narrow the
 INTROPLAYER_DIAG=1 $BIN --incomingtest # receive sweep, note/tag-only, declined rows: 50 (§8e)
 INTROPLAYER_DIAG=1 $BIN --focustest    # คลิกที่อื่นแล้วต้องเลิกพิมพ์ — 8 assertions (§8g)
 INTROPLAYER_DIAG=1 $BIN --logotest     # โลโก้: memo ค้างไว้ และ invalidate ได้จริง (§6e)
-INTROPLAYER_DIAG=1 $BIN --foldtest     # พับคอลัมน์ + ความกว้าง: 33 ข้อ (§8c)
+INTROPLAYER_DIAG=1 $BIN --foldtest     # พับคอลัมน์ + ความกว้างคอลัมน์/แผง: 55 ข้อ (§8c)
 INTROPLAYER_DIAG=1 $BIN --roottest     # where the questions live: order, exclusions, .none (§5d)
 INTROPLAYER_DIAG=1 $BIN --updatecheck  # semver compare, feed resolution, blocked URL schemes (§15)
 INTROPLAYER_DIAG=1 $BIN --updatestage  # download + unpack + verify a real release, then delete (§15)
@@ -613,10 +613,14 @@ buttons. The "structural card budget of zero" is met.
 **`NavigationSplitView` is wrong for this app**, for reasons that are about the taping and not
 about taste:
 
-- The left pane is a **fixed 900 pt** (§8c, raised from 780 on request). A split view's divider is
-  user-draggable by design — which adds a way to resize the waveform mid-take by brushing the
-  mouse. §12's recurring defect is a control that moves under the cursor; a draggable structural
-  divider is that defect promoted to a feature.
+- ~~The left pane is a **fixed 900 pt**. A split view's divider is user-draggable by design —
+  which adds a way to resize the waveform mid-take by brushing the mouse. §12's recurring defect
+  is a control that moves under the cursor; a draggable structural divider is that defect
+  promoted to a feature.~~ **Superseded: all three panes are draggable now** (§8c, `PaneLayout`),
+  on request. The reasoning above was not wrong and is what the mitigations answer — a 4 pt
+  `minimumDistance` so a brush is not a drag, hard floors so no pane can collapse, a deliberate
+  8 pt handle with a visible grip. The rest of this section still holds: the panes are a plain
+  `HStack`, not a split view, and the remaining bullets are why.
 - The left pane is not a source list. It is **three independent `ScrollView`s side by side**
   (1xx / 2xx / 3xx, §8c) with their own keyboard navigation (`[` / `]`). `List(selection:)` is one
   list.
@@ -1456,12 +1460,75 @@ Three things came out of it, and the first is the general lesson:
   and some of those are laptops that can never reach 1900 — the narrow layout is not a fallback to
   be left half-built.
 
-> Still open (§13): the wide layout could begin at ~1700 if `leftPaneWidth` shrank the list on the
-> way down instead of being a step function. `AppModel.leftPaneWidth` is deliberately the one
-> source for it (§12 records 120 pt of divergence between the list and the log pane), so an
-> adaptive version has to stay that way.
+> Superseded by the pane-resize section above: there is no breakpoint left to lower. Each pane
+> sizes itself and decides its own internal layout from its own width.
 
-### Dragging a column edge (`ColumnLayout`, `ColumnEdge`)
+### Dragging the three PANE edges (`PaneLayout`, `PaneEdge`)
+
+Asked for as *"ที่ผมอยากให้ขยับปรับขนาดได้คือ 3 column นี้ |LIST เพลง| ส่วนกลาง | Right Tab"*,
+with *"เครื่องส่วนใหญ่จะเป็นหน้าจอแคบ"*.
+
+> **Read this before the two column sections below.** "Three columns" in that request means the
+> three **panes**, not the 1xx/2xx/3xx columns inside the song list. The fold and the in-list edge
+> drag were built on the other reading first; they are useful and they stayed, but this is the one
+> that was asked for.
+
+**It supersedes §6c's refusal, which was explicit.** §6c rejected a draggable structural divider
+because it "adds a way to resize the waveform mid-take by brushing the mouse". That is a real
+risk, so it is carried rather than waved away:
+
+- **A brush is not a drag.** `DragGesture(minimumDistance: 4)` on the pane handles — double the
+  2 pt the in-list column edges use, because this is the divider §6c was afraid of.
+- **Nothing can collapse.** `PaneLayout.floors` is `[240, 480, 300]`, applied before any fraction
+  is honoured. Measured: a list row's 2-line clamped title with its tag chips and note line needs
+  240; §12 records a 378 pt centre pane as broken, so the floor sits above it at 480; the SETUP
+  marker cards need 300. They sum to 1020, and with the two 8 pt handles that is 1036 against
+  `App.swift`'s declared `minWidth: 1100`.
+- **The handle is a deliberate 8 pt target with a visible grip**, so a drag is something you aim
+  at rather than something that happens to you.
+- **Nothing about audio depends on it.** A pane width changes the waveform's drawn width, which
+  `Analysis.columnPeaks` re-derives from the view window; the playhead is time-based.
+- **Double-click resets.**
+
+> The transport row needs **834 pt** not to wrap — four fixed buttons at 200/210/190/150, 36 pt of
+> spacing, 48 of pane padding. The current wide layout never gave it that either (660 at the old
+> breakpoint), because wrapping is the designed behaviour: a `FlowRow`, "wraps instead of
+> compressing, because a squeezed button renders its label as vertical text". So the 480 pt floor
+> protects the waveform, not the row.
+
+**`isWide` is gone, and that is the structural half of this change.** It was one window-wide step
+function — ≥1900 → a 900 pt list, else 300 — driving the list's internal layout, the log pane's
+width and its stat tiles, and the waveform legend. Every one of those now reads **its own pane's**
+width: `listShowsColumns` (list ≥ 700), `centreIsWide` (centre ≥ 700). That is what makes dragging
+work rather than merely resize things — on a screen that could never reach a 1900 pt window, the
+operator can now drag the list to 700 and get the three columns.
+
+`AppModel.listWidth` is still the **one** number the song list and the log pane share; it is a
+computed property now instead of a function. §12 records 120 pt of divergence between those two
+when they were separate literals, and that rule has not changed.
+
+**The split persists** (`_settings.paneSplit`), unlike the fold and the filters: with floors in
+force it cannot hide a pane, let alone a question, so §8g's die-with-the-process rule does not
+bite — and *most machines are narrow screens*, so every machine wants its own proportions. It is
+closer to `theme` than to `tagFilter`. Stored as fractions of the surplus, clamped through
+`PaneLayout.normalised` on read, so a hand-edited or foreign-written file cannot produce a pane of
+zero width.
+
+**The default is a compromise and says so.** `defaultFractions` gives **392 / 699 / 334** at a
+1440 pt window and **564 / 948 / 372** at 1900 — deliberately NOT the 900 pt list §8c asks for on
+a wide screen, because one fraction set cannot be both and the step function it replaces could.
+The 900 is one drag away and it sticks.
+
+`--foldtest` section 6 covers it: widths at 1100/1440/1900/2518, the floors against **literals**,
+and the drag round trip at ±120 and ±900 pt.
+
+> **The first version of those assertions could not fail.** They compared each width against
+> `PaneLayout.floors` — the constant they were meant to be testing — so setting the floors to
+> zero moved the goalposts and the suite stayed green at 52/52 while the centre pane went to
+> **0 pt**. Found by running the negative control. It is the `Palette.audit` lesson in a third
+> costume, and the fix is the same one: pin the real numbers as literals.
+
+### Dragging a column edge inside the list (`ColumnLayout`, `ColumnEdge`)
 
 Asked for as *"อยากให้แบบลากตรงขอบเพื่อปรับขยายได้"*.
 
@@ -3311,6 +3378,23 @@ the day it does not help.
   **Superseded on request** — the words are back beside the logo unconditionally. The width half
   of the argument is measured in §6e and was never close to binding: 308 pt spare at the declared
   minimum window width. An estimate ("~170 pt") carried a design decision it could not support.
+- **A layout breakpoint above the default window size made the default experience the fallback.**
+  `isWide` needed a 1900 pt window; `defaultSize` was 1600. So on the production 2560x1080 panel
+  the app opened in the one-scroller layout, the three-column list §8c treats as the primary
+  design was not what the operator saw, and the fold and edge-drag controls — which existed only
+  in the wide layout — looked simply absent. Reported as two features "not working". Nothing was
+  broken except the default, and no diagnostic could have caught it: it is only visible by looking
+  at a running window. The breakpoint is gone entirely now (§8c), and `defaultSize` is 2000.
+- **Both new controls were invisible, and that reads exactly like broken.** The fold was a bare
+  5.48 pt grey `‹` with no background; the drag edge's only affordance was the cursor changing on
+  hover, which nobody discovers by not hovering. §12 already records this shape for `P`, which had
+  toggled Played since the native app shipped and was still reported as having no shortcut because
+  nothing on screen said so — and it was missed again in the same file. The fold reads as a button
+  now and the edges carry a visible grip.
+- **A width assertion that compared against the constant it was testing could not fail.**
+  `--foldtest`'s pane checks read `PaneLayout.floors`, so setting the floors to zero moved the
+  goalposts: 52/52 green with the centre pane resolving to **0 pt**. Caught only by running the
+  negative control. Third occurrence of the `Palette.audit` lesson; the fix is literals.
 - **`วิธีใช้งาน-SETUP.md` had the two arrow bindings swapped**, and had since 1.6.2 moved the
   nudge off `Shift`: the guide said `Shift+←/→` nudged the marker 0.01 s and that a bare `←/→`
   panned the view, while the code did the opposite. The one document a crew machine actually
@@ -3545,7 +3629,7 @@ INTROPLAYER_DIAG=1 $BIN --filtertest  # 25: filter + search cannot reach the han
 INTROPLAYER_DIAG=1 $BIN --incomingtest # receive sweep + setterName: 50 assertions, read-only
 INTROPLAYER_DIAG=1 $BIN --focustest   # click-outside ends editing: 8 assertions, read-only
 INTROPLAYER_DIAG=1 $BIN --logotest    # the logo memo holds, and invalidate re-reads: 7, read-only
-INTROPLAYER_DIAG=1 $BIN --foldtest    # fold decisions + edge-drag arithmetic: 33, pure
+INTROPLAYER_DIAG=1 $BIN --foldtest    # fold decisions + column/pane width arithmetic: 55, pure
 INTROPLAYER_DIAG=1 $BIN --preflight   # the handover checklist
 INTROPLAYER_DIAG=1 $BIN --updatecheck # semver compare + the configured feed (§15)
 INTROPLAYER_DIAG=1 $BIN --updatestage # the in-app chain minus the swap (needs a feed) (§15)

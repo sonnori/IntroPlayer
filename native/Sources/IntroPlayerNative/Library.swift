@@ -665,6 +665,98 @@ enum Library {
     }
 }
 
+/// How the window divides into the three panes, as a pure function.
+///
+/// Asked for as *"อยากให้ขยับปรับขนาดได้คือ 3 column นี้: LIST เพลง | ส่วนกลาง | Right Tab"*, with
+/// *"เครื่องส่วนใหย่จะเป็นหน้าจอแคบ"*.
+///
+/// **This supersedes §6c's refusal, which was explicit and was not wrong.** §6c rejected
+/// `NavigationSplitView` partly because "a split view's divider is user-draggable by design —
+/// which adds a way to resize the waveform mid-take by brushing the mouse", and §12's recurring
+/// defect is a control that moves under the cursor. The owner asked for it directly, so the
+/// question becomes how to carry that risk rather than whether to:
+///
+/// - **A brush is not a drag.** `DragGesture(minimumDistance: 4)` on the pane handles, double the
+///   2 pt the in-list column edges use, because this is the divider §6c was afraid of.
+/// - **Nothing can collapse.** Hard floors below, applied before any fraction is honoured, so no
+///   pane can be squeezed to nothing and no drag can hide a pane the operator then cannot find.
+/// - **The handle is a deliberate 8 pt target with a visible grip**, so a drag is something you
+///   aim at rather than something that happens to you.
+/// - **Nothing about audio depends on it.** Pane width changes the waveform's drawn width, which
+///   `Analysis.columnPeaks` re-derives from the view window; the playhead is time-based. There is
+///   no path from a pane width to what the audience hears.
+enum PaneLayout {
+    /// list · centre · setup. **Measured, not chosen.**
+    ///
+    /// - list 240: below it a row's 2-line clamped title plus the tag chips and the note line
+    ///   stop telling two songs apart. Today's narrow layout gives the list 300.
+    /// - centre 480: §12 records 378 as broken — a 330 px waveform with a wrapped transport row.
+    ///   The transport needs 834 pt not to wrap at all (four fixed buttons at 200/210/190/150,
+    ///   36 pt of spacing, 48 of pane padding), which the CURRENT wide layout does not give it
+    ///   either: 660 at the 1900 breakpoint. Wrapping is the designed behaviour there — a
+    ///   `FlowRow`, "wraps instead of compressing, because a squeezed button renders its label as
+    ///   vertical text" — so the floor protects the waveform, not the row.
+    /// - setup 300: the marker cards and their typed time fields. It is 340 by design.
+    ///
+    /// They sum to 1020, and with the two 8 pt handles that is 1036 against `App.swift`'s
+    /// declared `minWidth: 1100` — 64 pt of surplus at the narrowest allowed window.
+    static let floors: [CGFloat] = [240, 480, 300]
+    static let count = 3
+
+    /// The default split, as shares of the surplus above the floors.
+    ///
+    /// Chosen for roughly (420, 740, 340) at a 1500 pt window, because *most machines are narrow
+    /// screens* — at 1440 that gives **391 / 699 / 334**, where today's narrow layout gives the
+    /// list only 300 and this is the pane the request is about. At 1900 it gives 564 / 948 / 372.
+    ///
+    /// It deliberately does NOT reproduce the 900 pt list §8c asks for on a wide screen: one
+    /// fraction set cannot be both, and the step function it replaces could. The 900 is one drag
+    /// away and the split persists per machine, which is the trade.
+    static let defaultFractions: [Double] = [0.375, 0.542, 0.083]
+
+    static func normalised(_ f: [Double]?) -> [Double] {
+        guard let f, f.count == count else { return defaultFractions }
+        let clean = f.map { $0.isFinite && $0 > 0 ? $0 : 0 }
+        let sum = clean.reduce(0, +)
+        guard sum > 0 else { return defaultFractions }
+        return clean.map { $0 / sum }
+    }
+
+    /// Floors first, surplus by fraction — the same shape as `ColumnLayout.widths` and for the
+    /// same reason: scaling first and clamping after lets three clamped panes sum past the
+    /// window, which in an `HStack` of fixed frames overflows silently.
+    static func widths(fractions: [Double], total: CGFloat) -> [CGFloat] {
+        let f = normalised(fractions)
+        let floorSum = floors.reduce(0, +)
+        guard total > floorSum else {
+            // Below the declared minimum width, which AppKit should not allow. Share it out
+            // rather than overflow.
+            let k = max(0, total) / floorSum
+            return floors.map { $0 * k }
+        }
+        let surplus = total - floorSum
+        return (0..<count).map { floors[$0] + surplus * CGFloat(f[$0]) }
+    }
+
+    /// Drag the handle after pane `i`. Only the two adjacent panes change, so the third holds
+    /// still. Inverted in SURPLUS space — see `ColumnLayout.drag` for the version of this that
+    /// looked right and was wrong by 23 pt at +50.
+    static func drag(after i: Int, dx: CGFloat, fractions: [Double], total: CGFloat) -> [Double]? {
+        guard i >= 0, i < count - 1 else { return nil }
+        let w = widths(fractions: fractions, total: total)
+        let pair = w[i] + w[i + 1]
+        guard pair - floors[i + 1] >= floors[i] else { return nil }
+        let left = min(max(floors[i], w[i] + dx), pair - floors[i + 1])
+        let floorSum = floors.reduce(0, +)
+        let surplus = total - floorSum
+        guard surplus > 0 else { return nil }
+        var out = normalised(fractions)
+        out[i] = Double((left - floors[i]) / surplus)
+        out[i + 1] = Double((pair - left - floors[i + 1]) / surplus)
+        return out
+    }
+}
+
 /// How the three list columns divide the pane, as a pure function.
 ///
 /// Asked for as *"อยากให้แบบลากตรงขอบเพื่อปรับขยายได้"*. Pure for the same reason
@@ -3653,6 +3745,74 @@ enum Diagnostics {
         ck("ลากหูจับที่ไม่มี — คืน nil",
            ColumnLayout.drag(after: 0, dx: 50, fractions: even, folded: [1], total: total,
                              railWidth: rail, columns: 3) == nil)
+
+        print("\n6) ความกว้างสามแผง (PaneLayout)")
+        let edges = ColumnEdge.width * 2
+        func P(_ win: CGFloat, _ fr: [Double] = PaneLayout.defaultFractions) -> [CGFloat] {
+            PaneLayout.widths(fractions: fr, total: win - edges)
+        }
+        for win in [CGFloat(1100), 1440, 1900, 2518] {
+            let w = P(win)
+            ck("หน้าต่าง \(Int(win)) — รวมพอดีและไม่ต่ำกว่าพื้น",
+               near(w.reduce(0, +), win - edges, 0.2)
+               && (0..<3).allSatisfy { w[$0] >= PaneLayout.floors[$0] - 0.01 },
+               String(format: "%.0f / %.0f / %.0f", w[0], w[1], w[2]))
+        }
+        // The declared minimum window must leave every floor intact, or AppKit can produce a
+        // window this layout cannot honour.
+        ck("พื้นรวมกัน + หูจับ ≤ minWidth 1100",
+           PaneLayout.floors.reduce(0, +) + edges <= 1100,
+           String(format: "%.0f", PaneLayout.floors.reduce(0, +) + edges))
+        // **LITERALS, deliberately.** The per-window checks above compare each width against
+        // `PaneLayout.floors`, i.e. against the constant they are meant to be testing — so
+        // setting the floors to zero moved the goalposts and the whole suite stayed green at
+        // 52/52. Found by running the negative control. The `Palette.audit` lesson in a third
+        // costume: an assertion that reads the value it checks cannot fail.
+        //
+        // These numbers are the measured minimums, written out: a list row's 2-line clamped
+        // title with its tag chips and note line (240), §12's 378 pt centre pane that was broken
+        // with the floor set above it (480), and the SETUP marker cards (300).
+        ck("พื้นของแต่ละแผงไม่ต่ำกว่าที่วัดไว้",
+           PaneLayout.floors.count == 3 && PaneLayout.floors[0] >= 240
+           && PaneLayout.floors[1] >= 480 && PaneLayout.floors[2] >= 300,
+           String(format: "%.0f / %.0f / %.0f", PaneLayout.floors[0], PaneLayout.floors[1],
+                  PaneLayout.floors[2]))
+        let wMin = P(1100)
+        ck("ที่หน้าต่างแคบสุด ไม่มีแผงไหนแคบกว่าค่าที่วัดไว้",
+           wMin[0] >= 240 && wMin[1] >= 480 && wMin[2] >= 300,
+           String(format: "%.0f / %.0f / %.0f", wMin[0], wMin[1], wMin[2]))
+        // Same shape for the drag: a literal bound, so a floor of zero cannot let a pane vanish.
+        if let nf = PaneLayout.drag(after: 0, dx: 5000, fractions: PaneLayout.defaultFractions,
+                                    total: 1100 - edges) {
+            let w = P(1100, nf)
+            ck("ลากสุดแรง — แผงกลางยังไม่ต่ำกว่า 480", w[1] >= 480,
+               String(format: "%.0f / %.0f / %.0f", w[0], w[1], w[2]))
+        } else {
+            ck("ลากสุดแรง — แผงกลางยังไม่ต่ำกว่า 480", false, "ได้ nil")
+        }
+
+        let w19 = P(1900)
+        for dx in [CGFloat(120), -120, 900, -900] {
+            guard let nf = PaneLayout.drag(after: 0, dx: dx, fractions: PaneLayout.defaultFractions,
+                                           total: 1900 - edges) else {
+                ck("ลากแผง \(Int(dx)) pt", false, "ได้ nil"); continue
+            }
+            let w = P(1900, nf)
+            let want = min(max(PaneLayout.floors[0], w19[0] + dx),
+                           w19[0] + w19[1] - PaneLayout.floors[1])
+            ck("ลากแผง \(Int(dx)) pt — กว้างตามที่ลาก", near(w[0], want, 0.3),
+               String(format: "ได้ %.1f ควร %.1f", w[0], want))
+            ck("ลากแผง \(Int(dx)) pt — แผงขวาไม่ขยับ", near(w[2], w19[2], 0.3))
+            ck("ลากแผง \(Int(dx)) pt — ไม่ต่ำกว่าพื้น",
+               (0..<3).allSatisfy { w[$0] >= PaneLayout.floors[$0] - 0.01 })
+        }
+        ck("หูจับสุดท้ายไม่มี",
+           PaneLayout.drag(after: 2, dx: 50, fractions: PaneLayout.defaultFractions,
+                           total: 1900 - edges) == nil)
+        ck("fraction เสีย/ไม่ครบ → คืนค่าเริ่มต้น",
+           PaneLayout.normalised([Double.nan, 1, 1]) == PaneLayout.normalised([0, 1, 1])
+           && PaneLayout.normalised(nil) == PaneLayout.defaultFractions
+           && PaneLayout.normalised([1, 2]) == PaneLayout.defaultFractions)
 
         verdict(fail == 0, "\n✓ ผ่าน \(pass)",
                 "\n✗ ไม่ผ่าน — ผ่าน \(pass) ตก \(fail)")

@@ -48,9 +48,11 @@ final class AppModel: ObservableObject {
     enum LogView { case running, events }
     @Published var logView: LogView = .running
     @Published var toast: String?
-    /// Three columns need ~780pt of list; below that the layout falls back to one column, exactly
-    /// like the web version's max-width:1500px media query.
-    @Published var isWide = true
+    /// The window's width, as the layout last reported it. Every pane width derives from this,
+    /// so it replaces the old window-wide `isWide` step function: **each pane now decides its own
+    /// internal layout from ITS OWN width**, which is what makes dragging the dividers work
+    /// rather than merely resize things.
+    @Published var windowWidth: CGFloat = 1600
 
     /// The width of the LEFT pane. **The song list and the log pane share that slot, so they must
     /// share this number**, and the whole point of it being a function is that they cannot drift.
@@ -63,7 +65,50 @@ final class AppModel: ObservableObject {
     /// click aimed at Reset could land on Reveal), the conditional focus-hint line, the cover
     /// frame that appeared and disappeared — and it is the one this project keeps re-learning.
     /// Two literals in two files is how it came back.
-    static func leftPaneWidth(wide: Bool) -> CGFloat { wide ? 900 : 300 }
+    /// Resolved from `store.paneSplit` and the window, with `PaneLayout.floors` in force.
+    ///
+    /// Still **one** number for the list and the log pane, which is what the paragraph above is
+    /// about: it is a computed property now instead of a function, and the two call sites read
+    /// the same one.
+    private var paneWidths: [CGFloat] {
+        PaneLayout.widths(fractions: store.paneSplit,
+                          total: windowWidth - PaneEdge.width * CGFloat(PaneLayout.count - 1))
+    }
+    var listWidth: CGFloat { paneWidths[0] }
+    var centreWidth: CGFloat { paneWidths[1] }
+    var setupWidth: CGFloat { paneWidths[2] }
+
+    /// Three columns side by side need room; below this the list is one scroller with the groups
+    /// as pinned headers. **Keyed on the LIST's width, not the window's** — that is the whole
+    /// difference, and it is why dragging the list wider can now bring the columns back on a
+    /// screen that could never reach the old 1900 pt window breakpoint.
+    static let listColumnsFrom: CGFloat = 700
+    var listShowsColumns: Bool { listWidth >= AppModel.listColumnsFrom }
+    /// The centre pane's own threshold, for the waveform legend. Same principle.
+    var centreIsWide: Bool { centreWidth >= 700 }
+
+    /// Written from inside a layout pass, so it defers exactly like `setWide` did.
+    func setWindowWidth(_ w: CGFloat) {
+        guard abs(w - windowWidth) > 0.5 else { return }
+        Task { @MainActor in self.windowWidth = w }
+    }
+
+    func dragPaneEdge(after i: Int, by dx: CGFloat) {
+        guard let next = PaneLayout.drag(after: i, dx: dx, fractions: store.paneSplit,
+                                         total: windowWidth
+                                                - PaneEdge.width * CGFloat(PaneLayout.count - 1))
+        else { return }
+        store.paneSplit = next
+        store.settingsChanged()
+        objectWillChange.send()
+    }
+
+    func resetPaneWidths() {
+        store.paneSplit = PaneLayout.defaultFractions
+        store.settingsChanged()
+        objectWillChange.send()
+        flash("คืนความกว้างสามแผงเป็นค่าเริ่มต้น")
+    }
     /// Which on-screen button is flashing because its keyboard shortcut just fired.
     @Published var pulseID: String?
     private var pulseTask: Task<Void, Never>?
@@ -198,14 +243,6 @@ final class AppModel: ObservableObject {
     /// 2 s is tight for someone watching the stage rather than the screen; the only cost of a
     /// longer window is a longer-lived ghost marker.
     static let pendingWindow: Double = 2.5
-
-    /// Written from inside a layout pass (`onAppear` / `onChange(of: geo.size.width)`). Assigning
-    /// a @Published there is "Modifying state during view update", and assigning the same value
-    /// published a frame for nothing during a live resize.
-    func setWide(_ w: Bool) {
-        guard w != isWide else { return }
-        Task { @MainActor in self.isWide = w }
-    }
 
     func pulse(_ id: String) {
         pulseTask?.cancel()
@@ -777,7 +814,7 @@ final class AppModel: ObservableObject {
     /// without an overlay reaching outside its parent.
     func columnWidths() -> [CGFloat] {
         ColumnLayout.widths(fractions: colFractions, folded: collapsedCols,
-                            total: AppModel.leftPaneWidth(wide: isWide) - ColumnEdge.width * 2,
+                            total: listWidth - ColumnEdge.width * 2,
                             railWidth: AppModel.collapsedColWidth,
                             columns: Library.columnLabels.count)
     }
@@ -792,7 +829,7 @@ final class AppModel: ObservableObject {
     func dragColumnEdge(after i: Int, by dx: CGFloat) {
         guard let next = ColumnLayout.drag(after: i, dx: dx, fractions: colFractions,
                                            folded: collapsedCols,
-                                           total: AppModel.leftPaneWidth(wide: isWide) - ColumnEdge.width * 2,
+                                           total: listWidth - ColumnEdge.width * 2,
                                            railWidth: AppModel.collapsedColWidth,
                                            columns: Library.columnLabels.count)
         else { return }

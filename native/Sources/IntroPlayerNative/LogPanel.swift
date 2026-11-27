@@ -74,7 +74,7 @@ struct LogPanel: View {
                 // Three tiles side by side need the wide pane; at 300pt they stack rather than
                 // squeeze, because the number has to stay legible across the room.
                 Group {
-                    if model.isWide {
+                    if model.listShowsColumns {
                         HStack(spacing: 10) { statTiles(tk) }
                     } else {
                         VStack(spacing: 8) { statTiles(tk) }
@@ -151,8 +151,8 @@ struct LogPanel: View {
         // pane does not resize when the log opens mid-taping.
         // The song list's width, not a number of its own: this pane REPLACES that one, so a
         // different value moves the centre pane every time `L` is pressed. See
-        // `AppModel.leftPaneWidth`.
-        .frame(width: AppModel.leftPaneWidth(wide: model.isWide))
+        // `AppModel.listWidth`.
+        .frame(width: model.listWidth)
         .frame(maxHeight: .infinity)
         .background(Palette.panel)
         .overlay(alignment: .trailing) {

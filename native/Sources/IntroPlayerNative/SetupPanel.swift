@@ -21,7 +21,9 @@ struct SetupPanel: View {
             }
             .padding(18)
         }
-        .frame(width: 340)
+        // 340 by design, resizable since the owner asked for all three panes to be draggable
+        // (§8c). `PaneLayout.floors` keeps it at 300 or more.
+        .frame(width: model.setupWidth)
         .background(Palette.panel)
         .overlay(alignment: .leading) { Rectangle().fill(Palette.line).frame(width: 1) }
     }
