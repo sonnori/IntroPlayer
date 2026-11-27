@@ -709,6 +709,17 @@ struct SongListView: View {
     /// `⋯` that holds the two actions which throw work away (§12).
     ///
     /// Only tags present in THIS round are offered, so a pick can never produce an empty list.
+    /// What the filter button says. It has to name every narrowing the menu behind it offers,
+    /// or the ones it leaves out are unreachable for anyone who does not already know.
+    private var filterButtonLabel: String {
+        switch (model.starFilter, model.tagFilter.isEmpty) {
+        case (true, true):   return "⌕ ★ ติดดาว"
+        case (true, false):  return "⌕ ★ + \(model.tagFilter)"
+        case (false, false): return "⌕ \(model.tagFilter)"
+        case (false, true):  return "⌕ กรองเพลง"
+        }
+    }
+
     @ViewBuilder
     private var tagFilterMenu: some View {
         let counts = model.tagCounts(inRound: model.currentPlaylist)
@@ -718,12 +729,16 @@ struct SongListView: View {
         if !counts.isEmpty || stars > 0 {
             Menu {
                 Button("ทุกเพลงในรอบนี้") { model.clearTagFilter(); model.setStarFilter(false) }
-                if stars > 0 {
-                    Divider()
-                    Button("\(model.starFilter ? "✓ " : "")★ เฉพาะติดดาว (\(stars))") {
-                        model.setStarFilter(!model.starFilter)
-                    }
+                Divider()
+                // Offered even at zero, disabled and saying why. An item that is simply absent
+                // until the feature has already been used cannot teach anyone the feature
+                // exists — which is how "กดติดดาว / กรองยังไง" happened.
+                Button(stars > 0
+                       ? "\(model.starFilter ? "✓ " : "")★ เฉพาะติดดาว (\(stars))"
+                       : "★ เฉพาะติดดาว — ยังไม่มีเพลงติดดาว (กด F)") {
+                    model.setStarFilter(!model.starFilter)
                 }
+                .disabled(stars == 0)
                 Divider()
                 ForEach(counts, id: \.tag) { c in
                     Button("\(Store.tagKey(c.tag) == Store.tagKey(model.tagFilter) ? "✓ " : "")"
@@ -732,19 +747,26 @@ struct SongListView: View {
                     }
                 }
             } label: {
-                // Spelled out rather than "⌕ แท็ก". The menu only exists once the round HAS a
-                // tag, so the first person to use tags has never seen this control before and
-                // the shortest possible label is the worst possible one.
-                Text(model.tagFilter.isEmpty ? "⌕ กรองตามแท็ก" : "⌕ \(model.tagFilter)")
+                // Spelled out rather than "⌕ แท็ก". The first person to use this has never seen
+                // the control before and the shortest possible label is the worst possible one.
+                //
+                // **"กรองตามแท็ก" was wrong the moment the star arrived**, and it was reported
+                // as the feature being missing: the menu also filters by star now, so a label
+                // naming only tags leaves somebody who wants the star filter with nowhere to
+                // look. §12's recurring defect in its labelling form — the control existed, said
+                // it did something else, and was therefore invisible.
+                Text(filterButtonLabel)
                     .font(Typo.font(11))
-                    .foregroundStyle(model.tagFilter.isEmpty ? Palette.muted : Palette.text)
+                    .foregroundStyle(model.tagFilter.isEmpty && !model.starFilter
+                                     ? Palette.muted : Palette.text)
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .contentShape(Rectangle())
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .background(model.tagFilter.isEmpty ? Palette.panel2 : Palette.tintSelect)
+            .background(model.tagFilter.isEmpty && !model.starFilter
+                        ? Palette.panel2 : Palette.tintSelect)
             .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.line)
                 .allowsHitTesting(false))
             .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -1282,8 +1304,15 @@ struct SongRow: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .top, spacing: 8) {
             // Leading edge: the trailing badge slot is already contested by ✓/✗/ตั้งค่าแล้ว.
+            // **`onsite`, not `amber`** — a live §6d violation that predated the star and was
+            // found while placing it. §6d's table gives `onsite` magenta exactly one meaning,
+            // "changed after the handover", and the waveform's ghost stems already draw this
+            // same fact in that colour; only this glyph was amber, where §6d gives amber exactly
+            // one meaning of its own: the intro-end stop is not armed. Same class as the Intro
+            // End marker that stayed green and the Played button that stayed green (§12) — a
+            // hue violation in a place nobody is editing does not announce itself.
             Text(c.hasOnsiteEdits ? "✎" : " ")
-                .font(Typo.font(10)).foregroundStyle(Palette.amber)
+                .font(Typo.font(10)).foregroundStyle(Palette.onsite)
                 .frame(width: 9)
             // The setter's note (§8g). Until this, nothing in the list said WHERE the
             // annotations were, so a setter scanning a round had to open every song to find out.
@@ -1325,9 +1354,20 @@ struct SongRow: View {
             // `Palette.text`, not a hue: §6d gives every hue exactly one meaning and none of
             // them is "I want this one". It reads as brighter than the two grey marks beside
             // it, which is emphasis rather than a fourth colour.
+            // **Yellow, on request** — and `Palette.amber` itself rather than a new gold beside
+            // it, because two near-identical yellows across two panes is worse than one hue with
+            // a scope. §6d's rule is that a hue must never be the SOLE carrier of a state; the
+            // star's carriers are its glyph shape and, in SETUP, a button that says so in words.
+            //
+            // What makes it safe is that the song list now has no other amber: the `✎` above
+            // moved to `onsite` in the same change, and `badgeColor` already refuses amber ("a
+            // burned question is red"). Amber's documented meaning — the intro-end stop is not
+            // armed — lives in the guard strip and on the transport, in the centre pane, where
+            // no star appears. §6d is updated to say that out loud rather than left to be
+            // rediscovered.
             Text(c.starred ? "★" : " ")
                 .font(Typo.font(12, latinOnly: true))
-                .foregroundStyle(Palette.text)
+                .foregroundStyle(Palette.amber)
                 .frame(width: 12)
             Text(Library.trackNumber(path))
                 .font(Typo.numS).foregroundStyle(Palette.dim)

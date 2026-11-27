@@ -689,9 +689,9 @@ four. The state that can put a whole song on camera cannot share a colour with "
 | `cyan` | the Intro bracket — **both** ends, told apart by which edge the flag sits on |
 | `green` | a human answered correctly. Nothing else. |
 | `red` | wrong / burned question, and destructive controls |
-| `amber` | **the intro-end stop is not armed, or something is wrong.** Nothing else. |
+| `amber` | **the intro-end stop is not armed, or something is wrong** — in the CENTRE pane and on the transport, where that state lives. In the song list it is the ★, on request; see below. |
 | `purple` | Reveal, and the Hook marker it jumps to |
-| `onsite` magenta | changed after the handover |
+| `onsite` magenta | changed after the handover — the waveform's ghost stems **and the song row's `✎`**, which was amber until 1.6.10 |
 
 Three measured constraints behind that table:
 
@@ -812,6 +812,30 @@ that amber plus a word is the carrier and never the hue alone; and the save-fail
 this red — it sits on `header`, dark in both themes with fixed-light text. **So amber and red may
 never be the sole difference between two things in the light theme.** If that ever has to be
 fixed rather than pinned, it is a decision about the show's colours, not a threshold to nudge.
+
+**Amber's scope, and the `✎` that was violating it.** The star was asked for in yellow
+(*"ปรับ visual ดาวเป็นสีเหลืองหน่อยดิ"*), which is the second time yellow has been asked for —
+§11 declined it for the active marker, because a yellow marker 60 pt under the amber guard strip
+is the dilution this rule exists to prevent. The star is granted it, and what makes that
+different is measurable rather than a matter of taste:
+
+- The star never appears in the **centre pane**, where amber's meaning lives. It is in the song
+  list, which is the setter's pane and carries no armed/disarmed state at all.
+- Its carriers are its **glyph shape** and, in SETUP, a button that says what it does in words —
+  §6d's condition for a redundant colour, the same one that let tag chips be coloured (§8g).
+- **The song list now has no other amber.** `badgeColor` already refuses it ("a burned question
+  is red"), and the row's `✎` moved to `onsite`.
+
+That last one was a live violation found while placing the star: `✎` means "changed after the
+handover", which §6d's table assigns to `onsite` magenta and which the waveform's ghost stems
+already drew in that colour — only this glyph was amber. Same class as the Intro End marker that
+stayed green and the Played button that stayed green (§12): **a hue violation in a place nobody
+is editing does not announce itself.**
+
+> SETUP's star button stays neutral (`tintSelect`) rather than matching the glyph. Matching was
+> the first instinct and it is wrong: the Played button directly above it is `tintWarn`/`amber`
+> by §12's own correction, so an amber star under it would be two identical buttons with
+> different meanings, touching.
 
 > **Dark is the default and that is not a style preference.** The operator's position is a dim
 > corner of a studio; a white 2560×1080 panel at arm's length is a light source pointed at the

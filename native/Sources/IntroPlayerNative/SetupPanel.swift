@@ -45,6 +45,11 @@ struct SetupPanel: View {
         // `tintSelect`, the same neutral emphasis the active column header and the filter strip
         // use — NOT a hue. §6d gives each hue exactly one meaning and none of them is "I want
         // this one"; amber in particular means the intro-end stop is not armed.
+        // **Neutral here, amber only in the song list.** Matching the glyph was the first
+        // instinct and it is wrong: the Played button directly above is `tintWarn`/`amber` by
+        // §12's own correction, so an amber star under it would be two identical buttons with
+        // different meanings, touching. The glyph in the list carries the yellow; this carries
+        // the word.
         wideButton(c.starred ? "★ ติดดาวไว้ — กดเพื่อเอาออก  (F)" : "☆ ติดดาวเพลงนี้  (F)",
                    bg: c.starred ? Palette.tintSelect : Palette.panel2,
                    fg: c.starred ? Palette.tintSelectText : Palette.text,
