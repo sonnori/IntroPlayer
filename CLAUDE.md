@@ -2266,6 +2266,54 @@ Four properties, each for a reason:
   uses — not a colour with a meaning. §6d gives each hue exactly one, and amber in particular
   means the intro-end stop is not armed and nothing else.
 
+### Starring a song (`starred`, `F`)
+
+Asked for as *"ติดดาวเพลงในชุด ในกรณีที่เราหาเผื่อ แต่อยาก mark บางเพลงที่ต้องใช้ ... ก็ทำงาน
+เหมือนคล้ายๆ tag น่ะแหล่ะ"* — a setter gathers more songs than the round needs and marks the
+keepers.
+
+**A field of its own, not a reserved tag**, despite the request saying "like a tag". A tag is a
+word that repeats across songs and earns a colour, a registry entry and a row in the tag menu;
+this is one bit with a one-key toggle. Putting it in `tags` would spend a slot of `tagsPerSong`,
+a colour out of the ramp and a line of the chip row on something that is none of those. What IS
+worth copying from tags is the filtering, and that is where it shares machinery.
+
+- **`updateConfigQuiet`, never `updateConfig`** — the fourth costume of §8g's note trap.
+  `updateConfig` stamps `configured = true, auto = false`, which would certify an unreviewed
+  machine guess as reviewed because someone marked a song they want, dropping it out of the
+  `Return`/`Tab` sweep **and** out of the pre-flight's `stillAuto` and `hookDefault` warnings.
+  Starring is the thing a setter does *before* deciding anything about the markers, which makes
+  this the cheapest one of the four to get wrong.
+- **`Library.visible` gained a `starred:` parameter** rather than a second accessor — still the
+  one place the list narrows (§8g). It INTERSECTS with the tag filter and the search; it does not
+  replace them.
+- **Dies with the process**, like `tagFilter` and `search`, and `setPlaylist` and
+  `switchDataRoot` clear it. `setStarFilter` refuses a filter that would show nothing, which for
+  the star is the only guard there is — unlike a tag, there is no menu that could restrict itself
+  to what exists.
+- **`select` clears it at the same choke point** as the other two narrowings: the selection can
+  never be hidden.
+- **Display-only in the song row.** A third reserved slot, 12 pt because `★` measures 12.19 at
+  12 pt and lands in `.SFNS-Regular` — sized from a measurement rather than from the 9 pt slot
+  beside it, which `✎` at 10.93 has always overflowed. Toggling is `F` or the SETUP button, never
+  a click in the row: a control a few pt from a row whose tap calls `select()` is §12's recurring
+  defect, and `select` has no playing guard.
+- **No hue** (§6d): `Palette.text` in the row, `tintSelect` on the SETUP button — the same
+  neutral emphasis the active column header and the filter strip use.
+- **`F` is not behind the two-press rule**, by §11's reasoning for `T`: the mis-press that costs
+  something is reaching for `F` (keyCode 3) and hitting `H` (4), which a guard on `F` cannot
+  protect; starring airs nothing and is undone by pressing the key again.
+- **One filter strip, not two.** The star and the tag share it, because §15 measures what another
+  strip costs this window.
+
+**It crosses the handover, additively** — `DiffField.starred`, a row only when the sender has a
+star this machine lacks. So a star the *operator removed* does not travel back, the same cost and
+the same safe direction as the note and the tag list. It is the field where `isAdditive` and
+`isProse` stop naming the same set: a star is one word in a value column, not a sentence.
+
+`--filtertest` covers the intersection, the handover in both directions, and the counterfactual
+as a number (handing `Handoff.package` the star-filtered list loses 2 of 4 songs).
+
 ### Searching the round by filename (`/`)
 
 Asked for as *"ค้นจากชื่อไฟล์เฉย ๆ เวลาอยากหาเพลงที่อยากเล่น"*. Same machinery as the tag filter
@@ -2595,6 +2643,7 @@ explicitly. Pause-on-buzz → Space resumes exactly where it stopped, still in `
 | `1` / `2` | SE correct / wrong — **also writes the taping log** (§8d) |
 | `L` | Open/close the taping log — a **left-pane swap**, not a sheet (`Esc` closes) |
 | `T` | Toggle Played on current song — **one key from `R`**, see below |
+| `F` | ★ Star / unstar the current song — a setter's "I want this one" (§8g) |
 | `I` / `O` / `H` | Mark introStart / introEnd / hook at playhead — **confirm-on-second-press while playing** |
 | `←` / `→` | Nudge the **focused** marker by 0.01 s (`AppModel.nudgeStep`). Autorepeats — hold to slew |
 | `Shift` + `←` / `→` | The same nudge at **0.1 s** (`nudgeStepCoarse`) — the `±` buttons' own step, i.e. Unity's 10× |
@@ -3573,7 +3622,11 @@ Engineering
 - **Coverage gaps the test-honesty audit found and that are still open.** Each was reproduced by
   injecting the real defect and watching the suite stay green, so none of these is a guess. In
   the order they are worth doing:
-  1. **`setNote` / `addTag` / `removeTag` have no assertion that they use `updateConfigQuiet`.**
+  1. **`setNote` / `addTag` / `removeTag` / `toggleStar` have no assertion that they use
+     `updateConfigQuiet`.** Four write paths now — `toggleStar` was added with its negative
+     control run and failing to fail: routing it through `updateConfig` leaves `--filtertest`
+     green at 33/33. The property is named in each function's doc comment, which is the only
+     protection they have.
      Routing all three through `updateConfig` instead — §8g's named trap, which stamps
      `configured = true, auto = false` and drops the song out of the `Return`/`Tab` sweep AND out
      of the pre-flight's `stillAuto` and `hookDefault` warnings, so a round nobody reviewed

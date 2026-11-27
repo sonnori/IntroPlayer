@@ -598,8 +598,11 @@ enum Library {
     /// write to the operator's real config. Matching is on `Store.tagKey`, so a difference in
     /// Latin case never hides a song.
     static func visible(_ paths: [String], tag: String, search: String = "",
-                        store: Store) -> [String] {
+                        starred: Bool = false, store: Store) -> [String] {
         var out = paths
+        // Still the ONE place the list narrows (§8g). A third way in is a third chance for the
+        // handover, the pre-flight or the review sweep to be handed a view instead of the round.
+        if starred { out = out.filter { store.config(for: $0).starred } }
         if !tag.isEmpty {
             let k = Store.tagKey(tag)
             out = out.filter { p in
@@ -1153,6 +1156,7 @@ enum Diagnostics {
               .away)
 
         print("\nผ่าน \(pass)  ตก \(fail)")
+
         Diagnostics.verdict(fail == 0, "✓ ผ่าน", "✗ ไม่ผ่าน")
     }
 
@@ -3140,15 +3144,18 @@ enum Diagnostics {
             ps.isEmpty ? "—" : ps.map(Library.baseName).sorted().joined(separator: ", ")
         }
 
-        func song(_ tags: [String]) -> [String: Any] {
-            ["introStart": 1.0, "introEnd": 16.0, "hook": 61.0, "configured": true, "tags": tags]
+        func song(_ tags: [String], star: Bool = false) -> [String: Any] {
+            var d: [String: Any] = ["introStart": 1.0, "introEnd": 16.0, "hook": 61.0,
+                                    "configured": true, "tags": tags]
+            if star { d["starred"] = true }
+            return d
         }
         let round = "EP09"
         let paths = ["EP09/101_a.mp3", "EP09/102_b.mp3", "EP09/201_c.mp3", "EP09/301_d.mp3"]
         let st = Store(rawForTest: [
             paths[0]: song(["ยุค 90", "ผู้หญิงร้อง"]),
-            paths[1]: song(["ยุค 90"]),
-            paths[2]: song(["Rock"]),
+            paths[1]: song(["ยุค 90"], star: true),
+            paths[2]: song(["Rock"], star: true),
             paths[3]: song([]),
         ])
 
@@ -3240,6 +3247,36 @@ enum Diagnostics {
                               : suspect.sorted().joined(separator: ", "))
 
         print("\nผ่าน \(pass)  ตก \(fail)")
+        print("\n★) กรองเฉพาะติดดาว")
+        let starred = Library.visible(paths, tag: "", starred: true, store: st)
+        check("เห็นเฉพาะที่ติดดาว", names(starred) == "102_b.mp3, 201_c.mp3", names(starred))
+        check("ไม่กรองดาว = ครบทุกเพลง",
+              Library.visible(paths, tag: "", starred: false, store: st).count == paths.count)
+        // Both narrowings at once must INTERSECT, not replace one another.
+        let both = Library.visible(paths, tag: "ยุค 90", starred: true, store: st)
+        check("ดาว + แท็ก — ตัดกัน ไม่ใช่แทนกัน", names(both) == "102_b.mp3", names(both))
+        let bothSearch = Library.visible(paths, tag: "", search: "201", starred: true, store: st)
+        check("ดาว + คำค้น — ตัดกัน", names(bothSearch) == "201_c.mp3", names(bothSearch))
+        // The counterfactual as a number — §8g's rule that the cost of handing a VIEW to the
+        // handover is written down rather than argued about.
+        let starPkg = Handoff.package(round: round, paths: starred, store: st, by: "")
+        check("ถ้าส่งต่อด้วยรายการที่กรองดาวไว้ จะหาย 2 จาก 4 เพลง",
+              starPkg.songs.count == 2, "ได้ \(starPkg.songs.count)")
+        // The star crosses the handover, additively.
+        var sent = Handoff.package(round: round, paths: paths, store: st, by: "")
+        check("round.json พาดาวไปด้วย",
+              sent.songs["102_b.mp3"]?.starred == true
+              && sent.songs["301_d.mp3"]?.starred == false)
+        sent.songs["301_d.mp3"]?.starred = true
+        let recv = Store(rawForTest: [paths[3]: song([])])
+        let pl = Handoff.plan(sent, round: round, paths: [paths[3]], store: recv)
+        check("ดาวที่เข้ามาใหม่ = มีแถวให้เลือก", pl.rows.contains { $0.field == .starred })
+        var noStar = sent
+        noStar.songs["102_b.mp3"]?.starred = false
+        let recv2 = Store(rawForTest: [paths[1]: song([], star: true)])
+        let pl2 = Handoff.plan(noStar, round: round, paths: [paths[1]], store: recv2)
+        check("ฝั่งส่งไม่มีดาว = เงียบ ไม่ใช่สั่งให้เอาดาวออก",
+              !pl2.rows.contains { $0.field == .starred })
         Diagnostics.verdict(fail == 0, "✓ ผ่าน", "✗ ไม่ผ่าน")
     }
 

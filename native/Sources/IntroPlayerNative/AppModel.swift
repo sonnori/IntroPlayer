@@ -399,6 +399,10 @@ final class AppModel: ObservableObject {
     /// somewhere else, and it was reported from real use as "the app can't find my songs". A
     /// filter is the same trap with a weaker hint, so it dies with the process.
     @Published private(set) var tagFilter = ""
+    /// Show only starred songs. **Dies with the process, no `_settings` key** — `tagFilter`'s and
+    /// `search`'s measured reason (§8g): a narrowing that survives a relaunch is how an operator
+    /// opens the app on a show day to a round that looks like most of its work is missing.
+    @Published private(set) var starFilter = false
 
     /// Free-text narrowing of the song LIST by filename — "หาเพลงที่อยากเล่น". Empty = off.
     ///
@@ -524,6 +528,42 @@ final class AppModel: ObservableObject {
         objectWillChange.send()
     }
 
+    /// Toggle the star on the current song.
+    ///
+    /// **`updateConfigQuiet`, never `updateConfig`.** `updateConfig` stamps
+    /// `configured = true, auto = false`, which would certify an unreviewed machine guess as
+    /// human-reviewed on the strength of someone marking a song they want — dropping it out of
+    /// the `Return`/`Tab` sweep AND out of the pre-flight's `stillAuto` and `hookDefault`
+    /// warnings. §8g records this trap for the note and §7a4 for `applyGuess`; this is the
+    /// fourth costume and the cheapest one to get wrong, because starring is the thing a setter
+    /// does BEFORE deciding anything about the markers.
+    func toggleStar() {
+        guard current != nil else { return }
+        updateConfigQuiet { $0.starred.toggle() }
+        flash(config().starred ? "★ ติดดาวแล้ว" : "เอาดาวออกแล้ว")
+    }
+
+    func setStarFilter(_ on: Bool) {
+        guard on != starFilter else { return }
+        // The same refusal as `setTagFilter`: never produce an empty list. Unlike a tag, the
+        // star filter has no menu that could restrict itself to what exists, so this is the
+        // only guard there is.
+        if on, songsIn(currentPlaylist).allSatisfy({ !store.config(for: $0).starred }) {
+            flash("รอบนี้ยังไม่มีเพลงที่ติดดาว")
+            return
+        }
+        starFilter = on
+        if on, let cur = current, !store.config(for: cur).starred,
+           let first = visibleSongs(currentPlaylist).first {
+            select(first)
+        }
+        objectWillChange.send()
+    }
+
+    var starredCount: Int {
+        songsIn(currentPlaylist).count { store.config(for: $0).starred }
+    }
+
     func matchesTagFilter(_ path: String) -> Bool {
         tagFilter.isEmpty || !Library.visible([path], tag: tagFilter, store: store).isEmpty
     }
@@ -538,7 +578,8 @@ final class AppModel: ObservableObject {
     /// two thirds of its questions missing. Now the only way to do that is to type
     /// `visibleSongs` somewhere it does not belong, which is a visible mistake.
     func visibleSongs(_ pl: String) -> [String] {
-        Library.visible(songsIn(pl), tag: tagFilter, search: search, store: store)
+        Library.visible(songsIn(pl), tag: tagFilter, search: search, starred: starFilter,
+                        store: store)
     }
     func visibleSongs(column i: Int) -> [String] {
         visibleSongs(currentPlaylist).filter { Library.column(of: $0) == i }
@@ -645,6 +686,7 @@ final class AppModel: ObservableObject {
         analysisCache.removeAll()
         coverCache.removeAll()
         tagFilter = ""
+        starFilter = false
         closeSearch()
         collapsedCols.removeAll()   // a fold describes the library being left, same as the filter
         colFractions = ColumnLayout.evenFractions(Library.columnLabels.count)
@@ -698,6 +740,8 @@ final class AppModel: ObservableObject {
         // entering, and the fold would hide it.
         collapsedCols.removeAll()
         colFractions = ColumnLayout.evenFractions(Library.columnLabels.count)
+        // A round where nothing is starred would otherwise open showing nothing at all.
+        starFilter = false
         currentPlaylist = p
         store.lastPlaylist = p
         store.settingsChanged()
@@ -743,6 +787,11 @@ final class AppModel: ObservableObject {
             let t = tagFilter
             tagFilter = ""
             flash("เลิกกรอง \"\(t)\" — เพลงที่เลือกไม่มีแท็กนี้")
+        }
+        // Same rule, same choke point, for the star filter.
+        if starFilter, !store.config(for: path).starred {
+            starFilter = false
+            flash("เลิกกรองเฉพาะติดดาว — เพลงที่เลือกไม่ได้ติดดาว")
         }
         // Same rule, same choke point, for the search term — `Tab`, `Return`'s advance, a log
         // row and `nextNeedingReview` all target the whole round on purpose.

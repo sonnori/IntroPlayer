@@ -47,7 +47,7 @@ enum PulseID {
     static let start = "start", reveal = "reveal", reset = "reset", played = "played"
     static let correct = "correct", wrong = "wrong", log = "log"
     static let zoomIn = "zin", zoomOut = "zout", zoomFit = "zfit", zoomIntro = "zintro"
-    static let ignoreEnd = "ignore"
+    static let ignoreEnd = "ignore", star = "star"
     static func mark(_ label: String) -> String { "mark:" + label }
 }
 

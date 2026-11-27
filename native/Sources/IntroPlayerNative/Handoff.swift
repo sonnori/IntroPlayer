@@ -39,6 +39,10 @@ struct RoundPackage {
         var note = ""
         /// Merged as a set UNION, which is the additive rule for a list.
         var tags: [String] = []
+        /// "I want this one" (§8g). Travels for the same reason the note does — it is a mark one
+        /// person makes for another to act on — and merges the same way: additive, so `false`
+        /// arriving means silence rather than "take the star off".
+        var starred = false
     }
 
     static func url(forRound playlist: String) -> URL {
@@ -70,6 +74,7 @@ struct RoundPackage {
             if let x = d["ignoreEnd"]  as? Bool { e.b.ignoreEnd = x }
             if let x = d["configured"] as? Bool { e.configured = x }
             if let x = d["auto"]       as? Bool { e.auto = x }
+            if let x = d["starred"]    as? Bool { e.starred = x }
             if let x = d["note"]       as? String { e.note = Store.clampNote(x) }
             if let x = d["tags"]       as? [Any] {
                 e.tags = Store.clampTags(x.compactMap { $0 as? String })
@@ -109,6 +114,7 @@ struct RoundPackage {
             if e.b.trimDb != 0 { d["trimDb"] = e.b.trimDb }
             if e.configured { d["configured"] = true }
             if e.auto { d["auto"] = true }
+            if e.starred { d["starred"] = true }
             if !e.note.isEmpty { d["note"] = e.note }
             if !e.tags.isEmpty { d["tags"] = e.tags }
             ss[name] = d
@@ -289,11 +295,13 @@ enum DiffField: Hashable {
     case marker(MarkerField)
     case note
     case tags
+    case starred
 
     var key: String {
         switch self {
         case .marker(let f): return f.rawValue
         case .note: return "note"
+        case .starred: return "starred"
         case .tags: return "tags"
         }
     }
@@ -301,6 +309,7 @@ enum DiffField: Hashable {
         switch self {
         case .marker(let f): return f.label
         case .note: return "โน้ตคนรัน"
+        case .starred: return "★ ติดดาว"
         case .tags: return "แท็ก"
         }
     }
@@ -321,7 +330,7 @@ enum DiffField: Hashable {
     var isAdditive: Bool {
         switch self {
         case .marker: return false
-        case .note, .tags: return true
+        case .note, .tags, .starred: return true
         }
     }
     /// Rendered on its own lines rather than in a value column — a sentence or a tag list
@@ -330,6 +339,10 @@ enum DiffField: Hashable {
         switch self {
         case .marker: return false
         case .note, .tags: return true
+        // A star is one word in a value column, not a sentence — so `isAdditive` and `isProse`
+        // stop naming the same set here. §8g says they are different questions that happened to
+        // have the same answer; this is the field that splits them.
+        case .starred: return false
         }
     }
 }
@@ -389,7 +402,7 @@ enum Handoff {
             let c = store.config(for: path)
             p.songs[Library.baseName(path)] =
                 RoundPackage.Entry(b: c.current, configured: c.isConfigured, auto: c.auto,
-                                   note: c.note, tags: c.tags)
+                                   note: c.note, tags: c.tags, starred: c.starred)
         }
         // Scoped to the tags this round carries, not the whole library's palette: `round.json`
         // describes one round, and a colour for a tag that is not in it would be noise the
@@ -586,6 +599,13 @@ enum Handoff {
             // decline a tag, and a union they cannot see is a change nobody reviewed. What does
             // NOT travel, by the same additive direction as the note, is a tag the operator
             // REMOVED — that has to be said out loud.
+            // The star, additive in the same direction and for the same reason: `true` arriving
+            // is something to say, `false` arriving is "I have nothing to say about this". So a
+            // star the OPERATOR removed does not travel back — the same cost the note and the
+            // tag list carry, and the same safe direction.
+            if e.starred, !local.starred {
+                diffs.append(DiffRow(path: path, field: .starred, mine: "—", theirs: "★"))
+            }
             let added = Handoff.tagsAdded(local.tags, e.tags)
             if !added.isEmpty {
                 diffs.append(DiffRow(
@@ -630,6 +650,12 @@ enum Handoff {
             // reach here and cannot erase a local one.
             if isFresh || accepted.contains("\(path)\u{1}\(DiffField.note.key)") {
                 c.note = Store.clampNote(e.note)
+            }
+            if isFresh || accepted.contains("\(path)\u{1}\(DiffField.starred.key)") {
+                // Never cleared here: `plan` only raises this row when the sender has a star
+                // this machine lacks, so `e.starred` is true whenever it is accepted. A fresh
+                // song takes the sender's value as-is, which for `false` is also the default.
+                c.starred = e.starred || c.starred
             }
             if isFresh {
                 c.tags = Store.clampTags(e.tags)

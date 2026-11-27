@@ -40,6 +40,22 @@ struct SetupPanel: View {
             model.updateConfigQuiet { $0.played.toggle() }
         }
 
+        // The star. Named key, for the reason the comment above gives about Played.
+        //
+        // `tintSelect`, the same neutral emphasis the active column header and the filter strip
+        // use — NOT a hue. §6d gives each hue exactly one meaning and none of them is "I want
+        // this one"; amber in particular means the intro-end stop is not armed.
+        wideButton(c.starred ? "★ ติดดาวไว้ — กดเพื่อเอาออก  (F)" : "☆ ติดดาวเพลงนี้  (F)",
+                   bg: c.starred ? Palette.tintSelect : Palette.panel2,
+                   fg: c.starred ? Palette.tintSelectText : Palette.text,
+                   // `lineStrong`, the same neutral emphasis the focused marker card uses. A
+                   // new `tintSelectLine` would mean a new `Palette.audit` entry and a new row
+                   // in `--palettetest` — §6d records adding a value without measuring it as the
+                   // failure that put four pairs at 3.66:1.
+                   border: c.starred ? Palette.lineStrong : Palette.line) {
+            model.toggleStar()
+        }
+
         if let d = model.current.flatMap({ model.donor(for: $0) }), !c.isConfigured {
             wideButton("⤵ ดึงค่าจากรอบ \"\(Library.playlist(of: d).isEmpty ? Library.rootLabel : Library.playlist(of: d))\"",
                        bg: Palette.tintCyan,

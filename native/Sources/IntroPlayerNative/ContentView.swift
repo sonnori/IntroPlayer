@@ -447,6 +447,12 @@ struct ContentView: View {
             case 15: model.cancelPending(); model.player.reveal(config: c); model.pulse(PulseID.reveal)
             case 1:  model.cancelPending(); model.player.reset(config: c); model.pulse(PulseID.reset)  // S
             case 37: model.showLog.toggle(); model.pulse(PulseID.log)                      // L
+            // `F` for favourite. keyCode 3, two keys from `H` (4) which marks the hook — and
+            // deliberately NOT behind the two-press rule, by the same reasoning §11 gives for
+            // `T`: the mis-press that costs something is reaching for F and hitting H, which a
+            // guard on F does not protect, and starring airs nothing and is undone by pressing
+            // the key again.
+            case 3: model.toggleStar(); model.pulse(PulseID.star)                          // F
             case 18, 83: model.score("correct"); model.pulse(PulseID.correct)              // 1
             case 19, 84: model.score("wrong"); model.pulse(PulseID.wrong)                  // 2
             // Instant while stopped, confirm-on-second-press while playing — see requestMark.
@@ -706,9 +712,18 @@ struct SongListView: View {
     @ViewBuilder
     private var tagFilterMenu: some View {
         let counts = model.tagCounts(inRound: model.currentPlaylist)
-        if !counts.isEmpty {
+        let stars = model.starredCount
+        // The menu used to exist only once the round had a tag. The star is the one narrowing a
+        // round can have before anyone has typed a tag at all, so the gate is either/or now.
+        if !counts.isEmpty || stars > 0 {
             Menu {
-                Button("ทุกเพลงในรอบนี้") { model.clearTagFilter() }
+                Button("ทุกเพลงในรอบนี้") { model.clearTagFilter(); model.setStarFilter(false) }
+                if stars > 0 {
+                    Divider()
+                    Button("\(model.starFilter ? "✓ " : "")★ เฉพาะติดดาว (\(stars))") {
+                        model.setStarFilter(!model.starFilter)
+                    }
+                }
                 Divider()
                 ForEach(counts, id: \.tag) { c in
                     Button("\(Store.tagKey(c.tag) == Store.tagKey(model.tagFilter) ? "✓ " : "")"
@@ -849,15 +864,21 @@ struct SongListView: View {
 
     @ViewBuilder
     private var tagFilterStrip: some View {
-        if !model.tagFilter.isEmpty {
+        // ONE strip for both narrowings. Two would stack, and §15 measures what strip height
+        // costs this window: past `CenterView`'s waveform floor the overrun clips the song title
+        // off the top and ✓/✗ off the bottom.
+        if !model.tagFilter.isEmpty || model.starFilter {
             HStack(spacing: 8) {
-                Text("⌕ กรอง: \(model.tagFilter)")
+                Text(model.tagFilter.isEmpty
+                     ? "★ กรอง: เฉพาะติดดาว"
+                     : (model.starFilter ? "⌕ กรอง: ★ + \(model.tagFilter)"
+                                         : "⌕ กรอง: \(model.tagFilter)"))
                     .font(Typo.font(12, .semibold)).foregroundStyle(Palette.tintSelectText)
                 Text("เห็น \(model.visibleSongs(model.currentPlaylist).count) "
                      + "จาก \(model.songsIn(model.currentPlaylist).count) · ซ่อนอยู่ \(model.hiddenCount)")
                     .font(Typo.font(11)).foregroundStyle(Palette.muted)
                 Spacer(minLength: 0)
-                Button { model.clearTagFilter() } label: {
+                Button { model.clearTagFilter(); model.setStarFilter(false) } label: {
                     Text("✕ เลิกกรอง").font(Typo.font(11))
                         .padding(.horizontal, 8).padding(.vertical, 4)
                         .contentShape(Rectangle())
@@ -1290,6 +1311,24 @@ struct SongRow: View {
             Text(c.note.isEmpty ? " " : "※")
                 .font(Typo.font(10)).foregroundStyle(Palette.muted)
                 .frame(width: 9)
+            // A third reserved slot, for the same reason as the other two: a slot that appears
+            // only when filled moves the title under the cursor (§12). Display-only — toggling
+            // is `F` or the SETUP button, never a click here, because a control a few pt from a
+            // row whose tap calls `select()` (no playing guard, cuts the audio) is §12's
+            // recurring defect.
+            //
+            // `★` measures 12.19 pt at 12 pt and lands in `.SFNS-Regular`, not LastResort — so
+            // it gets a 12 pt slot rather than the 9 the other two use. `✎` is 10.93 in a 9 pt
+            // slot and has always overflowed it; sizing this one from a measurement instead of
+            // from its neighbour is §8g's note about that.
+            //
+            // `Palette.text`, not a hue: §6d gives every hue exactly one meaning and none of
+            // them is "I want this one". It reads as brighter than the two grey marks beside
+            // it, which is emphasis rather than a fourth colour.
+            Text(c.starred ? "★" : " ")
+                .font(Typo.font(12, latinOnly: true))
+                .foregroundStyle(Palette.text)
+                .frame(width: 12)
             Text(Library.trackNumber(path))
                 .font(Typo.numS).foregroundStyle(Palette.dim)
                 .frame(width: 26, alignment: .leading)
@@ -1337,7 +1376,7 @@ struct SongRow: View {
                     }
                     Spacer(minLength: 0)
                 }
-                .padding(.leading, 52)       // past the two glyph slots and the track number
+                .padding(.leading, 64)       // past the three glyph slots and the track number
                 .frame(height: 18)
             }
             // The note itself, under the row — asked for as "ให้โน้ตคนรันแสดงใน list เพลงด้วย
@@ -1365,7 +1404,7 @@ struct SongRow: View {
                     .foregroundStyle(Palette.muted)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .padding(.leading, 52)
+                    .padding(.leading, 64)
                     .frame(height: 16, alignment: .topLeading)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }

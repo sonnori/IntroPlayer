@@ -71,6 +71,17 @@ struct SongConfig {
     var ignoreEnd: Bool = false
     var trimDb: Double = 0
     var played: Bool = false
+    /// "I want this one." Asked for as *"ติดดาวเพลงในชุด ในกรณีที่เราหาเผื่อ แต่อยาก mark บางเพลง
+    /// ที่ต้องใช้"* — a setter gathers more songs than the round needs and marks the keepers.
+    ///
+    /// A field of its own rather than a reserved tag, even though the request says *"คล้ายๆ
+    /// tag"*. A tag is a word that repeats across songs and earns a colour and a place in the
+    /// registry; this is one bit with a one-key toggle, and putting it in `tags` would spend a
+    /// slot of `tagsPerSong`, a colour out of the ramp and a row in the tag menu on something
+    /// that is none of those. It filters like a tag because that is the part worth copying.
+    ///
+    /// Like `played` and `note` it must NEVER stamp `configured` — see `AppModel.toggleStar`.
+    var starred: Bool = false
     var configured: Bool = false
     var auto: Bool = false          // introStart was guessed, not placed by the GM
     /// Free text the setter writes for the OPERATOR to read in the moment they open the question
@@ -335,7 +346,18 @@ final class Store {
     var setterName = ""
     /// Where to look for a newer build. Empty = the check is off, which is the default and the
     /// only state that needs no network at all. See §15.
-    var updateFeed = ""
+    /// Where to check for a newer build. **Seeded on a library that has never carried the key**,
+    /// so a fresh install can press "อัปเดตเลย" without anyone typing this in (§15).
+    ///
+    /// The distinction that makes that safe is `absent` vs `present-but-empty`. Before this they
+    /// were the same state: `writeSettings` DELETED the key when the operator cleared the field,
+    /// so a default applied on "absent" would have reasserted itself on the next launch and the
+    /// feed could never be turned off. Clearing it now writes an explicit `""`.
+    ///
+    /// `""` therefore means "a human turned this off" and is left alone; a missing key means
+    /// "nobody has ever said", which is the only case the default fills.
+    static let defaultUpdateFeed = "sonnori/IntroPlayer"
+    var updateFeed = Store.defaultUpdateFeed
     /// Where launch snapshots of the questions are ALSO copied. Empty = local only, which is
     /// the default. Point it at a synced folder (Drive, Dropbox, iCloud) and `Snapshot` closes
     /// the half of §13's data gap that a copy inside this folder cannot: losing the folder or
@@ -452,7 +474,10 @@ final class Store {
         // crosses to another machine's one-line strip. Everything that crosses a machine
         // boundary gets a bound (§15's cap on `notes` and `download`).
         setterName = Store.clampName((s["setterName"] as? String) ?? "")
-        updateFeed = (s["updateFeed"] as? String) ?? ""
+        // `as? String` first so a present-but-empty value survives as "off"; only a key that is
+        // absent entirely, or holds something this build cannot read as a String, takes the
+        // default. See `defaultUpdateFeed`.
+        updateFeed = (s["updateFeed"] as? String) ?? Store.defaultUpdateFeed
         backupDir = String(((s["backupDir"] as? String) ?? "").prefix(500))
         // A non-numeric or missing value reads as the current schema rather than 0, so a garbled
         // field cannot make every launch claim the file is from the future.
@@ -623,6 +648,7 @@ final class Store {
         if let v = d["ignoreEnd"] as? Bool { c.ignoreEnd = v }
         if let v = d["trimDb"] as? Double, v.isFinite { c.trimDb = min(12, max(-12, v)) }
         if let v = d["played"] as? Bool { c.played = v }
+        if let v = d["starred"] as? Bool { c.starred = v }
         if let v = d["configured"] as? Bool { c.configured = v }
         if let v = d["auto"] as? Bool { c.auto = v }
         if let v = d["note"] as? String { c.note = clampNote(v) }
@@ -829,6 +855,7 @@ final class Store {
         d["ignoreEnd"] = c.ignoreEnd
         if c.trimDb != 0 { d["trimDb"] = c.trimDb } else { d.removeValue(forKey: "trimDb") }
         if c.played { d["played"] = true } else { d.removeValue(forKey: "played") }
+        if c.starred { d["starred"] = true } else { d.removeValue(forKey: "starred") }
         if c.configured { d["configured"] = true } else { d.removeValue(forKey: "configured") }
         if c.auto { d["auto"] = true } else { d.removeValue(forKey: "auto") }
         // Read-it-before-you-delete-it, the same rule `writeSettings` applies to `updateFeed`
@@ -897,10 +924,13 @@ final class Store {
         // Same rule as `resetAt`, one line above: only delete a key we successfully READ as
         // empty. A newer build storing the feed as anything but a bare String reads as "" here,
         // and deleting it then would be the exact failure `resetAt` was fixed for.
-        if !updateFeed.isEmpty {
+        // Always written, empty included — that is the whole point. An empty string is a human
+        // saying "do not check"; deleting the key would make it indistinguishable from "never
+        // configured", and `defaultUpdateFeed` would then switch it back on at the next launch.
+        // This is the one `_settings` key that does NOT follow the delete-when-empty rule, and
+        // the reason is that it now has a default.
+        if s["updateFeed"] == nil || s["updateFeed"] is String {
             s["updateFeed"] = updateFeed
-        } else if s["updateFeed"] is String {
-            s.removeValue(forKey: "updateFeed")
         }
         // Never write a number LOWER than the file already carries: that would tell the build
         // that actually understands the format that it is the stale one. And if the value is not
