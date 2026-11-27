@@ -648,11 +648,25 @@ struct SongListView: View {
                         LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
                             ForEach(0..<3, id: \.self) { i in
                                 Section {
-                                    ForEach(model.visibleSongs(column: i), id: \.self) {
-                                        SongRow(path: $0)
+                                    // The SAME `collapsedCols`, rendered the other way round: in
+                                    // one scroller a folded group hides its rows instead of
+                                    // narrowing to a rail. One state, two layouts — so both
+                                    // refusals in `ColumnFold.decide` (the group holding the
+                                    // selection, and the last expanded one) apply here for free,
+                                    // and `select` unfolds from either side.
+                                    //
+                                    // This layout is not a fallback to be ignored: a window under
+                                    // 1900 pt gets it, which includes any laptop whose screen
+                                    // cannot reach that — and §6c keeps the macOS 13 target
+                                    // precisely so older crew Macs still run this.
+                                    if !model.isColumnCollapsed(i) {
+                                        ForEach(model.visibleSongs(column: i), id: \.self) {
+                                            SongRow(path: $0)
+                                        }
                                     }
                                 } header: {
-                                    ColumnHeader(index: i, count: model.visibleSongs(column: i).count)
+                                    ColumnHeader(index: i, count: model.visibleSongs(column: i).count,
+                                                 foldable: .vertical)
                                 }
                             }
                         }
@@ -933,6 +947,22 @@ struct ColumnEdge: View {
         ZStack {
             Rectangle().fill(.clear)
             Rectangle().fill(Palette.line).frame(width: 1)
+            // A grip, visible at rest. Without it the only thing saying this 8 pt strip can be
+            // dragged was the cursor changing on hover, which nobody discovers by not hovering —
+            // and the first version of this feature was reported as simply not working. §12's
+            // `P`-had-no-shortcut lesson: a control nobody can find reads as a broken one.
+            //
+            // Three 10 pt segments centred vertically, `dim` so it does not compete with the
+            // hairline it sits on. Only where the edge is actually live, so a dead boundary does
+            // not advertise a gesture that will not happen.
+            if live {
+                VStack(spacing: 4) {
+                    ForEach(0..<3, id: \.self) { _ in
+                        Capsule().fill(Palette.dim).frame(width: 2, height: 10)
+                    }
+                }
+                .allowsHitTesting(false)
+            }
         }
         .frame(width: ColumnEdge.width)
         .contentShape(Rectangle())
@@ -972,10 +1002,14 @@ struct ColumnHeader: View {
     @EnvironmentObject var model: AppModel
     let index: Int
     let count: Int
-    /// Only the wide, three-across layout can fold a column sideways. The narrow layout is one
-    /// scroller with pinned section headers, where the equivalent gesture is a vertical fold —
-    /// a different feature, deliberately not bundled in here.
-    var collapsible = false
+    /// Which idiom this header's fold control uses, or `.none` where there is no control.
+    ///
+    /// Both drive the same `AppModel.collapsedCols`; only the rendering and the glyph differ —
+    /// sideways to a rail in the 3-across layout, a disclosure of the section's rows in the one
+    /// scroller. Keeping it one state is what makes the two refusals in `ColumnFold.decide` and
+    /// `select`'s unfold apply in both without being written twice.
+    enum Fold { case none, sideways, vertical }
+    var foldable: Fold = .none
 
     var body: some View {
         HStack(spacing: 6) {
@@ -996,16 +1030,29 @@ struct ColumnHeader: View {
             // LastResort — §12's glyph lesson, where the honest test is which FONT the laid-out
             // run resolves to, because LastResort supplies a glyph for every codepoint in
             // Unicode and "the glyph exists" therefore never fails.
-            if collapsible {
-                Button { model.setColumnCollapsed(index, true) } label: {
-                    Text("\u{2039}").font(Typo.font(12, .bold))
-                        .frame(width: 20, height: 20)
+            // It has to LOOK like a button. The first version was a bare 5.48 pt grey `‹` with
+            // no background, and it was reported as the feature not working at all — §12 records
+            // the same shape for `P`, which had toggled Played since the native app shipped and
+            // was still reported as having no shortcut because nothing on screen said so. A
+            // control nobody can find is indistinguishable from one that is broken.
+            if foldable != .none {
+                let folded = model.isColumnCollapsed(index)
+                Button { model.setColumnCollapsed(index, !folded) } label: {
+                    Text(foldable == .sideways ? "\u{2039}" : (folded ? "\u{25B8}" : "\u{25BE}"))
+                        .font(Typo.font(13, .semibold, latinOnly: true))
+                        .frame(width: 22, height: 20)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(PressStyle(corner: 5))
-                .foregroundStyle(Palette.muted)
-                .accessibilityLabel("พับคอลัมน์ \(Library.columnLabels[index])")
-                .help("พับคอลัมน์นี้ให้เหลือราง เพื่อให้คอลัมน์อื่นกว้างขึ้น")
+                .foregroundStyle(Palette.text)
+                .background(Palette.panel2)
+                .overlay(RoundedRectangle(cornerRadius: 5).stroke(Palette.line)
+                    .allowsHitTesting(false))
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .accessibilityLabel((folded ? "เปิดกลุ่ม " : "พับกลุ่ม ") + Library.columnLabels[index])
+                .help(foldable == .sideways
+                      ? "พับคอลัมน์นี้ให้เหลือราง เพื่อให้คอลัมน์อื่นกว้างขึ้น"
+                      : (folded ? "เปิดกลุ่มนี้คืน" : "พับกลุ่มนี้ให้ซ่อนรายการเพลง"))
             }
         }
         .padding(.horizontal, 10).padding(.vertical, 7)
@@ -1057,7 +1104,7 @@ struct ColumnView: View {
     private var expanded: some View {
         let list = model.visibleSongs(column: index)
         return VStack(spacing: 0) {
-            ColumnHeader(index: index, count: list.count, collapsible: true)
+            ColumnHeader(index: index, count: list.count, foldable: .sideways)
 
             // ScrollViewReader: ↑/↓ move the selection without scrolling, so past ~20 songs the
             // GM was navigating blind — the highlighted row was off-screen.

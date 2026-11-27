@@ -1428,6 +1428,39 @@ Six things, each for a reason that is invisible in a screenshot:
 and its negative control, deleting the selection guard, fails exactly the three assertions that
 are about it. What no check here can establish is that the UI calls it; see §13.
 
+### The window opened too narrow for its own layout
+
+**`isWide` needs 1900 pt and `defaultSize` was 1600, so the app opened in the NARROW one-scroller
+layout even on the production 2560x1080 panel.** 900 pt of song list + 340 of SETUP + the ~660 the
+centre pane needs for its waveform floor is 1900; at 1600 the left pane is 300 and the three
+columns §8c treats as the primary design — sized at 900 on request — were not what the operator
+saw unless they happened to widen the window.
+
+Reported as *"ลากปรับขนาดแต่ละ COLUMN ไม่ได้"* and *"Collapse Expand Group ไม่ทำงาน"*, because
+both controls exist only in the wide layout: from inside the narrow one the whole feature looked
+absent. The screen was measured at 2518x1050 usable, i.e. the wide layout was always reachable —
+nothing was broken except the default.
+
+Three things came out of it, and the first is the general lesson:
+
+- **A layout breakpoint above the default window size means the default experience is the
+  fallback.** Nothing in the app said which layout was in force, and no diagnostic could — this
+  is reachable only by looking at a running window.
+- `defaultSize` is **2000x1000**. macOS fits a default down to the screen, so a laptop that cannot
+  reach 1900 gets its own width and the narrow layout. It applies only to a window with no saved
+  frame, so it fixes fresh installs rather than a machine that has already stored 1600.
+- **The narrow layout can fold a group too**, which it could not before. Same `collapsedCols`,
+  rendered the other way round: a folded group hides its rows instead of narrowing to a rail. One
+  state, two layouts, so both refusals in `ColumnFold.decide` and `select`'s unfold apply in both
+  without being written twice. §6c keeps the macOS 13 target so older crew Macs still run this,
+  and some of those are laptops that can never reach 1900 — the narrow layout is not a fallback to
+  be left half-built.
+
+> Still open (§13): the wide layout could begin at ~1700 if `leftPaneWidth` shrank the list on the
+> way down instead of being a step function. `AppModel.leftPaneWidth` is deliberately the one
+> source for it (§12 records 120 pt of divergence between the list and the log pane), so an
+> adaptive version has to stay that way.
+
 ### Dragging a column edge (`ColumnLayout`, `ColumnEdge`)
 
 Asked for as *"อยากให้แบบลากตรงขอบเพื่อปรับขยายได้"*.
@@ -1454,6 +1487,13 @@ forbidding this, and do not read this as permission to make the PANE boundary dr
   resized column still shows every one of its songs, so unlike `collapsedCols` it cannot hide
   work — `ColumnLayout.minWidth` (140 pt) is what guarantees that. Persisting it is one
   `_settings` key if that turns out to be wanted.
+- **It shows a grip at rest.** The first version's only affordance was the cursor changing on
+  hover, which nobody discovers by not hovering, and the feature was reported as not working.
+  Three 10 pt `dim` segments down the middle, drawn only where the edge is live so a dead
+  boundary does not advertise a gesture that cannot happen. §12's `P`-had-no-shortcut lesson:
+  **a control nobody can find is indistinguishable from one that is broken**, and the same
+  correction applied to the fold button, which was a bare 5.48 pt grey `‹` with no background and
+  now reads as a button.
 - **The edge is 8 pt wide itself**, with the hairline down its middle, rather than an 8 pt
   overlay on a 1 pt parent — which would depend on hit-testing reaching outside the parent's
   bounds. `AppModel.columnWidths` takes both edges off the pane first, so the columns know they

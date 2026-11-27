@@ -190,7 +190,19 @@ struct IntroPlayerApp: App {
                 // `DropInitialFocus` — the app was opening with every letter shortcut dead.
                 .background(DropInitialFocus().frame(width: 0, height: 0))
         }
-        .defaultSize(width: 1600, height: 900)
+        // **2000, not 1600, and the old value was a real defect.** `isWide` needs 1900 — 900 pt
+        // of song list, 340 of SETUP and the ~660 the centre pane needs for its waveform floor —
+        // so a 1600 pt default opened the app in the NARROW one-scroller layout even on the
+        // production 2560x1080 panel. The three-column list §8c treats as the primary design, and
+        // sized at 900 pt on request, was therefore not what the operator saw unless they happened
+        // to widen the window; the fold and edge-drag controls, which exist only in the wide
+        // layout, looked simply absent. Reported as "ลากปรับขนาดไม่ได้ / collapse ไม่ทำงาน".
+        //
+        // macOS fits a default size down to the screen, so a laptop that cannot reach 1900 gets
+        // its own width and the narrow layout — which is why the narrow layout can fold a group
+        // too (§8c). `defaultSize` only applies to a window with no saved frame, so this fixes
+        // fresh installs, not a machine that has already stored 1600.
+        .defaultSize(width: 2000, height: 1000)
         .commands { CommandGroup(replacing: .newItem) {} }   // no File > New
     }
 }
