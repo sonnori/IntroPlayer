@@ -963,13 +963,27 @@ struct PaneEdge: View {
             }
         }
         .gesture(
-            DragGesture(minimumDistance: 4)
+            // **`.global`, and this is the whole fix for the judder.** A `DragGesture` defaults
+            // to `.local`, which measures translation against the view's own coordinate space —
+            // and this view MOVES as a direct result of the drag. So each sample was measured
+            // from an origin the previous sample had just shifted, a feedback loop with gain
+            // about 1, which oscillates. Measured on the screen recording: the boundary swung
+            // **40–80 px back and forth between consecutive frames** while the mouse moved
+            // steadily one way. Oscillation, not lag.
+            //
+            // A global space does not move, so the translation is what the mouse actually did.
+            // `ColumnEdge` has the identical bug and the identical fix.
+            DragGesture(minimumDistance: 4, coordinateSpace: .global)
                 .onChanged { g in
                     let d = g.translation.width - dragged
                     dragged = g.translation.width
                     model.dragPaneEdge(after: index, by: d)
                 }
-                .onEnded { _ in dragged = 0 }
+                // Persist ONCE, on release. `dragPaneEdge` used to call `settingsChanged()`,
+                // which is `writeSettings()` + `scheduleSave()` — so every mouse sample rebuilt
+                // the whole `_settings` dictionary, guards and all, at 60 Hz for a value only
+                // the last one of them could matter to.
+                .onEnded { _ in dragged = 0; model.commitPaneWidths() }
         )
         .onTapGesture(count: 2) { model.resetPaneWidths() }
         .help("ลากเพื่อปรับความกว้างแผง · ดับเบิลคลิกเพื่อคืนค่าเริ่มต้น")
@@ -1041,7 +1055,9 @@ struct ColumnEdge: View {
             }
         }
         .gesture(
-            DragGesture(minimumDistance: 2)
+            // `.global` for the reason spelled out in `PaneEdge`: this view moves as a result
+            // of the drag, so a `.local` translation feeds back on itself and oscillates.
+            DragGesture(minimumDistance: 2, coordinateSpace: .global)
                 .onChanged { g in
                     guard live else { return }
                     // The gesture reports total translation from the press, so feed the model the

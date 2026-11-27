@@ -99,8 +99,16 @@ final class AppModel: ObservableObject {
                                                 - PaneEdge.width * CGFloat(PaneLayout.count - 1))
         else { return }
         store.paneSplit = next
-        store.settingsChanged()
+        // NOT `settingsChanged()` here: that is `writeSettings()` + `scheduleSave()`, and a drag
+        // delivers ~60 samples a second of which only the last can matter to the file. The widths
+        // are live immediately; `commitPaneWidths` persists them on release.
         objectWillChange.send()
+    }
+
+    /// Called from the handle's `onEnded`. Separate from `dragPaneEdge` so the per-sample path
+    /// stays free of the settings write.
+    func commitPaneWidths() {
+        store.settingsChanged()
     }
 
     func resetPaneWidths() {

@@ -1486,6 +1486,23 @@ risk, so it is carried rather than waved away:
   `App.swift`'s declared `minWidth: 1100`.
 - **The handle is a deliberate 8 pt target with a visible grip**, so a drag is something you aim
   at rather than something that happens to you.
+- **`coordinateSpace: .global`, and it is not a detail.** A `DragGesture` defaults to `.local`,
+  which measures translation against the view's own coordinate space — and a splitter handle
+  MOVES as a direct result of the drag. Each sample was therefore measured from an origin the
+  previous one had just shifted: a feedback loop with gain about 1, which oscillates. Reported as
+  *"ระหว่าง drag อยู่มันกึกๆๆๆ"*, and measured off the screen recording rather than guessed — the
+  boundary swung **40–80 px back and forth between consecutive frames** while the mouse moved
+  steadily one way. **Oscillation, not lag**, which is what named the cause: a throughput problem
+  lags behind the cursor, it does not overshoot both ways. `ColumnEdge` had the identical bug.
+- **The settings write happens once, on release.** `dragPaneEdge` used to call
+  `settingsChanged()`, which is `writeSettings()` + `scheduleSave()` — so every mouse sample
+  rebuilt the whole `_settings` dictionary, guards and all, for a value only the last sample could
+  matter to. `commitPaneWidths()` is the `onEnded` half.
+
+> Measured and accepted: a live pane drag invalidates `Analysis.columnPeaks`, whose key includes
+> the width, so the waveform re-walks its envelope once per frame — **2.231 ms** (`--overview`).
+> At 60 Hz that is ~13% of a core and about an eighth of a frame budget. Inherent to resizing a
+> pane that draws a waveform, and well clear of the oscillation that was the actual complaint.
 - **Nothing about audio depends on it.** A pane width changes the waveform's drawn width, which
   `Analysis.columnPeaks` re-derives from the view window; the playhead is time-based.
 - **Double-click resets.**
