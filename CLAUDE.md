@@ -1393,8 +1393,9 @@ column, and a file with no leading digit lands in column 3.
 The three columns are `.frame(maxWidth: .infinity)` in an `HStack`, i.e. fixed thirds — 299 pt
 each of the 898 the pane has after its two dividers. Measured on the real round, which is
 **7 / 1 / 1**: two thirds of the pane renders two songs while seven share the other third. A
-folded column becomes a 36 pt rail and `1xx` gets ~826 pt, **2.8×**, which is what decides whether
-two 2-line clamped Thai titles still tell two songs apart.
+folded column becomes a 36 pt rail and `1xx` gets **812 pt against 294.7**, which is what decides
+whether two 2-line clamped Thai titles still tell two songs apart. Folding one gives the other two
+424 pt each.
 
 > A fully prepared taping is presumably nearer 7/7/7 and the gain shrinks. This is worth most on
 > a round that is half-prepared or uses one group.
@@ -1453,6 +1454,10 @@ forbidding this, and do not read this as permission to make the PANE boundary dr
   resized column still shows every one of its songs, so unlike `collapsedCols` it cannot hide
   work — `ColumnLayout.minWidth` (140 pt) is what guarantees that. Persisting it is one
   `_settings` key if that turns out to be wanted.
+- **The edge is 8 pt wide itself**, with the hairline down its middle, rather than an 8 pt
+  overlay on a 1 pt parent — which would depend on hit-testing reaching outside the parent's
+  bounds. `AppModel.columnWidths` takes both edges off the pane first, so the columns know they
+  are there: 900 − 16 = 884 to divide.
 - **A handle exists only between two EXPANDED neighbours.** With the middle column folded the two
   expanded ones are not adjacent, so there is no handle — a handle whose two sides are not the
   things it sits between is worse than none.

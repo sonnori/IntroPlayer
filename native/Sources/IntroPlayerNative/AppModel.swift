@@ -771,12 +771,13 @@ final class AppModel: ObservableObject {
 
     func isColumnCollapsed(_ i: Int) -> Bool { collapsedCols.contains(i) }
 
-    /// Point width per column, for the wide 3-across layout. The two 1 pt dividers come off the
-    /// pane first, or three fixed frames plus two dividers overflow it and the third column's
-    /// rows get clipped.
+    /// Point width per column, for the wide 3-across layout. The two edges come off the pane
+    /// FIRST, or three fixed frames plus two edges overflow it and the third column's rows get
+    /// clipped — and the edges are 8 pt each, not 1, because that is what makes them grabbable
+    /// without an overlay reaching outside its parent.
     func columnWidths() -> [CGFloat] {
         ColumnLayout.widths(fractions: colFractions, folded: collapsedCols,
-                            total: AppModel.leftPaneWidth(wide: isWide) - 2,
+                            total: AppModel.leftPaneWidth(wide: isWide) - ColumnEdge.width * 2,
                             railWidth: AppModel.collapsedColWidth,
                             columns: Library.columnLabels.count)
     }
@@ -791,7 +792,7 @@ final class AppModel: ObservableObject {
     func dragColumnEdge(after i: Int, by dx: CGFloat) {
         guard let next = ColumnLayout.drag(after: i, dx: dx, fractions: colFractions,
                                            folded: collapsedCols,
-                                           total: AppModel.leftPaneWidth(wide: isWide) - 2,
+                                           total: AppModel.leftPaneWidth(wide: isWide) - ColumnEdge.width * 2,
                                            railWidth: AppModel.collapsedColWidth,
                                            columns: Library.columnLabels.count)
         else { return }

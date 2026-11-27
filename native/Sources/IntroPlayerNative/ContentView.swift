@@ -920,53 +920,51 @@ struct ColumnEdge: View {
     let index: Int
     /// 8 pt — the divider is 1 pt, which is not a mouse target. Taken from the gap between the
     /// columns' own padding, so no row loses width to it.
-    private static let grab: CGFloat = 8
+    /// 8 pt. A 1 pt divider is not a mouse target, and the edge is **itself** this wide with the
+    /// hairline drawn down its middle — rather than an 8 pt overlay on a 1 pt parent, which would
+    /// depend on hit-testing outside the parent's bounds. `AppModel.columnWidths` takes these off
+    /// the pane, so the columns know they are there.
+    static let width: CGFloat = 8
     @State private var cursorPushed = false
     @State private var dragged: CGFloat = 0
 
     var body: some View {
         let live = model.canDragColumnEdge(after: index)
-        Rectangle().fill(Palette.line).frame(width: 1)
-            .overlay {
-                if live {
-                    // Wider than its parent on purpose: the hit area straddles the divider
-                    // instead of pushing the columns apart.
-                    Rectangle().fill(.clear)
-                        .frame(width: ColumnEdge.grab)
-                        .contentShape(Rectangle())
-                        .onHover { inside in
-                            // Balanced by the flag, not by trusting the pair of callbacks: an
-                            // unmatched `push` leaves the resize cursor over the whole app, and
-                            // an unmatched `pop` takes somebody else's off the stack.
-                            if inside, !cursorPushed {
-                                NSCursor.resizeLeftRight.push(); cursorPushed = true
-                            } else if !inside, cursorPushed {
-                                NSCursor.pop(); cursorPushed = false
-                            }
-                        }
-                        .gesture(
-                            DragGesture(minimumDistance: 2)
-                                .onChanged { g in
-                                    // The gesture reports total translation from the press, so
-                                    // feed the model the DELTA since the last sample or the drag
-                                    // accelerates away from the mouse.
-                                    let d = g.translation.width - dragged
-                                    dragged = g.translation.width
-                                    model.dragColumnEdge(after: index, by: d)
-                                }
-                                .onEnded { _ in dragged = 0 }
-                        )
-                        .onTapGesture(count: 2) { model.resetColumnWidths() }
-                        .help("ลากเพื่อปรับความกว้าง · ดับเบิลคลิกเพื่อคืนเป็นสามส่วนเท่ากัน")
-                        .accessibilityLabel("ปรับความกว้างคอลัมน์")
+        ZStack {
+            Rectangle().fill(.clear)
+            Rectangle().fill(Palette.line).frame(width: 1)
+        }
+        .frame(width: ColumnEdge.width)
+        .contentShape(Rectangle())
+        .onHover { inside in
+            guard live else { return }
+            // Balanced by the flag, not by trusting the pair of callbacks: an unmatched `push`
+            // leaves the resize cursor over the whole app, and an unmatched `pop` takes somebody
+            // else's off the stack.
+            if inside, !cursorPushed {
+                NSCursor.resizeLeftRight.push(); cursorPushed = true
+            } else if !inside, cursorPushed {
+                NSCursor.pop(); cursorPushed = false
+            }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 2)
+                .onChanged { g in
+                    guard live else { return }
+                    // The gesture reports total translation from the press, so feed the model the
+                    // DELTA since the last sample or the drag accelerates away from the mouse.
+                    let d = g.translation.width - dragged
+                    dragged = g.translation.width
+                    model.dragColumnEdge(after: index, by: d)
                 }
-            }
-            // Without this the 8 pt overlay is clipped to the 1 pt parent and only a 1 pt strip
-            // is grabbable — the handle would look present and be unusable.
-            .zIndex(1)
-            .onDisappear {
-                if cursorPushed { NSCursor.pop(); cursorPushed = false }
-            }
+                .onEnded { _ in dragged = 0 }
+        )
+        .onTapGesture(count: 2) { if live { model.resetColumnWidths() } }
+        .help(live ? "ลากเพื่อปรับความกว้าง · ดับเบิลคลิกเพื่อคืนเป็นสามส่วนเท่ากัน" : "")
+        .accessibilityHidden(!live)
+        .accessibilityLabel("ปรับความกว้างคอลัมน์")
+        // The log pane unmounts this list (§12), so a pushed cursor has to come back off here.
+        .onDisappear { if cursorPushed { NSCursor.pop(); cursorPushed = false } }
     }
 }
 
