@@ -3606,6 +3606,90 @@ Product / UX
   live on an `AppModel` that no suite constructs — every one of them can be broken with the whole
   suite green. The blocker is that `AppModel.init` loads the real store, seeds and snapshots; a
   `AppModel(rawForTest:)` in the shape of `Store(rawForTest:)` is what would unlock all of them.
+- **"Has this song been used in another taping?" — brainstormed with five parallel reviews,
+  parked until the next shoot.** Asked as *"ปัญหาตอนนี้คือไม่รู้ว่าใช้เพลงซ้ำกับ Set อื่นไหม"*.
+  Nothing was built. Everything below was MEASURED against the real library, so it does not have
+  to be re-derived.
+
+  **The reframe that matters most: there is no history to query yet.** `songs/` holds exactly one
+  round (`SAUCEBKK/`), all 9 non-`_settings` config keys are under it, all 17 launch snapshots
+  contain only it, and **no basename appears in two rounds**. `log.json` is 28 events, 6 distinct
+  paths, one playlist, 2026-08-05 → 2026-11-27 — and most inter-event gaps are 1–3 seconds, i.e.
+  dev keypresses rather than takes. So this is not "query my history", it is "I have no history
+  to query", and whatever is built is populated only by rounds run on THIS machine.
+
+  **Deriving it from `log.json` alone is not safe, and the live files prove it.** `config.json`
+  marks 6 songs `played: true` and the log knows 6 distinct paths — **and they are not the same
+  six**: `105_Mirrr…` has `played: true` and **zero** log events. Three structural gaps behind
+  that: §8d excludes `reveal` on purpose, so an airing nobody scored leaves no trace;
+  `LogStore.clear` wipes the log, which is a reasonable per-taping action but fatal to a
+  multi-year record; and `pruneOrphans` deletes config entries whose files are gone — which is
+  exactly "aired in a past set, folder since archived". There is a button whose job is to delete
+  the answer.
+
+  **Identity is the root problem, and the owner named the right fix: type the title and artist.**
+  Measured, the automatic routes are all dead ends — **0 of 9 files carry `TPE1`/`TALB`/`TRCK`**
+  (they are yt-dlp remuxes with only `TDRC`/`TIT2`/`TSSE`/`APIC`); a content hash fails because
+  the library already holds mixed encodes (102/106 are 48 kHz/64 kbps against 44.1/128); a
+  chroma fingerprint is over-engineering the code itself argues against (`similarity` is
+  time-aligned, real music lands in a band only 0.16 wide, and there are **zero** known
+  same-song pairs to tune against). That leaves the normalised filename, which breaks on Thai:
+  `นายโอเคมั๊ย` and the ordinary alternate spelling `นายโอเคมั้ย` are different strings and no
+  Apple framework folds them.
+
+  And a filename cannot be parsed into artist + title either: **the order flips between files**.
+  `THE TOYS - ลาลาลอย` is artist-first, `Ooh! - Palmy` is title-first, and
+  `Mirrr Ft. BLVCKHEART ขึ้นใจ (3am call)` has no separator at all — **2 of 9 unparseable, and
+  wrong silently.**
+
+  So: **typed `title` + `artist` fields, as the first piece of work, not an extra.** Two
+  conditions, both with precedent in this app:
+  - **Seeded from `Library.displayTitle`, so the setter EDITS rather than types.** §8e measured
+    what an optional step costs: 8 of 9 songs still sat on `hook: 60`. §7a4's answer was to make
+    it a proposal to confirm, and the `Return`/`Tab` review sweep already exists to carry it.
+  - **Artist gets autocomplete from the library**, or the spelling problem simply moves from the
+    filename into the field. `Store.tagsInUse` already solves exactly this — a registry derived
+    from use, deduped on `tagKey`, most-used spelling wins. Copy it rather than reinvent it.
+
+  Both fields are `note`-class: not in `SongBase`, no `MarkerField` case, no on-site badge,
+  written through **`updateConfigQuiet`**, travelling additively in `round.json`. The payoff is
+  larger than the feature that prompted it — the centre pane would show a real title instead of
+  `(100%)` and `(recall)`, and §8d's CSV, which is what the edit room reads, becomes legible.
+
+  **Then, in order:** (1) a read-only `Library.airedElsewhere(path, events)` — a pure function,
+  therefore testable without an `AppModel`, which pays off §13's own item 2 — surfaced in the
+  SETUP donor card (it already appears exactly when a reused song is detected) and as a
+  **non-blocking** `Preflight` row; (2) a separate append-only ledger file, because `log.json`
+  and `config.json` both have buttons that erase the answer, with `path` and `title` denormalised
+  so an archived round is still readable on a support call; (3) cross-machine, as
+  `songs/<round>/aired.json` beside `round.json` — **not inside it**: the package is keyed by
+  file name and scoped to one round (`Handoff.swift:18-20`) and `plan` discards names with no
+  local audio as orphans, so the useful information, which is about songs NOT in the round, is
+  structurally unrepresentable there. Merge as a set UNION of `(songKey, round, date, outcome)`,
+  never a last-writer — two setters marking the same song on different days both win, and no
+  clock is ever compared, which is §8d's own rule.
+
+  **Rules every version must keep:** advisory, never a verdict — a false "already used" discards
+  a good song, a false "never used" puts an aired one back on camera, and §8f's "a wrong sleeve
+  is worse than no sleeve" applies. Show the evidence (round, date, take) rather than a badge.
+  Never block the handover (§8e). No new hue — §6d has none spare, and the song list's last
+  amber was spent on the ★. Do not share the `played` dimming: it means *this* taping, and
+  confusing the two sends the operator past a usable question.
+
+  **Three defects found while brainstorming this, all independent of it and all worth fixing
+  anyway:**
+  1. **`LogStore.save()` rebuilds each row from the four fields `load()` decoded**, so any field
+     a newer build adds to `log.json` is erased on the next scored keypress. This is §13's own
+     `round.json` defect, already live in `log.json` — and it blocks §13's other idea of putting
+     the app version into log events.
+  2. **`Snapshot.read()` names its two files literally and returns nil when `config.json` is
+     empty**, so a third data file would never be backed up — and today an empty config already
+     vetoes the log's snapshot. §6e's lesson: a rule that names its subjects literally stops
+     covering the subject that arrives later.
+  3. **`donor(for:)` compares the FULL basename**, track-number prefix and extension included, so
+     the same song filed as `102_…` in one round and `204_…` in the next never matches. The
+     feature exists for exactly that case and does not fire for it.
+
 - **Port the handover UI to the web version.** The web app plays, marks and logs as before and
   round-trips `base` untouched, but export / import / diff / pre-flight exist only in the native
   app. Only matters if the setter's machine is not a Mac.
